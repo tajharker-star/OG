@@ -1,0 +1,70 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: 'npm'
+          cache-dependency-path: './client/package-lock.json'
+
+      - name: Install Server Dependencies
+        run: |
+          cd server
+          npm install
+
+      - name: Build Server
+        run: |
+          cd server
+          npm run build
+
+      - name: Install Client Dependencies
+        run: |
+          cd client
+          npm install
+
+      - name: Install Playwright Browsers
+        run: |
+          cd client
+          npx playwright install --with-deps
+
+      - name: Build Client
+        run: |
+          cd client
+          npm run build
+
+      - name: Package Electron App (Unpacked)
+        run: |
+          cd client
+          npm run build-server
+          npx electron-builder --dir
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Smoke Test
+        run: |
+          cd client
+          npm run test:smoke
+
+      - name: Upload Screenshot
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: launch-screenshot-${{ matrix.os }}
+          path: client/tests/output/launch-screenshot.png

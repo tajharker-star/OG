@@ -1,0 +1,17 @@
+"appbuild"
+{
+	"appid"	"4432220"
+	"desc" "Conquerors: Domination Demo Build"
+	"buildoutput" "/Users/codyharker/Desktop/cody/OG/client/steampipe/output"
+	"contentroot" "/Users/codyharker/Desktop/cody/OG/client"
+	"setlive" ""
+	"preview" "0"
+	"local" ""
+	
+	"depots"
+	{
+		"4432223" "depot_build_4432223.vdf"
+		"4432222" "depot_build_4432222.vdf"
+		"4432224" "depot_build_4432224.vdf"
+	}
+}

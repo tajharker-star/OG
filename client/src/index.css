@@ -1,0 +1,108 @@
+:root {
+  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  color-scheme: dark;
+  color: var(--text-primary);
+  background-color: var(--bg-main);
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+
+  /* Core Palette - Clean, Darker, Modern */
+  --bg-main: #050505; /* Deepest black */
+  --bg-panel: rgba(10, 10, 12, 0.8); /* Very dark, transparent for glass effect */
+  --bg-modal: rgba(0, 0, 0, 0.85); /* Dark transparency for modals */
+  --bg-dark-overlay: rgba(0, 0, 0, 0.7);
+  --bg-darker-overlay: rgba(0, 0, 0, 0.9);
+
+  --border-subtle: rgba(255, 255, 255, 0.08); /* Very subtle borders */
+  --border-color: rgba(255, 255, 255, 0.08); /* Legacy support */
+
+  /* Text */
+  --text-primary: #F0F2F5; /* Almost white */
+  --text-secondary: #A0A5B0; /* Muted gray */
+  --text-muted: #6B7280; /* Darker gray */
+  --text-disabled: #374151;
+
+  /* Primary Action (Green) - Vibrant but clean */
+  --primary-color: #10B981; /* Emerald 500 */
+  --primary-hover: #34D399; /* Emerald 400 */
+  --primary-active: #059669; /* Emerald 600 */
+  --primary-disabled: #064E3B;
+  
+  /* Legacy Accent Mapping */
+  --accent-color: #10B981;
+
+  /* Neutral Buttons */
+  --btn-neutral-bg: rgba(255, 255, 255, 0.05);
+  --btn-neutral-hover: rgba(16, 185, 129, 0.3);
+  --btn-neutral-active: rgba(16, 185, 129, 0.5);
+
+  /* Status Colors */
+  --danger-color: #EF4444; /* Red 500 */
+  --warning-color: #F59E0B; /* Amber 500 */
+  --info-color: #3B82F6; /* Blue 500 */
+  --success-color: #10B981; /* Emerald 500 */
+
+  /* Item Backgrounds */
+  --item-bg: rgba(255, 255, 255, 0.03);
+  --item-bg-hover: rgba(16, 185, 129, 0.3);
+  
+  /* Spacing */
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 16px;
+  --spacing-lg: 24px;
+  --spacing-xl: 32px;
+  
+  /* Z-Index Layers */
+  --z-game: 0;
+  --z-ui-base: 100;
+  --z-ui-panel: 500;
+  --z-hud: 800;
+  --z-menu: 3000;
+  --z-modal-backdrop: 9000;
+  --z-modal: 10000;
+  --z-overlay: 20000;
+  --z-tooltip: 30000;
+  --z-cursor: 99999;
+}
+
+a {
+  font-weight: 500;
+  color: #646cff;
+  text-decoration: inherit;
+}
+a:hover {
+  color: #535bf2;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background-color: var(--bg-main);
+  color: var(--text-primary);
+}
+
+#root {
+  width: 100%;
+  height: 100%;
+}
+
+#game-container {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+h1 {
+  font-size: 3.2em;
+  line-height: 1.1;
+}

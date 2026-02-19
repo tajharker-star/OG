@@ -1,0 +1,113 @@
+.connection-lost-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(0, 0, 0, 0.85);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 10000; /* Topmost layer */
+    backdrop-filter: blur(5px);
+}
+
+.connection-lost-modal {
+    background: #1a1a1a;
+    border: 2px solid #ff4444;
+    border-radius: 12px;
+    padding: 30px;
+    width: 400px;
+    max-width: 90%;
+    text-align: center;
+    box-shadow: 0 0 30px rgba(255, 68, 68, 0.3);
+    animation: fadeIn 0.3s ease-out;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: scale(0.9); }
+    to { opacity: 1; transform: scale(1); }
+}
+
+.connection-lost-title {
+    color: #ff4444;
+    font-size: 24px;
+    margin: 0 0 20px 0;
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.connection-lost-details {
+    margin-bottom: 25px;
+    background: rgba(0, 0, 0, 0.3);
+    padding: 15px;
+    border-radius: 8px;
+}
+
+.status-text {
+    color: #fff;
+    font-size: 18px;
+    margin: 0 0 10px 0;
+    font-weight: 600;
+}
+
+.reason-text {
+    color: #aaa;
+    font-size: 14px;
+    margin: 5px 0;
+    font-family: monospace;
+}
+
+.endpoint-text {
+    color: #666;
+    font-size: 12px;
+    margin: 5px 0;
+}
+
+.retry-text {
+    color: #ffd700;
+    font-size: 14px;
+    margin-top: 10px;
+    font-weight: bold;
+}
+
+.connection-lost-actions {
+    display: flex;
+    gap: 15px;
+    justify-content: center;
+}
+
+.retry-btn, .main-menu-btn {
+    padding: 10px 20px;
+    border-radius: 6px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: all 0.2s;
+    border: none;
+    font-size: 14px;
+    text-transform: uppercase;
+}
+
+.retry-btn {
+    background: #ff4444;
+    color: #fff;
+}
+
+.retry-btn:hover {
+    background: #ff6666;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(255, 68, 68, 0.3);
+}
+
+.main-menu-btn {
+    background: #333;
+    color: #ccc;
+    border: 1px solid #555;
+}
+
+.main-menu-btn:hover {
+    background: #444;
+    color: #fff;
+    border-color: #777;
+}

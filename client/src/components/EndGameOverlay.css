@@ -1,0 +1,173 @@
+.end-game-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 9999; /* High z-layer as requested */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    overflow: hidden;
+    pointer-events: auto; /* Block inputs */
+}
+
+.end-game-overlay.defeat {
+    background: linear-gradient(rgba(0, 0, 0, 0.8), rgba(50, 0, 0, 0.9));
+}
+
+.end-game-overlay.victory {
+    background: linear-gradient(rgba(0, 0, 0, 0.7), rgba(0, 50, 100, 0.8));
+}
+
+.end-game-content {
+    position: relative;
+    z-index: 10001;
+    text-align: center;
+    color: white;
+    padding: 40px 60px;
+    border-radius: 15px;
+    background: rgba(0, 0, 0, 0.85);
+    border: 2px solid rgba(255, 255, 255, 0.1);
+    box-shadow: 0 0 50px rgba(0, 0, 0, 0.8);
+    animation: popIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    min-width: 400px;
+}
+
+.end-game-overlay.victory .end-game-content {
+    border-color: rgba(255, 215, 0, 0.5);
+    box-shadow: 0 0 50px rgba(255, 215, 0, 0.2);
+}
+
+.end-game-overlay.defeat .end-game-content {
+    border-color: rgba(255, 50, 50, 0.5);
+    box-shadow: 0 0 50px rgba(255, 0, 0, 0.2);
+}
+
+.end-game-title {
+    font-size: 72px;
+    font-weight: 900;
+    margin: 0 0 10px 0;
+    text-transform: uppercase;
+    letter-spacing: 5px;
+    text-shadow: 0 5px 15px rgba(0, 0, 0, 0.5);
+}
+
+.end-game-overlay.victory .end-game-title {
+    color: #ffd700;
+    background: linear-gradient(to bottom, #ffd700, #ff8c00);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.end-game-overlay.defeat .end-game-title {
+    color: #ff3333;
+    background: linear-gradient(to bottom, #ff3333, #990000);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.end-game-tagline {
+    font-size: 24px;
+    color: #ccc;
+    margin-bottom: 40px;
+    font-style: italic;
+    opacity: 0.9;
+}
+
+.end-game-actions {
+    display: flex;
+    gap: 20px;
+    justify-content: center;
+}
+
+.end-game-btn {
+    padding: 15px 30px;
+    font-size: 18px;
+    font-weight: bold;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    text-transform: uppercase;
+    transition: all 0.2s;
+}
+
+.end-game-btn.primary {
+    background-color: #2196f3;
+    color: white;
+    box-shadow: 0 4px 0 #1565c0;
+}
+
+.end-game-btn.primary:hover {
+    background-color: #1e88e5;
+    transform: translateY(-2px);
+    box-shadow: 0 6px 0 #1565c0;
+}
+
+.end-game-btn.primary:active {
+    transform: translateY(2px);
+    box-shadow: 0 2px 0 #1565c0;
+}
+
+.end-game-btn.secondary {
+    background-color: #444;
+    color: white;
+    box-shadow: 0 4px 0 #222;
+}
+
+.end-game-btn.secondary:hover {
+    background-color: #555;
+    transform: translateY(-2px);
+    box-shadow: 0 6px 0 #222;
+}
+
+.end-game-btn.secondary:active {
+    transform: translateY(2px);
+    box-shadow: 0 2px 0 #222;
+}
+
+/* Defeat FX - Smoke/Embers */
+.defeat-fx {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 10000;
+    pointer-events: none;
+    overflow: hidden;
+}
+
+.ember {
+    position: absolute;
+    bottom: -10px;
+    width: 4px;
+    height: 4px;
+    background: #ff4500;
+    border-radius: 50%;
+    box-shadow: 0 0 10px #ff4500;
+    animation: rise 3s linear infinite;
+}
+
+@keyframes rise {
+    0% { transform: translateY(0) scale(1); opacity: 1; }
+    100% { transform: translateY(-100vh) scale(0); opacity: 0; }
+}
+
+@keyframes popIn {
+    0% { transform: scale(0.8); opacity: 0; }
+    100% { transform: scale(1); opacity: 1; }
+}
+
+/* Input Blocker */
+.input-blocker {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 9998; /* Just below overlay */
+    background: transparent;
+    cursor: default;
+}

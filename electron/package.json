@@ -1,0 +1,50 @@
+{
+  "name": "conquerors-dominion-desktop",
+  "version": "1.0.0",
+  "description": "Desktop wrapper for Conquerors: Dominion",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "author": "Cody",
+  "license": "ISC",
+  "build": {
+    "appId": "com.codyharker.conquerors",
+    "mac": {
+      "category": "public.app-category.games"
+    },
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "loading.html",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../server/dist",
+        "to": "server/dist"
+      },
+      {
+        "from": "../server/package.json",
+        "to": "server/package.json"
+      },
+      {
+        "from": "../server/node_modules",
+        "to": "server/node_modules"
+      },
+      {
+        "from": "../client/dist",
+        "to": "client/dist"
+      }
+    ]
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1"
+  }
+}

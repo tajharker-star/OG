@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+electron/dist/
+client/dist/
+client/dist_electron/
+server/dist/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+
+# Electron packaged server copy
+client/server/
+
+# Test output
+client/tests/output/
+test-electron/
+
+# Binary tools
+playit
+tools/
+
+# IDE
+.vscode/
+.idea/
+
+# Temporary test files
+main_test.cjs
+test_main.cjs
+test_playit_logic.js
+client/simple_test*.cjs

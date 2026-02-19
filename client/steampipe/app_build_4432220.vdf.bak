@@ -1,0 +1,17 @@
+"appbuild"
+{
+	"appid"	"4432220"
+	"desc" "Conquerors: Domination Demo Build"
+	"buildoutput" "..\output"
+	"contentroot" ".."
+	"setlive" ""
+	"preview" "0"
+	"local" ""
+	
+	"depots"
+	{
+		"4432221" "depot_build_4432221.vdf"
+		"4432222" "depot_build_4432222.vdf"
+		"4432223" "depot_build_4432223.vdf"
+	}
+}

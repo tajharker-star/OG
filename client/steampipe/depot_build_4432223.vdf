@@ -1,0 +1,11 @@
+"DepotBuild"
+{
+	"DepotID" "4432223"
+	"FileMapping"
+	{
+		"LocalPath" "dist_electron/win-unpacked/*"
+		"DepotPath" "."
+		"recursive" "1"
+	}
+	"FileExclusion" "*.pdb"
+}

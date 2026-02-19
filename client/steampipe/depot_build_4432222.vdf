@@ -1,0 +1,11 @@
+"DepotBuild"
+{
+	"DepotID" "4432222"
+	"FileMapping"
+	{
+		"LocalPath" "dist_electron/mac/*"
+		"DepotPath" "."
+		"recursive" "1"
+	}
+	"FileExclusion" "*.DS_Store"
+}

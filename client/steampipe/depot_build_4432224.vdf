@@ -1,0 +1,10 @@
+"DepotBuild"
+{
+	"DepotID" "4432224"
+	"FileMapping"
+	{
+		"LocalPath" "dist_electron/linux-unpacked/*"
+		"DepotPath" "."
+		"recursive" "1"
+	}
+}
