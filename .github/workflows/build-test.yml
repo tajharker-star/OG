@@ -73,7 +73,8 @@ jobs:
       - name: Fix Linux Permissions
         if: matrix.os == 'ubuntu-latest'
         run: |
-          chmod +x client/dist_electron/linux-unpacked/ConquerorsDominationDemo
+          find client/dist_electron/linux-unpacked -maxdepth 1 -type f -executable -exec chmod +x {} + || true
+          ls -R client/dist_electron/linux-unpacked
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
