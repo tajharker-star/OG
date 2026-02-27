@@ -469,6 +469,14 @@ function App() {
                 <div className="menu">
                     <h1>Conquerors: Dominion</h1>
 
+                    {/* Add loading indicator for local engine */}
+                    {(isLocalMode || isCampaignMode) && (connectionPhase === 'CONNECTING' || connectionPhase === 'HANDSHAKING') && (
+                        <div className="local-engine-loading" style={{ position: 'absolute', top: '10px', left: '50%', transform: 'translateX(-50%)', background: 'rgba(0,0,0,0.8)', padding: '10px 20px', borderRadius: '8px', border: '1px solid #444', zIndex: 1000, display: 'flex', alignItems: 'center', gap: '10px' }}>
+                            <div className="spinner" style={{ width: '20px', height: '20px', border: '2px solid rgba(255,255,255,0.3)', borderTopColor: '#fff', borderRadius: '50%', animation: 'spin 1s linear infinite' }}></div>
+                            <p style={{ margin: 0, fontSize: '14px', color: '#fff' }}>Starting Local Game Engine...</p>
+                        </div>
+                    )}
+
                     {menuView === 'main' && (
                         <div className="menu-column">
                             <button onClick={() => setMenuView('multiplayer')} className="menu-btn primary">Multiplayer</button>
