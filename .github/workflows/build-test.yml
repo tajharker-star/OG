@@ -149,11 +149,52 @@ jobs:
         run: |
           find client/dist_electron/linux-unpacked -maxdepth 1 -type f | xargs -I {} chmod +x {} || true
 
-      - name: Steam Deploy
+      - name: Select Steam auth mode
+        id: steam-auth
+        shell: bash
+        env:
+          STEAM_SHARED_SECRET: ${{ secrets.STEAM_SHARED_SECRET }}
+          STEAM_CONFIG_VDF: ${{ secrets.STEAM_CONFIG_VDF }}
+        run: |
+          if [ -n "$STEAM_SHARED_SECRET" ]; then
+            echo "mode=totp" >> "$GITHUB_OUTPUT"
+            echo "Using TOTP auth via STEAM_SHARED_SECRET."
+          elif [ -n "$STEAM_CONFIG_VDF" ]; then
+            echo "mode=config" >> "$GITHUB_OUTPUT"
+            echo "Using config.vdf auth via STEAM_CONFIG_VDF."
+          else
+            echo "::error::Missing Steam auth secret. Add STEAM_SHARED_SECRET (recommended) or STEAM_CONFIG_VDF."
+            exit 1
+          fi
+
+      - name: Generate Steam TOTP
+        id: steam-totp
+        if: steps.steam-auth.outputs.mode == 'totp'
+        uses: CyberAndrii/steam-totp@v1
+        with:
+          shared_secret: ${{ secrets.STEAM_SHARED_SECRET }}
+
+      - name: Steam Deploy (TOTP)
+        if: steps.steam-auth.outputs.mode == 'totp'
         uses: game-ci/steam-deploy@v3
         with:
           username: ${{ secrets.STEAM_USERNAME }}
           password: ${{ secrets.STEAM_PASSWORD }}
+          totp: ${{ steps.steam-totp.outputs.code }}
+          appId: 4432220
+          firstDepotIdOverride: 4432222
+          buildDescription: "v${{ github.run_number }}"
+          rootPath: client
+          depot1Path: dist_electron/win-unpacked
+          depot2Path: dist_electron/mac
+          depot3Path: dist_electron/linux-unpacked
+          releaseBranch: public
+
+      - name: Steam Deploy (config.vdf)
+        if: steps.steam-auth.outputs.mode == 'config'
+        uses: game-ci/steam-deploy@v3
+        with:
+          username: ${{ secrets.STEAM_USERNAME }}
           configVdf: ${{ secrets.STEAM_CONFIG_VDF }}
           appId: 4432220
           firstDepotIdOverride: 4432222
@@ -163,3 +204,11 @@ jobs:
           depot2Path: dist_electron/mac
           depot3Path: dist_electron/linux-unpacked
           releaseBranch: public
+
+      - name: Steam deploy hint (on failure)
+        if: failure()
+        run: |
+          echo "Steam deploy failed." >> "$GITHUB_STEP_SUMMARY"
+          echo "- If using TOTP: confirm STEAM_SHARED_SECRET and STEAM_PASSWORD are current." >> "$GITHUB_STEP_SUMMARY"
+          echo "- If using config.vdf: refresh via steamcmd login, base64 encode config.vdf, update STEAM_CONFIG_VDF." >> "$GITHUB_STEP_SUMMARY"
+          echo "- Ensure this account has Steamworks build permissions for app 4432220." >> "$GITHUB_STEP_SUMMARY"
