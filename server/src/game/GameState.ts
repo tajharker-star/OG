@@ -16,6 +16,7 @@ export interface Player {
     status?: 'active' | 'eliminated';
     godMode?: boolean;
     canBuildHQ?: boolean;
+    hqRespawnsUsed?: number;
 }
 
 export interface Unit {
@@ -182,6 +183,7 @@ export class GameState {
             p.resources = { gold: 200, oil: 0 };
             p.status = 'active';
             p.canBuildHQ = true;
+            p.hqRespawnsUsed = 0;
         });
 
         this.status = 'playing';
@@ -286,6 +288,7 @@ export class GameState {
             p.resources = { gold: 200, oil: 0 };
             p.status = 'active';
             p.canBuildHQ = true;
+            p.hqRespawnsUsed = 0;
         });
 
         // Start Game
@@ -334,7 +337,8 @@ export class GameState {
             name: name || (isBot ? `Bot ${id.substr(-4)}` : `Player ${id.substr(0, 4)}`),
             resources: { gold: 200, oil: 0 },
             isBot,
-            difficulty
+            difficulty,
+            hqRespawnsUsed: 0
         };
 
         this.players.set(id, player);
@@ -1584,6 +1588,13 @@ export class GameState {
         carrier.cargo = [];
     }
 
+    shouldEliminateOnBaseLoss(ownerId: string): boolean {
+        const owner = this.players.get(ownerId);
+        if (!owner) return true;
+        const usedRespawns = owner.hqRespawnsUsed || 0;
+        return owner.status === 'eliminated' || owner.canBuildHQ === false || usedRespawns >= 1;
+    }
+
     cleanupDeadEntities() {
         // Remove dead units
         const initialCount = this.units.length;
@@ -1601,10 +1612,38 @@ export class GameState {
             return true;
         });
 
-        // Remove destroyed buildings
+        // Remove destroyed buildings and resolve HQ elimination consistently.
+        // This catches every combat path, including AoE paths that bypass explicit HQ checks.
+        const eliminateQueue = new Set<string>();
         this.map.islands.forEach(island => {
-            island.buildings = island.buildings.filter(b => b.health > 0);
+            island.buildings = island.buildings.filter(b => {
+                if (b.health > 0) return true;
+
+                if (b.type === 'base' && b.ownerId) {
+                    if (this.shouldEliminateOnBaseLoss(b.ownerId)) {
+                        eliminateQueue.add(b.ownerId);
+                    }
+                }
+
+                if (b.type === 'mine') {
+                    const spot = island.goldSpots.find(s => s.occupiedBy === b.id);
+                    if (spot) spot.occupiedBy = undefined;
+                }
+
+                if (b.type === 'oil_rig' || b.type === 'oil_well') {
+                    const spot = this.map.oilSpots.find(s => s.occupiedBy === b.id);
+                    if (spot) {
+                        spot.occupiedBy = undefined;
+                        (spot as any).ownerId = undefined;
+                        (spot as any).building = undefined;
+                    }
+                }
+
+                return false;
+            });
         });
+
+        eliminateQueue.forEach(playerId => this.eliminatePlayer(playerId, 'HQ_DESTROYED'));
 
         // Sync bots array with players array (Remove disconnected/stale bots)
         this.bots = this.bots.filter(b => this.players.has(b.playerId));
@@ -2491,7 +2530,9 @@ export class GameState {
                         if (targetBuilding.health <= 0) {
                             if (targetIsland) {
                                 targetIsland.buildings = targetIsland.buildings.filter((b: any) => b.id !== targetBuilding.id);
-                                if (targetBuilding.type === 'base' && targetBuilding.ownerId) this.eliminatePlayer(targetBuilding.ownerId, 'HQ_DESTROYED');
+                                if (targetBuilding.type === 'base' && targetBuilding.ownerId && this.shouldEliminateOnBaseLoss(targetBuilding.ownerId)) {
+                                    this.eliminatePlayer(targetBuilding.ownerId, 'HQ_DESTROYED');
+                                }
                                 if (targetBuilding.type === 'mine') {
                                     const spot = targetIsland.goldSpots.find((s: any) => s.occupiedBy === targetBuilding.id);
                                     if (spot) spot.occupiedBy = undefined;
@@ -2573,7 +2614,24 @@ export class GameState {
                         island.buildings.forEach(b => {
                             if (b.ownerId && b.ownerId !== attacker.ownerId && Math.hypot(island.x + (b.x || 0) - tx, island.y + (b.y || 0) - ty) <= aoe) {
                                 this.damageBuilding(b, attacker.damage);
-                                if (b.health <= 0) island.buildings = island.buildings.filter(build => build.id !== b.id);
+                                if (b.health <= 0) {
+                                    if (b.type === 'base' && b.ownerId && this.shouldEliminateOnBaseLoss(b.ownerId)) {
+                                        this.eliminatePlayer(b.ownerId, 'HQ_DESTROYED');
+                                    }
+                                    if (b.type === 'mine') {
+                                        const spot = island.goldSpots.find(s => s.occupiedBy === b.id);
+                                        if (spot) spot.occupiedBy = undefined;
+                                    }
+                                    if (b.type === 'oil_rig' || b.type === 'oil_well') {
+                                        const spot = this.map.oilSpots.find(s => s.occupiedBy === b.id);
+                                        if (spot) {
+                                            spot.occupiedBy = undefined;
+                                            (spot as any).ownerId = undefined;
+                                            (spot as any).building = undefined;
+                                        }
+                                    }
+                                    island.buildings = island.buildings.filter(build => build.id !== b.id);
+                                }
                             }
                         });
                     });

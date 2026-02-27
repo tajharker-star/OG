@@ -74,6 +74,14 @@ setInterval(() => {
 
 // Rooms management
 const rooms = new Map<string, GameState>();
+const MAX_HQ_RESPAWNS = 1;
+
+const consumeHqRespawn = (player: any): boolean => {
+    const used = Number(player?.hqRespawnsUsed || 0);
+    if (used >= MAX_HQ_RESPAWNS) return false;
+    player.hqRespawnsUsed = used + 1;
+    return true;
+};
 
 const getOrCreateRoom = (roomId: string, mapType: string = 'random'): GameState => {
     if (!rooms.has(roomId)) {
@@ -303,7 +311,17 @@ io.on('connection', (socket) => {
             // Verify if player really needs spawn
             const existingBase = gs.map.islands.some(i => i.buildings.some(b => b.type === 'base' && b.ownerId === socket.id));
             if (!existingBase) {
-                console.log(`[Spawn] Client ${socket.id} requested spawn (missing base).`);
+                if (!consumeHqRespawn(player)) {
+                    console.log(`[Spawn] Blocked request_spawn for ${socket.id}; respawn limit reached.`);
+                    player.canBuildHQ = false;
+                    (gs as any).eliminatePlayer(socket.id, 'HQ_DESTROYED');
+                    io.to(currentRoom).emit('playersData', Array.from(gs.players.values()));
+                    io.to(currentRoom).emit('mapData', gs.map);
+                    io.to(currentRoom).emit('unitsData', gs.units);
+                    return;
+                }
+
+                console.log(`[Spawn] Client ${socket.id} requested spawn (missing base). Respawn ${player.hqRespawnsUsed}/${MAX_HQ_RESPAWNS}`);
                 gs.assignStartingIsland(socket.id);
                 // Broadcast updates
                 io.to(currentRoom).emit('mapData', gs.map);
@@ -342,6 +360,17 @@ io.on('connection', (socket) => {
             return;
         }
 
+        if (!consumeHqRespawn(player)) {
+            console.log(`[Spawn] Blocked force_spawn_hq for ${socket.id}; respawn limit reached.`);
+            player.canBuildHQ = false;
+            (gs as any).eliminatePlayer(socket.id, 'HQ_DESTROYED');
+            io.to(currentRoom).emit('playersData', Array.from((gs as any).players.values()));
+            io.to(currentRoom).emit('mapData', gs.map);
+            io.to(currentRoom).emit('unitsData', gs.units);
+            return;
+        }
+
+        console.log(`[Spawn] Emergency force_spawn_hq for ${socket.id}. Respawn ${player.hqRespawnsUsed}/${MAX_HQ_RESPAWNS}`);
         (gs as any).assignStartingIsland(socket.id);
         io.to(currentRoom).emit('mapData', gs.map);
         io.to(currentRoom).emit('unitsData', gs.units);
