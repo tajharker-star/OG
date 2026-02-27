@@ -139,6 +139,23 @@ function createWindow() {
     const serverEnv = { ...process.env, PORT: '3001', NODE_ENV: 'production' };
     if (useEmbeddedNode) {
       serverEnv.ELECTRON_RUN_AS_NODE = '1';
+
+      // When launching an external script with Electron's Node runtime,
+      // include the app's bundled node_modules in module resolution.
+      const candidateNodePaths = [
+        path.join(serverCwd, 'node_modules'),
+        path.join(process.resourcesPath, 'app.asar', 'node_modules'),
+        path.join(process.resourcesPath, 'app', 'node_modules')
+      ];
+      const existingNodePaths = (process.env.NODE_PATH || '')
+        .split(path.delimiter)
+        .filter(Boolean);
+      const mergedNodePaths = [...new Set([...candidateNodePaths, ...existingNodePaths])]
+        .filter(p => fs.existsSync(p));
+      if (mergedNodePaths.length > 0) {
+        serverEnv.NODE_PATH = mergedNodePaths.join(path.delimiter);
+        log(`[Electron] NODE_PATH: ${serverEnv.NODE_PATH}`);
+      }
     }
 
     log(`[Electron] Launch Command: ${serverCommand} ${serverPath}`);
