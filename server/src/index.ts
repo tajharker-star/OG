@@ -290,7 +290,12 @@ io.on('connection', (socket) => {
         const gs = rooms.get(currentRoom);
         if (gs && gs.status === 'playing') {
             const player = (gs as any).players.get(socket.id);
-            if (player && (player.status === 'eliminated' || player.canBuildHQ === false)) {
+            if (!player) {
+                console.log(`[Spawn] Blocked request_spawn for unknown player ${socket.id}.`);
+                return;
+            }
+
+            if (player.status === 'eliminated' || player.canBuildHQ === false) {
                 console.log(`[Spawn] Blocked request_spawn for eliminated/restricted player ${socket.id}.`);
                 return;
             }
@@ -315,6 +320,10 @@ io.on('connection', (socket) => {
     socket.on('force_spawn_hq', () => {
         const gs = rooms.get(currentRoom);
         if (!gs) return;
+        if (gs.status !== 'playing') {
+            console.log(`[Spawn] Blocked force_spawn_hq outside playing state for ${socket.id}.`);
+            return;
+        }
 
         const existingBase = gs.map.islands.some(i => i.buildings.some(b => b.type === 'base' && b.ownerId === socket.id));
         if (existingBase) {
@@ -323,9 +332,14 @@ io.on('connection', (socket) => {
         }
 
         const player = (gs as any).players.get(socket.id);
-        if (player) {
-            player.status = 'active';
-            player.canBuildHQ = true;
+        if (!player) {
+            console.log(`[Spawn] Blocked force_spawn_hq for unknown player ${socket.id}.`);
+            return;
+        }
+
+        if (player.status === 'eliminated' || player.canBuildHQ === false) {
+            console.log(`[Spawn] Blocked force_spawn_hq for eliminated/restricted player ${socket.id}.`);
+            return;
         }
 
         (gs as any).assignStartingIsland(socket.id);

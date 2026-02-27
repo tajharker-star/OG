@@ -291,6 +291,15 @@
   z-index: 2000;
 }
 
+.lobby-card {
+  width: min(560px, 92vw);
+  background: rgba(18, 24, 32, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 14px;
+  padding: 22px;
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.45);
+}
+
 .lobby-title {
   font-size: 32px;
   margin-bottom: var(--spacing-lg);
@@ -359,6 +368,69 @@
   border-top: 4px solid var(--text-primary);
   border-radius: 50%;
   animation: spin 1s linear infinite;
+}
+
+.lobby-load-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.lobby-load-progress {
+  width: 100%;
+  height: 10px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.lobby-load-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #4caf50 0%, #7fe887 100%);
+  transition: width 0.2s ease;
+}
+
+.lobby-load-progress-text {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.75);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.lobby-load-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 12px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.lobby-load-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 14px;
+}
+
+.lobby-load-check.ready {
+  color: #9be2a2;
+}
+
+.lobby-load-check-state {
+  font-family: monospace;
+  font-size: 12px;
+  letter-spacing: 0.5px;
+}
+
+.lobby-load-metrics {
+  display: flex;
+  gap: 16px;
+  font-family: monospace;
+  font-size: 12px;
+  color: #9fc5ff;
 }
 
 .lobby-waiting-room {

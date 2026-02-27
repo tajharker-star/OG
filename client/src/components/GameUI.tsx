@@ -287,6 +287,19 @@ interface GameUIProps {
     isDevBypass?: boolean;
 }
 
+type LoadingCheckItem = {
+    label: string;
+    ready: boolean;
+};
+
+const PERF_SAMPLE_LIMIT = 10;
+const PING_SAMPLE_WINDOW = 3;
+const FPS_SAMPLE_WINDOW = 6;
+const LOBBY_MIN_WARMUP_MS = 1200;
+const LOBBY_MAX_WARMUP_MS = 9000;
+const MATCH_MIN_WARMUP_MS = 1800;
+const MATCH_MAX_WARMUP_MS = 14000;
+
 const getIconForType = (type: string) => {
     switch (type) {
         case 'soldier': return '💂';
@@ -370,6 +383,29 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
     const [gameStatus, setGameStatus] = useState<'waiting' | 'voting' | 'playing'>(initialGameStatus || 'waiting');
     const [requiredPlayers, setRequiredPlayers] = useState(2);
     const [votingData, setVotingData] = useState<{ timeLeft: number, votes: [string, string][] }>({ timeLeft: 0, votes: [] });
+    const [isLobbyLoading, setIsLobbyLoading] = useState(gameStatus !== 'playing');
+    const [isMatchLoading, setIsMatchLoading] = useState(gameStatus === 'playing');
+    const [matchLoadTimedOut, setMatchLoadTimedOut] = useState(false);
+    const [hasPlayersSnapshot, setHasPlayersSnapshot] = useState(false);
+    const [hasUnitsSnapshot, setHasUnitsSnapshot] = useState(false);
+    const [lobbyLoadChecks, setLobbyLoadChecks] = useState({
+        connection: false,
+        players: false,
+        ping: false,
+        fps: false
+    });
+    const [matchLoadChecks, setMatchLoadChecks] = useState({
+        map: false,
+        units: false,
+        player: false,
+        ping: false,
+        fps: false
+    });
+    const prevGameStatusRef = useRef<'waiting' | 'voting' | 'playing' | null>(null);
+    const lobbyLoadStartedAtRef = useRef<number>(Date.now());
+    const matchLoadStartedAtRef = useRef<number>(Date.now());
+    const pingSamplesRef = useRef<number[]>([]);
+    const fpsSamplesRef = useRef<number[]>([]);
 
     // Client-Side Gate (Anti-Bounce)
     const clientMatchState = useRef<'LOBBY' | 'STARTING' | 'IN_MATCH'>('LOBBY');
@@ -468,6 +504,187 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
         }
     }, [connectionState.phase]);
 
+    const lobbyConnectionReady = isLocalMode || isDevBypass || connectionState.phase === 'READY';
+
+    const isPingStable = (samples: number[]) => {
+        if (samples.length < PING_SAMPLE_WINDOW) return false;
+        const windowed = samples.slice(-PING_SAMPLE_WINDOW);
+        const avg = windowed.reduce((sum, value) => sum + value, 0) / windowed.length;
+        const jitter = Math.max(...windowed) - Math.min(...windowed);
+        const maxPing = isLocalMode ? 120 : 260;
+        const maxJitter = isLocalMode ? 40 : 120;
+        return avg <= maxPing && jitter <= maxJitter;
+    };
+
+    const isFpsStable = (samples: number[]) => {
+        if (samples.length < FPS_SAMPLE_WINDOW) return false;
+        const windowed = samples.slice(-FPS_SAMPLE_WINDOW);
+        const avg = windowed.reduce((sum, value) => sum + value, 0) / windowed.length;
+        const minFps = Math.min(...windowed);
+        return avg >= 45 && minFps >= 28;
+    };
+
+    useEffect(() => {
+        const prevStatus = prevGameStatusRef.current;
+        const firstRun = prevStatus === null;
+        const enteredMatch = gameStatus === 'playing' && (firstRun || prevStatus !== 'playing');
+        const enteredLobby = (gameStatus === 'waiting' || gameStatus === 'voting') && (firstRun || prevStatus === 'playing');
+
+        if (enteredMatch) {
+            pingSamplesRef.current = [];
+            fpsSamplesRef.current = [];
+            setHasUnitsSnapshot(false);
+            setMatchLoadTimedOut(false);
+            setMatchLoadChecks({
+                map: false,
+                units: false,
+                player: false,
+                ping: false,
+                fps: false
+            });
+            matchLoadStartedAtRef.current = Date.now();
+            setIsMatchLoading(true);
+            setIsLobbyLoading(false);
+        } else if (gameStatus !== 'playing') {
+            setIsMatchLoading(false);
+            setMatchLoadTimedOut(false);
+        }
+
+        if (enteredLobby) {
+            pingSamplesRef.current = [];
+            fpsSamplesRef.current = [];
+            const playersReady = allPlayers.size > 0;
+            setHasPlayersSnapshot(playersReady);
+            setLobbyLoadChecks({
+                connection: lobbyConnectionReady,
+                players: playersReady,
+                ping: false,
+                fps: false
+            });
+            lobbyLoadStartedAtRef.current = Date.now();
+            setIsLobbyLoading(true);
+        }
+
+        prevGameStatusRef.current = gameStatus;
+    }, [allPlayers.size, gameStatus, lobbyConnectionReady]);
+
+    useEffect(() => {
+        if (!isLobbyLoading) return;
+        setLobbyLoadChecks(prev => {
+            if (prev.connection === lobbyConnectionReady) return prev;
+            return { ...prev, connection: lobbyConnectionReady };
+        });
+    }, [isLobbyLoading, lobbyConnectionReady]);
+
+    useEffect(() => {
+        if (!isLobbyLoading) return;
+        const playersReady = hasPlayersSnapshot || allPlayers.size > 0;
+        setLobbyLoadChecks(prev => {
+            if (prev.players === playersReady) return prev;
+            return { ...prev, players: playersReady };
+        });
+    }, [allPlayers.size, hasPlayersSnapshot, isLobbyLoading]);
+
+    useEffect(() => {
+        if (!isMatchLoading) return;
+        const mapReady = !!mapData && mapData.islands.length > 0;
+        setMatchLoadChecks(prev => {
+            if (prev.map === mapReady) return prev;
+            return { ...prev, map: mapReady };
+        });
+    }, [isMatchLoading, mapData]);
+
+    useEffect(() => {
+        if (!isMatchLoading) return;
+        setMatchLoadChecks(prev => {
+            if (prev.units === hasUnitsSnapshot) return prev;
+            return { ...prev, units: hasUnitsSnapshot };
+        });
+    }, [hasUnitsSnapshot, isMatchLoading]);
+
+    useEffect(() => {
+        if (!isMatchLoading) return;
+        const playerReady = !!player;
+        setMatchLoadChecks(prev => {
+            if (prev.player === playerReady) return prev;
+            return { ...prev, player: playerReady };
+        });
+    }, [isMatchLoading, player]);
+
+    useEffect(() => {
+        if (ping <= 0) return;
+        const updated = [...pingSamplesRef.current.slice(-(PERF_SAMPLE_LIMIT - 1)), ping];
+        pingSamplesRef.current = updated;
+        const pingReady = isPingStable(updated);
+
+        if (isLobbyLoading) {
+            setLobbyLoadChecks(prev => {
+                if (prev.ping === pingReady) return prev;
+                return { ...prev, ping: pingReady };
+            });
+        }
+
+        if (isMatchLoading) {
+            setMatchLoadChecks(prev => {
+                if (prev.ping === pingReady) return prev;
+                return { ...prev, ping: pingReady };
+            });
+        }
+    }, [isLobbyLoading, isMatchLoading, ping]);
+
+    useEffect(() => {
+        if (fps <= 0) return;
+        const updated = [...fpsSamplesRef.current.slice(-(PERF_SAMPLE_LIMIT - 1)), fps];
+        fpsSamplesRef.current = updated;
+        const fpsReady = isFpsStable(updated);
+
+        if (isLobbyLoading) {
+            setLobbyLoadChecks(prev => {
+                if (prev.fps === fpsReady) return prev;
+                return { ...prev, fps: fpsReady };
+            });
+        }
+
+        if (isMatchLoading) {
+            setMatchLoadChecks(prev => {
+                if (prev.fps === fpsReady) return prev;
+                return { ...prev, fps: fpsReady };
+            });
+        }
+    }, [fps, isLobbyLoading, isMatchLoading]);
+
+    useEffect(() => {
+        if (!isLobbyLoading) return;
+        const timer = window.setInterval(() => {
+            const elapsed = Date.now() - lobbyLoadStartedAtRef.current;
+            const ready = lobbyLoadChecks.connection && lobbyLoadChecks.players && lobbyLoadChecks.ping && lobbyLoadChecks.fps;
+            if ((ready && elapsed >= LOBBY_MIN_WARMUP_MS) || elapsed >= LOBBY_MAX_WARMUP_MS) {
+                setIsLobbyLoading(false);
+            }
+        }, 120);
+
+        return () => window.clearInterval(timer);
+    }, [isLobbyLoading, lobbyLoadChecks]);
+
+    useEffect(() => {
+        if (!isMatchLoading) return;
+        const timer = window.setInterval(() => {
+            const elapsed = Date.now() - matchLoadStartedAtRef.current;
+            const ready = matchLoadChecks.map && matchLoadChecks.units && matchLoadChecks.player && matchLoadChecks.ping && matchLoadChecks.fps;
+            if (ready && elapsed >= MATCH_MIN_WARMUP_MS) {
+                setIsMatchLoading(false);
+                return;
+            }
+
+            if (elapsed >= MATCH_MAX_WARMUP_MS) {
+                setMatchLoadTimedOut(true);
+                setIsMatchLoading(false);
+            }
+        }, 120);
+
+        return () => window.clearInterval(timer);
+    }, [isMatchLoading, matchLoadChecks]);
+
     useEffect(() => {
         // Ping Loop
         const pingInterval = setInterval(() => {
@@ -541,6 +758,20 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
             if (roomId) activeMatchId.current = roomId;
 
             console.log(`[NAV_TO_GAME] matchId=${roomId}`);
+
+            pingSamplesRef.current = [];
+            fpsSamplesRef.current = [];
+            setHasUnitsSnapshot(false);
+            setMatchLoadTimedOut(false);
+            setMatchLoadChecks({
+                map: false,
+                units: false,
+                player: false,
+                ping: false,
+                fps: false
+            });
+            matchLoadStartedAtRef.current = Date.now();
+            setIsMatchLoading(true);
 
             setGameStatus('playing');
             (window as any).gameMenuMode = false;
@@ -635,6 +866,7 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
             const pMap = new Map();
             players.forEach(p => pMap.set(p.id, p));
             setAllPlayers(pMap);
+            setHasPlayersSnapshot(true);
         };
 
         const handleMapData = (data: GameMap) => {
@@ -643,6 +875,7 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
 
         const handleUnitsData = (data: Unit[]) => {
             setUnits(data);
+            setHasUnitsSnapshot(true);
         };
 
         const handleHover = (e: CustomEvent) => {
@@ -1315,6 +1548,57 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
     }, [selectedUnitItem]);
 
     const isVoting = gameStatus === 'voting';
+    const renderLoadingScreen = (title: string, subtitle: string, checks: LoadingCheckItem[]) => {
+        const readyCount = checks.filter(item => item.ready).length;
+        const progress = Math.round((readyCount / checks.length) * 100);
+
+        return (
+            <div className="lobby-screen">
+                <div className="lobby-card lobby-card-connecting lobby-load-card">
+                    <div className="lobby-title">{title}</div>
+                    <div className="lobby-subtitle">{subtitle}</div>
+                    <div className="lobby-connecting-spinner"></div>
+
+                    <div className="lobby-load-progress">
+                        <div
+                            className="lobby-load-progress-fill"
+                            style={{ width: `${progress}%` }}
+                        />
+                    </div>
+                    <div className="lobby-load-progress-text">{progress}% ready</div>
+
+                    <div className="lobby-load-checklist">
+                        {checks.map(item => (
+                            <div key={item.label} className={`lobby-load-check ${item.ready ? 'ready' : ''}`}>
+                                <span className="lobby-load-check-state">{item.ready ? '[OK]' : '[..]'}</span>
+                                <span>{item.label}</span>
+                            </div>
+                        ))}
+                    </div>
+
+                    <div className="lobby-load-metrics">
+                        <span>FPS: {fps}</span>
+                        <span>PING: {ping > 0 ? `${ping}ms` : '--'}</span>
+                    </div>
+                </div>
+            </div>
+        );
+    };
+
+    const lobbyLoadItems: LoadingCheckItem[] = [
+        { label: 'Connection ready', ready: lobbyLoadChecks.connection },
+        { label: 'Lobby snapshot loaded', ready: lobbyLoadChecks.players },
+        { label: 'Ping stabilized', ready: lobbyLoadChecks.ping },
+        { label: 'Frame rate stabilized', ready: lobbyLoadChecks.fps }
+    ];
+
+    const matchLoadItems: LoadingCheckItem[] = [
+        { label: 'Map data loaded', ready: matchLoadChecks.map },
+        { label: 'Player snapshot loaded', ready: matchLoadChecks.player },
+        { label: 'Units snapshot loaded', ready: matchLoadChecks.units },
+        { label: 'Ping stabilized', ready: matchLoadChecks.ping },
+        { label: 'Frame rate stabilized', ready: matchLoadChecks.fps }
+    ];
 
     // Render Lobby/Voting Screens
     // NOTE: React requires all hooks to be called in the same order.
@@ -1367,6 +1651,14 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
                     </div>
                 </div>
             </div>
+        );
+    }
+
+    if ((gameStatus === 'waiting' || gameStatus === 'voting') && isLobbyLoading) {
+        return renderLoadingScreen(
+            'Loading Lobby',
+            'Syncing lobby state and stabilizing performance',
+            lobbyLoadItems
         );
     }
 
@@ -1751,6 +2043,16 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
                 showSpectate={true}
                 reason="Base Command Center Destroyed"
             />
+        );
+    }
+
+    if (gameStatus === 'playing' && (isMatchLoading || !player)) {
+        return renderLoadingScreen(
+            'Starting Match',
+            matchLoadTimedOut
+                ? 'Network is still syncing. Entering game view as soon as core data is ready.'
+                : 'Loading map, units, and stabilizing ping/FPS',
+            matchLoadItems
         );
     }
 
