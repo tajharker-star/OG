@@ -14,7 +14,6 @@ function App() {
     const ipc = (window as any).require ? (window as any).require('electron').ipcRenderer : null;
     const [lastJoinedRoom, setLastJoinedRoom] = useState<string | null>(null);
     const [gameStatus, setGameStatus] = useState<string>('waiting');
-    const [connectionPhase, setConnectionPhase] = useState<string>('IDLE');
 
     // Campaign State
     const [isCampaignMode, setIsCampaignMode] = useState(false);
@@ -49,10 +48,15 @@ function App() {
     // DEV Feature: Toggle UI Visibility & Bypass
     const [isUIVisible, setIsUIVisible] = useState(true);
     const [isDevBypass, setIsDevBypass] = useState(false);
+    const localEngineUrlRef = useRef<string>('http://127.0.0.1:3001');
+    const [isLocalEngineReady, setIsLocalEngineReady] = useState(false);
+    const [isLocalEngineBooting, setIsLocalEngineBooting] = useState(true);
+    const [localEngineBootError, setLocalEngineBootError] = useState<string | null>(null);
 
     useEffect(() => {
         // Initial connection to local/default server
         const initialUrl = (socket as any).io.uri;
+        localEngineUrlRef.current = initialUrl;
         console.log('[App] Initial Connection Attempt to:', initialUrl);
         connectionManager.connect(initialUrl);
 
@@ -87,7 +91,6 @@ function App() {
     // Reconnection Logic
     useEffect(() => {
         const unsubscribe = connectionManager.subscribe((state) => {
-            setConnectionPhase(state.phase);
             // Suppress FAILED state if we are in local/campaign mode to allow "serverless" feel
             if (state.phase === 'FAILED' && (isCampaignMode || isLocalMode)) {
                 console.warn('[App] Connection failed but suppressed for local mode.');
@@ -401,11 +404,11 @@ function App() {
         return mapType;
     };
 
-    const ensureLocalEngineReady = async () => {
-        const targetUrl = (socket as any).io.uri;
+    const ensureLocalEngineReady = async (retries: number = 8, delayMs: number = 750) => {
+        const targetUrl = localEngineUrlRef.current;
 
         // Give the embedded backend time to boot on cold starts.
-        for (let attempt = 0; attempt < 8; attempt++) {
+        for (let attempt = 0; attempt < retries; attempt++) {
             if (connectionManager.getState().phase === 'READY') {
                 return true;
             }
@@ -415,11 +418,53 @@ function App() {
                 return true;
             }
 
-            await new Promise(resolve => setTimeout(resolve, 750));
+            await new Promise(resolve => setTimeout(resolve, delayMs));
         }
 
         return false;
     };
+
+    const bootstrapLocalEngine = async (retries: number = 10, delayMs: number = 750) => {
+        if (isLocalEngineReady && connectionManager.getState().phase === 'READY') {
+            return true;
+        }
+
+        setIsLocalEngineBooting(true);
+        setLocalEngineBootError(null);
+
+        const ready = await ensureLocalEngineReady(retries, delayMs);
+
+        setIsLocalEngineReady(ready);
+        setIsLocalEngineBooting(false);
+
+        if (!ready) {
+            setLocalEngineBootError('Local game engine is not ready yet.');
+        }
+
+        return ready;
+    };
+
+    useEffect(() => {
+        let cancelled = false;
+
+        const prewarm = async () => {
+            setIsLocalEngineBooting(true);
+            setLocalEngineBootError(null);
+
+            const ready = await ensureLocalEngineReady(20, 500);
+            if (cancelled) return;
+
+            setIsLocalEngineReady(ready);
+            setIsLocalEngineBooting(false);
+
+            if (!ready) {
+                setLocalEngineBootError('Local game engine failed to start during launch.');
+            }
+        };
+
+        prewarm();
+        return () => { cancelled = true; };
+    }, []);
 
     const startCampaignLevel = async (levelIndex: number) => {
         const level = CAMPAIGN_LEVELS[levelIndex];
@@ -429,7 +474,7 @@ function App() {
 
         setCampaignLevel(levelIndex);
         // Ensure the embedded local engine is ready.
-        if (!(await ensureLocalEngineReady())) {
+        if (!(await bootstrapLocalEngine())) {
             alert("Failed to start the local game engine. Please restart the game.");
             return;
         }
@@ -461,7 +506,7 @@ function App() {
         setGameStatus('playing');
         setIsLocalMode(true);
 
-        if (!(await ensureLocalEngineReady())) {
+        if (!(await bootstrapLocalEngine())) {
             setIsLocalMode(false);
             alert("Failed to start the local game engine. Please restart the game.");
             return;
@@ -481,18 +526,24 @@ function App() {
                 <div className="menu">
                     <h1>Conquerors: Dominion</h1>
 
-                    {/* Add loading indicator for local engine */}
-                    {(isLocalMode || isCampaignMode) && (connectionPhase === 'CONNECTING' || connectionPhase === 'HANDSHAKING') && (
+                    {/* Prewarm the local engine before campaign/custom can start */}
+                    {isLocalEngineBooting && (
                         <div className="local-engine-loading" style={{ position: 'absolute', top: '10px', left: '50%', transform: 'translateX(-50%)', background: 'rgba(0,0,0,0.8)', padding: '10px 20px', borderRadius: '8px', border: '1px solid #444', zIndex: 1000, display: 'flex', alignItems: 'center', gap: '10px' }}>
                             <div className="spinner" style={{ width: '20px', height: '20px', border: '2px solid rgba(255,255,255,0.3)', borderTopColor: '#fff', borderRadius: '50%', animation: 'spin 1s linear infinite' }}></div>
-                            <p style={{ margin: 0, fontSize: '14px', color: '#fff' }}>Starting Local Game Engine...</p>
+                            <p style={{ margin: 0, fontSize: '14px', color: '#fff' }}>Preparing Local Game Engine...</p>
+                        </div>
+                    )}
+                    {!isLocalEngineBooting && !isLocalEngineReady && localEngineBootError && (
+                        <div style={{ marginTop: '10px', padding: '10px 12px', borderRadius: '8px', border: '1px solid #664', background: 'rgba(0,0,0,0.5)', color: '#f1d9aa', fontSize: '14px', textAlign: 'center' }}>
+                            <div style={{ marginBottom: '8px' }}>{localEngineBootError}</div>
+                            <button onClick={() => bootstrapLocalEngine(14, 750)} className="menu-btn small">Retry Engine Start</button>
                         </div>
                     )}
 
                     {menuView === 'main' && (
                         <div className="menu-column">
                             <button onClick={() => setMenuView('multiplayer')} className="menu-btn primary">Multiplayer</button>
-                            <button onClick={() => setMenuView('campaign')} className="menu-btn">Campaign & Custom</button>
+                            <button onClick={() => setMenuView('campaign')} className="menu-btn" disabled={!isLocalEngineReady}>Campaign & Custom</button>
                         </div>
                     )}
 
@@ -502,7 +553,7 @@ function App() {
 
                             <div className="menu-section">
                                 <h4>Host Game</h4>
-                                <button onClick={() => quickJoin('random')} className="menu-btn success">Host Local (LAN)</button>
+                                <button onClick={() => quickJoin('random')} className="menu-btn success" disabled={!isLocalEngineReady}>Host Local (LAN)</button>
                                 <button onClick={() => {
                                     // Host Steam Lobby
                                     if (!steamUser) {
@@ -511,7 +562,7 @@ function App() {
                                     }
                                     setCreatingSteamLobby(true);
                                     quickJoin('random');
-                                }} className="menu-btn primary" style={{ background: '#171a21', border: '1px solid #66c0f4' }}>
+                                }} className="menu-btn primary" style={{ background: '#171a21', border: '1px solid #66c0f4' }} disabled={!isLocalEngineReady}>
                                     <span style={{ marginRight: '5px' }}>🎮</span> Host Steam Lobby
                                 </button>
                                 <button onClick={() => setMenuView('host_public')} className="menu-btn warning">Host Public (Playit.gg)</button>
@@ -601,7 +652,7 @@ function App() {
 
                             <button
                                 onClick={startHostingPublic}
-                                disabled={!generatedJoinCode}
+                                disabled={!generatedJoinCode || !isLocalEngineReady}
                                 className="menu-btn success menu-btn-full"
                             >
                                 Start Hosting
@@ -622,6 +673,7 @@ function App() {
                                         <button
                                             key={level.name}
                                             className="campaign-card"
+                                            disabled={!isLocalEngineReady}
                                             onClick={() => startCampaignLevel(index)}
                                         >
                                             <div className="campaign-card-header">
@@ -647,7 +699,7 @@ function App() {
                                 })}
                             </div>
 
-                            <button onClick={startWorldConquer} className="menu-btn primary">World Conquer (Stages)</button>
+                            <button onClick={startWorldConquer} className="menu-btn primary" disabled={!isLocalEngineReady}>World Conquer (Stages)</button>
 
                             <div className="custom-game-panel">
                                 <h3 className="custom-game-title">Custom Mode</h3>
@@ -672,7 +724,7 @@ function App() {
                                     <input type="range" min="1" max="10" value={customConfig.difficulty} onChange={e => setCustomConfig({ ...customConfig, difficulty: parseInt(e.target.value) })} />
                                 </div>
 
-                                <button onClick={startCustomGame} className="menu-btn success menu-btn-full">Start Custom Game</button>
+                                <button onClick={startCustomGame} className="menu-btn success menu-btn-full" disabled={!isLocalEngineReady}>Start Custom Game</button>
                             </div>
 
                             <button onClick={() => setMenuView('main')} className="menu-btn secondary">Back</button>
