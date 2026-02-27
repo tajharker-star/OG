@@ -149,6 +149,35 @@ jobs:
         run: |
           find client/dist_electron/linux-unpacked -maxdepth 1 -type f | xargs -I {} chmod +x {} || true
 
+      - name: Normalize Depot Layout
+        shell: bash
+        run: |
+          # Artifacts can extract as <path>/<folder>/<folder>; flatten them so depot roots are correct.
+          flatten_if_nested() {
+            local dir="$1"
+            local nested="$dir/$(basename "$dir")"
+            if [ -d "$nested" ]; then
+              echo "Flattening nested artifact folder: $nested -> $dir"
+              shopt -s dotglob nullglob
+              mv "$nested"/* "$dir"/
+              shopt -u dotglob nullglob
+              rmdir "$nested"
+            fi
+          }
+
+          flatten_if_nested client/dist_electron/win-unpacked
+          flatten_if_nested client/dist_electron/mac
+          flatten_if_nested client/dist_electron/linux-unpacked
+
+          test -f client/dist_electron/win-unpacked/ConquerorsDominationDemo.exe
+          test -f client/dist_electron/mac/ConquerorsDominationDemo.app/Contents/MacOS/ConquerorsDominationDemo
+          test -f client/dist_electron/linux-unpacked/conquerors-domination-demo
+
+          echo "Verified expected executable paths:"
+          echo "- Windows: client/dist_electron/win-unpacked/ConquerorsDominationDemo.exe"
+          echo "- macOS:   client/dist_electron/mac/ConquerorsDominationDemo.app/Contents/MacOS/ConquerorsDominationDemo"
+          echo "- Linux:   client/dist_electron/linux-unpacked/conquerors-domination-demo"
+
       - name: Select Steam auth mode
         id: steam-auth
         shell: bash
