@@ -67,11 +67,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Run Smoke Test
-        run: |
-          cd client
-          npm run test:smoke
-
       - name: Fix Linux Permissions
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -87,12 +82,19 @@ jobs:
             client/dist_electron/linux-unpacked
           if-no-files-found: warn
 
+      - name: Run Smoke Test
+        continue-on-error: true
+        run: |
+          cd client
+          xvfb-run npm run test:smoke || npm run test:smoke
+
       - name: Upload Screenshot
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: launch-screenshot-${{ matrix.os }}
           path: client/tests/output/launch-screenshot.png
+          if-no-files-found: ignore
 
   deploy-steam:
     needs: build

@@ -8,7 +8,7 @@ const __dirname = path.dirname(__filename);
 
 test('launch app', async () => {
     const electronApp = await electron.launch({
-        args: [path.join(__dirname, '../electron/main.js')],
+        args: [path.join(__dirname, '../electron/main.cjs')],
     });
 
     const isPackaged = await electronApp.evaluate(async ({ app }) => {
