@@ -127,7 +127,7 @@ jobs:
 
       - name: Fix Downloaded Permissions
         run: |
-          chmod +x client/dist_electron/linux-unpacked/conquerors-domination-demo
+          find client/dist_electron/linux-unpacked -maxdepth 1 -type f | xargs -I {} chmod +x {} || true
 
       - name: Steam Deploy
         uses: game-ci/steam-deploy@v3
@@ -138,9 +138,9 @@ jobs:
           appId: 4432220
           buildDescription: "v${{ github.run_number }}"
           rootPath: client
-          depot1Id: 4432223
+          depot1Id: 4432222
           depot1Path: dist_electron/win-unpacked
-          depot2Id: 4432222
+          depot2Id: 4432223
           depot2Path: dist_electron/mac
           depot3Id: 4432224
           depot3Path: dist_electron/linux-unpacked
