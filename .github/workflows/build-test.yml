@@ -56,6 +56,7 @@ jobs:
             libgbm1
 
       - name: Install Playwright Browsers
+        if: matrix.os != 'windows-latest'
         run: |
           cd client
           npx playwright install --with-deps
