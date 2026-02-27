@@ -401,6 +401,26 @@ function App() {
         return mapType;
     };
 
+    const ensureLocalEngineReady = async () => {
+        const targetUrl = (socket as any).io.uri;
+
+        // Give the embedded backend time to boot on cold starts.
+        for (let attempt = 0; attempt < 8; attempt++) {
+            if (connectionManager.getState().phase === 'READY') {
+                return true;
+            }
+
+            const result = await connectToServer(targetUrl);
+            if (result.success) {
+                return true;
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 750));
+        }
+
+        return false;
+    };
+
     const startCampaignLevel = async (levelIndex: number) => {
         const level = CAMPAIGN_LEVELS[levelIndex];
         if (!level) return;
@@ -408,15 +428,10 @@ function App() {
         const selectedMapType = resolveMapType(level.mapType);
 
         setCampaignLevel(levelIndex);
-        // Ensure we have a working connection
-        const state = connectionManager.getState();
-        if (state.phase !== 'READY') {
-            console.log('[App] Not connected. Connecting before starting campaign...');
-            const result = await connectToServer((socket as any).io.uri);
-            if (!result.success) {
-                alert("Failed to connect to local server. Please check if the backend is running.");
-                return;
-            }
+        // Ensure the embedded local engine is ready.
+        if (!(await ensureLocalEngineReady())) {
+            alert("Failed to start the local game engine. Please restart the game.");
+            return;
         }
         setShowCampaignModal(null);
         setGameStatus('playing');
@@ -446,13 +461,10 @@ function App() {
         setGameStatus('playing');
         setIsLocalMode(true);
 
-        const state = connectionManager.getState();
-        if (state.phase !== 'READY') {
-            const result = await connectToServer((socket as any).io.uri);
-            if (!result.success) {
-                alert("Failed to connect to local server.");
-                return;
-            }
+        if (!(await ensureLocalEngineReady())) {
+            setIsLocalMode(false);
+            alert("Failed to start the local game engine. Please restart the game.");
+            return;
         }
 
         socket.emit('createCustomGame', customConfig);

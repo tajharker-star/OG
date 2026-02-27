@@ -94,11 +94,6 @@ function createWindow() {
   // 2. Start the local server in the background for Campaign/Local play
   // This is needed for local development AND production
 
-  // Attempt to kill existing server processes on Windows
-  if (process.platform === 'win32') {
-    spawn('taskkill', ['/F', '/IM', 'node.exe', '/T']);
-  }
-
   const isPackaged = app.isPackaged;
   let serverPath;
   let serverCwd;
@@ -138,9 +133,20 @@ function createWindow() {
   log(`[Electron] NODE_ENV: ${process.env.NODE_ENV}`);
 
   if (fs.existsSync(serverPath)) {
-    serverProcess = spawn('node', [serverPath], {
+    // Use Electron's embedded Node runtime so Steam users do not need Node installed.
+    const useEmbeddedNode = process.execPath.toLowerCase().includes('electron') || isPackaged;
+    const serverCommand = useEmbeddedNode ? process.execPath : 'node';
+    const serverEnv = { ...process.env, PORT: '3001', NODE_ENV: 'production' };
+    if (useEmbeddedNode) {
+      serverEnv.ELECTRON_RUN_AS_NODE = '1';
+    }
+
+    log(`[Electron] Launch Command: ${serverCommand} ${serverPath}`);
+    serverProcess = spawn(serverCommand, [serverPath], {
       cwd: serverCwd,
-      env: { ...process.env, PORT: '3001', NODE_ENV: 'production' }
+      env: serverEnv,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true
     });
 
     serverProcess.stdout.on('data', (data) => log(`[Server] ${data}`));
