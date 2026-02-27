@@ -19,8 +19,8 @@ test('launch app', async () => {
 
     const window = await electronApp.firstWindow();
 
-    // Wait for the window to be visible
-    await expect(window).toBeVisible({ timeout: 15000 });
+    // Wait for the window to be ready and content to load
+    await window.waitForSelector('body', { timeout: 15000 });
 
     // Take a screenshot for visual verification in CI
     await window.screenshot({ path: 'tests/output/launch-screenshot.png' });

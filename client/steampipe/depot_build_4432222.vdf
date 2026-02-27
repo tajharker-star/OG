@@ -3,7 +3,7 @@
 	"DepotID" "4432222"
 	"FileMapping"
 	{
-		"LocalPath" "dist_electron/mac/*"
+		"LocalPath" "dist_electron/win-unpacked/*"
 		"DepotPath" "."
 		"recursive" "1"
 	}
