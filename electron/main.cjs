@@ -263,7 +263,7 @@ function pollServer(retries = 0) {
 
 function retryPoll(retries) {
   if (retries < 60) {
-    setTimeout(() => pollServer(retries + 1), 1000);
+    setTimeout(() => pollServer(retries + 1), 200);
   } else {
     console.error('Server failed to start in time.');
     sendError("Connection timed out. Server did not respond.");

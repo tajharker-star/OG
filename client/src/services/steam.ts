@@ -17,6 +17,7 @@ const ipcRenderer = (window.require) ? window.require('electron').ipcRenderer : 
 type SteamEvents = {
     'initialized': (user: SteamUser) => void;
     'error': (error: string) => void;
+    'join-lobby': (lobbyId: string) => void;
 };
 
 class SteamService {
@@ -47,6 +48,11 @@ class SteamService {
             this.isInitialized = false;
             this.initError = error;
             this.emit('error', error);
+        });
+
+        ipcRenderer.on('steam:join-lobby', (_: any, lobbyId: string) => {
+            console.log('[SteamService] Received Join Lobby via Steam:', lobbyId);
+            this.emit('join-lobby', lobbyId);
         });
     }
 

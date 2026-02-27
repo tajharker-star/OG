@@ -14,6 +14,7 @@ function App() {
     const ipc = (window as any).require ? (window as any).require('electron').ipcRenderer : null;
     const [lastJoinedRoom, setLastJoinedRoom] = useState<string | null>(null);
     const [gameStatus, setGameStatus] = useState<string>('waiting');
+    const [connectionPhase, setConnectionPhase] = useState<string>('IDLE');
 
     // Campaign State
     const [isCampaignMode, setIsCampaignMode] = useState(false);
@@ -86,19 +87,22 @@ function App() {
     // Reconnection Logic
     useEffect(() => {
         const unsubscribe = connectionManager.subscribe((state) => {
+            setConnectionPhase(state.phase);
+            // Suppress FAILED state if we are in local/campaign mode to allow "serverless" feel
+            if (state.phase === 'FAILED' && (isCampaignMode || isLocalMode)) {
+                console.warn('[App] Connection failed but suppressed for local mode.');
+                return;
+            }
+
             // If we successfully reconnected (READY) and we were playing
             if (state.phase === 'READY' && isPlaying && lastJoinedRoom) {
                 console.log('[App] Reconnected! Attempting to rejoin room:', lastJoinedRoom);
-
-                // Re-join the room
                 socket.emit('joinByCode', lastJoinedRoom);
-
-                // Request fresh state
                 socket.emit('request_game_state');
             }
         });
         return unsubscribe;
-    }, [isPlaying, lastJoinedRoom]);
+    }, [isPlaying, lastJoinedRoom, isCampaignMode, isLocalMode]);
 
     useEffect(() => {
         // Identify connection type is now handled in socket.ts after handshake
