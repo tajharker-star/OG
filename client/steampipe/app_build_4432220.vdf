@@ -2,9 +2,9 @@
 {
 	"appid"	"4432220"
 	"desc" "Conquerors: Domination Demo Build"
-	"buildoutput" "/Users/codyharker/Desktop/cody/OG/client/steampipe/output"
-	"contentroot" "/Users/codyharker/Desktop/cody/OG/client"
-	"setlive" ""
+	"buildoutput" "output"
+	"contentroot" ".."
+	"setlive" "beta"
 	"preview" "0"
 	"local" ""
 	

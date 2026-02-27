@@ -53,7 +53,13 @@ jobs:
         run: |
           cd client
           npm run build-server
-          npx electron-builder --dir
+          if [ "${{ matrix.os }}" = "macos-latest" ]; then
+            npx electron-builder --mac --dir
+          elif [ "${{ matrix.os }}" = "windows-latest" ]; then
+            npx electron-builder --win --dir
+          else
+            npx electron-builder --linux --dir
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -62,9 +68,71 @@ jobs:
           cd client
           npm run test:smoke
 
+      - name: Fix Linux Permissions
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          chmod +x client/dist_electron/linux-unpacked/conquerors-domination-demo
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.os }}
+          path: |
+            client/dist_electron/win-unpacked
+            client/dist_electron/mac
+            client/dist_electron/linux-unpacked
+          if-no-files-found: warn
+
       - name: Upload Screenshot
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: launch-screenshot-${{ matrix.os }}
           path: client/tests/output/launch-screenshot.png
+
+  deploy-steam:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Windows Build
+        uses: actions/download-artifact@v4
+        with:
+          name: build-windows-latest
+          path: client/dist_electron/win-unpacked
+
+      - name: Download macOS Build
+        uses: actions/download-artifact@v4
+        with:
+          name: build-macos-latest
+          path: client/dist_electron/mac
+
+      - name: Download Linux Build
+        uses: actions/download-artifact@v4
+        with:
+          name: build-ubuntu-latest
+          path: client/dist_electron/linux-unpacked
+
+      - name: Fix Downloaded Permissions
+        run: |
+          chmod +x client/dist_electron/linux-unpacked/conquerors-domination-demo
+
+      - name: Steam Deploy
+        uses: game-ci/steam-deploy@v3
+        with:
+          username: ${{ secrets.STEAM_USERNAME }}
+          password: ${{ secrets.STEAM_PASSWORD }}
+          configVdf: ${{ secrets.STEAM_CONFIG_VDF }}
+          appId: 4432220
+          buildDescription: "v${{ github.run_number }}"
+          rootPath: client
+          depot1Id: 4432223
+          depot1Path: dist_electron/win-unpacked
+          depot2Id: 4432222
+          depot2Path: dist_electron/mac
+          depot3Id: 4432224
+          depot3Path: dist_electron/linux-unpacked
+
+
