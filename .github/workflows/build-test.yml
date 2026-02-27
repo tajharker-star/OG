@@ -153,6 +153,7 @@ jobs:
         uses: game-ci/steam-deploy@v3
         with:
           username: ${{ secrets.STEAM_USERNAME }}
+          password: ${{ secrets.STEAM_PASSWORD }}
           configVdf: ${{ secrets.STEAM_CONFIG_VDF }}
           appId: 4432220
           firstDepotIdOverride: 4432222
