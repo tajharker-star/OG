@@ -169,15 +169,23 @@ jobs:
           flatten_if_nested client/dist_electron/mac
           flatten_if_nested client/dist_electron/linux-unpacked
 
+          # Steam app packages currently mount depot 4432222 on macOS for this app.
+          # Copy the .app bundle into that depot path as a compatibility fallback.
+          if [ -d client/dist_electron/mac/ConquerorsDominationDemo.app ] && [ ! -d client/dist_electron/win-unpacked/ConquerorsDominationDemo.app ]; then
+            cp -R client/dist_electron/mac/ConquerorsDominationDemo.app client/dist_electron/win-unpacked/
+          fi
+
           test -f client/dist_electron/win-unpacked/ConquerorsDominationDemo.exe
           test -d client/dist_electron/mac/ConquerorsDominationDemo.app
           test -f client/dist_electron/mac/ConquerorsDominationDemo.app/Contents/MacOS/ConquerorsDominationDemo
           test -f client/dist_electron/linux-unpacked/conquerors-domination-demo
+          test -d client/dist_electron/win-unpacked/ConquerorsDominationDemo.app
 
           echo "Verified expected launch targets:"
           echo "- Windows launch: client/dist_electron/win-unpacked/ConquerorsDominationDemo.exe"
           echo "- macOS launch:   client/dist_electron/mac/ConquerorsDominationDemo.app"
           echo "- Linux launch:   client/dist_electron/linux-unpacked/conquerors-domination-demo"
+          echo "- macOS fallback in depot 4432222: client/dist_electron/win-unpacked/ConquerorsDominationDemo.app"
 
       - name: Select Steam auth mode
         id: steam-auth
