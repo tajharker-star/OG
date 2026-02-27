@@ -5,15 +5,20 @@ const fs = require('fs');
 const { spawn } = require('child_process');
 
 // In CJS, __dirname and __filename are already defined
-const steamworks = require('steamworks.js');
-
 let steamClient;
 let serverProcess;
 
-try {
-  steamClient = steamworks.init(4432220);
-} catch (e) {
-  console.error('[Steam] Failed to initialize:', e);
+// Steam native binaries may be missing on CI/Linux. Allow skipping via
+// DISABLE_STEAM=1 so smoke tests can launch the app without Steam present.
+if (process.env.DISABLE_STEAM === '1') {
+  console.log('[Steam] Disabled via DISABLE_STEAM=1');
+} else {
+  try {
+    const steamworks = require('steamworks.js');
+    steamClient = steamworks.init(4432220);
+  } catch (e) {
+    console.error('[Steam] Failed to load or initialize:', e);
+  }
 }
 
 // --- Performance Fixes ---

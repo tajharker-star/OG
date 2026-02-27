@@ -39,6 +39,12 @@ jobs:
           cd client
           npm install
 
+      - name: Install Linux Electron deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbfile1 libsecret-1-0 libgtk-3-0 libxss1 libasound2 libnss3 libatk1.0-0 libatk-bridge2.0-0 libdrm2 libgbm1
+
       - name: Install Playwright Browsers
         run: |
           cd client
@@ -48,6 +54,9 @@ jobs:
         run: |
           cd client
           npm run build
+
+      - name: Disable Steam for CI Smoke
+        run: echo "DISABLE_STEAM=1" >> $GITHUB_ENV
 
       - name: Package Electron App (Unpacked)
         shell: bash
@@ -59,8 +68,8 @@ jobs:
           cd client
           if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
             npx electron-builder --mac --x64 --dir
-            if [ -d "client/dist_electron/mac-x64" ]; then
-              mv client/dist_electron/mac-x64 client/dist_electron/mac
+            if [ -d "dist_electron/mac-x64" ]; then
+              mv dist_electron/mac-x64 dist_electron/mac
             fi
           elif [[ "${{ matrix.os }}" == "windows-latest" ]]; then
             npx electron-builder --win --dir
@@ -136,13 +145,10 @@ jobs:
           password: ${{ secrets.STEAM_PASSWORD }}
           configVdf: ${{ secrets.STEAM_CONFIG_VDF }}
           appId: 4432220
+          firstDepotIdOverride: 4432222
           buildDescription: "v${{ github.run_number }}"
           rootPath: client
-          depot1Id: 4432222
           depot1Path: dist_electron/win-unpacked
-          depot2Id: 4432223
           depot2Path: dist_electron/mac
-          depot3Id: 4432224
           depot3Path: dist_electron/linux-unpacked
-
-
+          releaseBranch: public
