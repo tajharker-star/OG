@@ -58,8 +58,10 @@ jobs:
           cd client/server && npm install --omit=dev && cd ../..
           cd client
           if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
-            npx electron-builder --mac --universal --dir
-            mv client/dist_electron/mac-universal client/dist_electron/mac
+            npx electron-builder --mac --x64 --dir
+            if [ -d "client/dist_electron/mac-x64" ]; then
+              mv client/dist_electron/mac-x64 client/dist_electron/mac
+            fi
           elif [[ "${{ matrix.os }}" == "windows-latest" ]]; then
             npx electron-builder --win --dir
           else
