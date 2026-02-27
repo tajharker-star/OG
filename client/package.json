@@ -24,17 +24,25 @@
     "files": [
       "dist/**/*",
       "electron/**/*",
-      "server/dist/**/*",
       "package.json",
       "steam_appid.txt"
+    ],
+    "extraResources": [
+      {
+        "from": "server",
+        "to": "server",
+        "filter": [
+          "dist/**/*",
+          "node_modules/**/*",
+          "package.json"
+        ]
+      }
     ],
     "mac": {
       "target": "dir",
       "category": "public.app-category.strategy-games",
-      "hardenedRuntime": true,
-      "gatekeeperAssess": false,
-      "entitlements": "build/entitlements.mac.plist",
-      "entitlementsInherit": "build/entitlements.mac.plist"
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false
     },
     "win": {
       "target": "dir"

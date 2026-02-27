@@ -99,19 +99,22 @@ function createWindow() {
   let serverCwd;
 
   if (isPackaged) {
-    // Try common locations for packaged server
-    const p1 = path.join(process.resourcesPath, 'app', 'server', 'dist', 'index.js');
-    const p2 = path.join(process.resourcesPath, 'server', 'dist', 'index.js');
-    const p3 = path.join(__dirname, '..', '..', 'server', 'dist', 'index.js');
-
-    if (fs.existsSync(p1)) serverPath = p1;
-    else if (fs.existsSync(p2)) serverPath = p2;
-    else serverPath = p3;
-
+    // Packaged mode: Server is in extraResources
+    serverPath = path.join(process.resourcesPath, 'server', 'dist', 'index.js');
     serverCwd = path.dirname(path.dirname(serverPath));
+
+    // Fallback just in case
+    if (!fs.existsSync(serverPath)) {
+      const fallback = path.join(__dirname, '..', '..', 'server', 'dist', 'index.js');
+      if (fs.existsSync(fallback)) {
+        serverPath = fallback;
+        serverCwd = path.dirname(path.dirname(serverPath));
+      }
+    }
   } else {
+    // Development mode
     serverPath = path.join(__dirname, '../../server/dist/index.js');
-    serverCwd = path.join(__dirname, '../../server'); // Run from server root, not dist
+    serverCwd = path.join(__dirname, '../../server');
   }
 
   // Create a log file for the server in the app directory

@@ -50,12 +50,16 @@ jobs:
           npm run build
 
       - name: Package Electron App (Unpacked)
+        shell: bash
         run: |
+          mkdir -p client/server/dist
+          cp -r server/dist/* client/server/dist/
+          cp server/package.json client/server/
+          cd client/server && npm install --omit=dev && cd ../..
           cd client
-          npm run build-server
-          if [ "${{ matrix.os }}" = "macos-latest" ]; then
+          if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
             npx electron-builder --mac --dir
-          elif [ "${{ matrix.os }}" = "windows-latest" ]; then
+          elif [[ "${{ matrix.os }}" == "windows-latest" ]]; then
             npx electron-builder --win --dir
           else
             npx electron-builder --linux --dir
