@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import { platforms } from "./release-config.mjs";
 
 const hostPlatformMap = {
@@ -27,8 +29,31 @@ const portByPlatform = {
   windows: "3903",
 };
 
-const child = spawn(target.binaryPath, [], {
-  cwd: target.stageDir,
+function resolvePackagedTarget(platform) {
+  if (fs.existsSync(platform.binaryPath)) {
+    return {
+      binaryPath: platform.binaryPath,
+      cwd: platform.stageDir,
+    };
+  }
+
+  if (platform.key === "macos") {
+    return {
+      binaryPath: path.join(platform.sourceDir, platform.launchExecutable, "Contents", "MacOS", "ConquerorsDominationDemo"),
+      cwd: platform.sourceDir,
+    };
+  }
+
+  return {
+    binaryPath: path.join(platform.sourceDir, platform.launchExecutable),
+    cwd: platform.sourceDir,
+  };
+}
+
+const packagedTarget = resolvePackagedTarget(target);
+
+const child = spawn(packagedTarget.binaryPath, [], {
+  cwd: packagedTarget.cwd,
   env: {
     ...process.env,
     CI: "1",
@@ -43,6 +68,12 @@ let stdout = "";
 let stderr = "";
 let finished = false;
 let timedOut = false;
+
+child.on("error", (error) => {
+  console.error(`Packaged ${target.label} smoke test failed to launch ${packagedTarget.binaryPath}.`);
+  console.error(error.stack || error.message);
+  process.exit(1);
+});
 
 child.stdout.on("data", (chunk) => {
   stdout += chunk.toString();
