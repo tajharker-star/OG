@@ -51,8 +51,9 @@ function resolvePackagedTarget(platform) {
 }
 
 const packagedTarget = resolvePackagedTarget(target);
+const launchArgs = process.platform === "linux" ? ["--no-sandbox"] : [];
 
-const child = spawn(packagedTarget.binaryPath, [], {
+const child = spawn(packagedTarget.binaryPath, launchArgs, {
   cwd: packagedTarget.cwd,
   env: {
     ...process.env,
