@@ -5,6 +5,7 @@ export const WallNodeStats: BuildingStats = {
     name: 'Wall Node',
     health: 200,
     maxHealth: 200,
+    radius: 10,
     cost: { gold: 20, oil: 0 },
     constructionTime: 50,
     description: 'Connection point for walls.'

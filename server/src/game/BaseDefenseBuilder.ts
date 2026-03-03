@@ -119,12 +119,28 @@ export class BaseDefenseBuilder {
         let budgetPerc = 1.0;
 
         // 3. Targets (full plan)
-        this.updateTargets(difficulty);
+        this.updateTargets(difficulty, gameState.mapType);
+        if (gameState.mapType === 'islands') {
+            const islandPlan = this.getIslandEdgeNodePlan(gameState, baseIsland, this.debugState.wallNodesTarget);
+            this.debugState.wallNodesTarget = islandPlan.length;
+            this.debugState.wallConnectionsExpected = islandPlan.length;
+            this.debugState.plannedNodes = islandPlan.map(node => ({ x: node.x, y: node.y }));
+            this.wallRingState.nodePositions = islandPlan.map(node => ({
+                x: node.x,
+                y: node.y,
+                angle: node.angle,
+                built: false
+            }));
+            this.wallRingState.planned = islandPlan.length > 0;
+        }
 
         // Opening defence targets (fast, light)
         let openingTowerTarget = 1;
         let openingNodeTarget = 4;
-        if (difficulty >= 5) {
+        if (gameState.mapType === 'islands') {
+            openingTowerTarget = 0;
+            openingNodeTarget = this.debugState.wallNodesTarget;
+        } else if (difficulty >= 5) {
             openingTowerTarget = 2;
             openingNodeTarget = 6;
         }
@@ -191,7 +207,10 @@ export class BaseDefenseBuilder {
         }
 
         if (this.debugState.openingState === 'CONNECT_WALLS_OPENING') {
-            if (this.debugState.wallNodesPlaced < openingNodeTarget) {
+            const openingConnectThreshold = gameState.mapType === 'islands'
+                ? Math.min(3, Math.max(0, openingNodeTarget))
+                : openingNodeTarget;
+            if (this.debugState.wallNodesPlaced < openingConnectThreshold) {
                 this.debugState.openingState = 'PLACE_NODES_OPENING';
             } else {
                 if (this.connectWalls(gameState, player, baseIsland, budgetPerc)) {
@@ -226,13 +245,17 @@ export class BaseDefenseBuilder {
 
             if (this.phase === 'PLACE_NODES') {
                 if (this.buildWallNodes(gameState, player, baseIsland, budgetPerc)) return;
-                if (this.debugState.wallNodesPlaced >= Math.max(4, this.debugState.wallNodesTarget)) {
+                const phaseNodeTarget = gameState.mapType === 'islands'
+                    ? Math.max(3, this.debugState.wallNodesTarget)
+                    : Math.max(4, this.debugState.wallNodesTarget);
+                if (this.debugState.wallNodesPlaced >= phaseNodeTarget) {
                     this.phase = 'CONNECT_WALLS';
                 }
             }
 
             if (this.phase === 'CONNECT_WALLS') {
-                if (this.debugState.wallNodesPlaced < 4) {
+                const reconnectThreshold = gameState.mapType === 'islands' ? 3 : 4;
+                if (this.debugState.wallNodesPlaced < reconnectThreshold) {
                     this.phase = 'PLACE_NODES';
                 } else {
                     if (this.connectWalls(gameState, player, baseIsland, budgetPerc)) return;
@@ -281,135 +304,60 @@ export class BaseDefenseBuilder {
         const hasWallResources = player.resources.gold >= (wallStats.cost.gold || 0) &&
                                  player.resources.oil >= (wallStats.cost.oil || 0);
 
-        // 1) Tower test: find any buildable land 300–600 from HQ
-        let towerPlaced = false;
-        let towerReason = 'UNKNOWN';
-        let towerPos = { x: hqX, y: hqY };
+        const hqRadius = this.getFootprintRadius('base');
+        const towerRing = this.getRingRadius(hqRadius, 'tower');
+        const towerCandidates = hasTowerResources
+            ? this.findNearestBuildableLandPositions(gameState, baseIsland, hqX, hqY, 'tower', 1, towerRing.ringMin, towerRing.ringMax)
+            : [];
 
         if (!hasTowerResources) {
-            towerReason = 'INSUFFICIENT_RESOURCES';
-            console.log(`[DEF_SMOKE] bot=${this.bot.playerId} tower place -> FAIL reason=${towerReason} pos=${hqX.toFixed(0)},${hqY.toFixed(0)} gold=${player.resources.gold}`);
-        } else if (!this.bot.consumeApm(1)) {
-            towerReason = 'NO_APM';
-            console.log(`[DEF_SMOKE] bot=${this.bot.playerId} tower place -> FAIL reason=${towerReason} pos=${hqX.toFixed(0)},${hqY.toFixed(0)}`);
+            console.log(`[DEF_SMOKE] bot=${this.bot.playerId} tower place -> FAIL reason=INSUFFICIENT_RESOURCES pos=${hqX.toFixed(0)},${hqY.toFixed(0)} gold=${player.resources.gold}`);
+        } else if (towerCandidates.length === 0) {
+            console.log(`[DEF_SMOKE] bot=${this.bot.playerId} tower place -> FAIL reason=NO_VALID_SLOT pos=${hqX.toFixed(0)},${hqY.toFixed(0)}`);
         } else {
-            for (let attempt = 0; attempt < 30 && !towerPlaced; attempt++) {
-                const angle = Math.random() * Math.PI * 2;
-                const dist = 300 + Math.random() * 300; // 300–600
-                const tx = hqX + Math.cos(angle) * dist;
-                const ty = hqY + Math.sin(angle) * dist;
-
-                const ok = gameState.buildStructure(this.bot.playerId, builder.id, 'tower', tx, ty);
-                if (ok) {
-                    towerPlaced = true;
-                    towerReason = 'OK';
-                    towerPos = { x: tx, y: ty };
-                    console.log(`[DEF_SMOKE] bot=${this.bot.playerId} tower place -> OK reason=${towerReason} pos=${tx.toFixed(0)},${ty.toFixed(0)}`);
-                    break;
-                }
-            }
-
-            if (!towerPlaced && towerReason === 'UNKNOWN') {
-                // If we had resources and APM but never found a spot, assume terrain/ownership issue
-                towerReason = 'INVALID_TERRAIN_OR_OWNERSHIP';
-                console.log(`[DEF_SMOKE] bot=${this.bot.playerId} tower place -> FAIL reason=${towerReason} pos=${hqX.toFixed(0)},${hqY.toFixed(0)} gold=${player.resources.gold}`);
-            }
+            const tower = towerCandidates[0];
+            console.log(`[DEF_SMOKE] bot=${this.bot.playerId} tower place -> OK reason=SIM_OK pos=${tower.x.toFixed(0)},${tower.y.toFixed(0)} builder=${builder.id}`);
         }
 
-        // 2) Wall node A/B: same 300–600 ring
-        const nodeIds: string[] = [];
+        const nodeRing = this.getRingRadius(hqRadius, 'wall_node');
+        const nodeCandidates = hasWallResources
+            ? this.findNearestBuildableLandPositions(gameState, baseIsland, hqX, hqY, 'wall_node', 2, nodeRing.ringMin, nodeRing.ringMax)
+            : [];
 
-        const tryPlaceWallNode = (label: 'A' | 'B') => {
-            if (!hasWallResources) {
-                const reason = 'INSUFFICIENT_RESOURCES';
-                console.log(`[DEF_SMOKE] bot=${this.bot.playerId} wallnode ${label} -> FAIL reason=${reason} pos=${hqX.toFixed(0)},${hqY.toFixed(0)} gold=${player.resources.gold}`);
-                return;
-            }
-
-            if (!this.bot.consumeApm(1)) {
-                console.log(`[DEF_SMOKE] bot=${this.bot.playerId} wallnode ${label} -> FAIL reason=NO_APM pos=${hqX.toFixed(0)},${hqY.toFixed(0)}`);
-                return;
-            }
-
-            let placed = false;
-            let px = hqX;
-            let py = hqY;
-
-            for (let attempt = 0; attempt < 30 && !placed; attempt++) {
-                const angle = Math.random() * Math.PI * 2;
-                const dist = 300 + Math.random() * 300;
-                const nx = hqX + Math.cos(angle) * dist;
-                const ny = hqY + Math.sin(angle) * dist;
-
-                const ok = gameState.buildStructure(this.bot.playerId, builder.id, 'wall_node', nx, ny);
-                if (ok) {
-                    placed = true;
-                    px = nx;
-                    py = ny;
-                    console.log(`[DEF_SMOKE] bot=${this.bot.playerId} wallnode ${label} -> OK reason=OK pos=${nx.toFixed(0)},${ny.toFixed(0)}`);
-
-                    // Find the node id we just created
-                    const built = baseIsland.buildings.find(b => 
-                        b.type === 'wall_node' && 
-                        Math.hypot((baseIsland.x + (b.x || 0)) - nx, (baseIsland.y + (b.y || 0)) - ny) < 60
-                    );
-                    if (built) nodeIds.push(built.id);
-                    break;
-                }
-            }
-
-            if (!placed) {
-                console.log(`[DEF_SMOKE] bot=${this.bot.playerId} wallnode ${label} -> FAIL reason=INVALID_TERRAIN_OR_OWNERSHIP pos=${px.toFixed(0)},${py.toFixed(0)}`);
-            }
-        };
-
-        tryPlaceWallNode('A');
-        tryPlaceWallNode('B');
-
-        // 3) Connection test A-B
-        if (nodeIds.length < 2) {
-            console.log(`[DEF_SMOKE] bot=${this.bot.playerId} connect A-B -> FAIL reason=INSUFFICIENT_NODES nodes=${nodeIds.length}`);
+        if (!hasWallResources) {
+            console.log(`[DEF_SMOKE] bot=${this.bot.playerId} wallnode A -> FAIL reason=INSUFFICIENT_RESOURCES pos=${hqX.toFixed(0)},${hqY.toFixed(0)} gold=${player.resources.gold}`);
+            console.log(`[DEF_SMOKE] bot=${this.bot.playerId} wallnode B -> FAIL reason=INSUFFICIENT_RESOURCES pos=${hqX.toFixed(0)},${hqY.toFixed(0)} gold=${player.resources.gold}`);
+            console.log(`[DEF_SMOKE] bot=${this.bot.playerId} connect A-B -> FAIL reason=INSUFFICIENT_NODES nodes=0`);
             return;
         }
 
-        const nodeA = baseIsland.buildings.find(b => b.id === nodeIds[0]);
-        const nodeB = baseIsland.buildings.find(b => b.id === nodeIds[1]);
-
-        if (!nodeA || !nodeB) {
-            console.log(`[DEF_SMOKE] bot=${this.bot.playerId} connect A-B -> FAIL reason=NODES_NOT_FOUND`);
+        if (nodeCandidates.length < 2) {
+            if (nodeCandidates.length >= 1) {
+                console.log(`[DEF_SMOKE] bot=${this.bot.playerId} wallnode A -> OK reason=SIM_OK pos=${nodeCandidates[0].x.toFixed(0)},${nodeCandidates[0].y.toFixed(0)}`);
+            } else {
+                console.log(`[DEF_SMOKE] bot=${this.bot.playerId} wallnode A -> FAIL reason=NO_VALID_SLOT pos=${hqX.toFixed(0)},${hqY.toFixed(0)}`);
+            }
+            console.log(`[DEF_SMOKE] bot=${this.bot.playerId} wallnode B -> FAIL reason=NO_VALID_SLOT pos=${hqX.toFixed(0)},${hqY.toFixed(0)}`);
+            console.log(`[DEF_SMOKE] bot=${this.bot.playerId} connect A-B -> FAIL reason=INSUFFICIENT_NODES nodes=${nodeCandidates.length}`);
             return;
         }
 
-        const ax = baseIsland.x + (nodeA.x || 0);
-        const ay = baseIsland.y + (nodeA.y || 0);
-        const bx = baseIsland.x + (nodeB.x || 0);
-        const by = baseIsland.y + (nodeB.y || 0);
-        const dist = Math.hypot(ax - bx, ay - by);
+        console.log(`[DEF_SMOKE] bot=${this.bot.playerId} wallnode A -> OK reason=SIM_OK pos=${nodeCandidates[0].x.toFixed(0)},${nodeCandidates[0].y.toFixed(0)}`);
+        console.log(`[DEF_SMOKE] bot=${this.bot.playerId} wallnode B -> OK reason=SIM_OK pos=${nodeCandidates[1].x.toFixed(0)},${nodeCandidates[1].y.toFixed(0)}`);
 
-        if (dist > 350) {
-            console.log(`[DEF_SMOKE] bot=${this.bot.playerId} connect A-B -> FAIL reason=OUT_OF_RANGE dist=${dist.toFixed(1)}`);
+        const connectionDistance = Math.hypot(nodeCandidates[0].x - nodeCandidates[1].x, nodeCandidates[0].y - nodeCandidates[1].y);
+        if (connectionDistance > 350) {
+            console.log(`[DEF_SMOKE] bot=${this.bot.playerId} connect A-B -> FAIL reason=OUT_OF_RANGE dist=${connectionDistance.toFixed(1)}`);
             return;
         }
 
-        if (!this.bot.consumeApm(1)) {
-            console.log(`[DEF_SMOKE] bot=${this.bot.playerId} connect A-B -> FAIL reason=NO_APM`);
-            return;
-        }
-
-        const beforeCount = gameState.map.bridges.length;
-        gameState.connectNodes(this.bot.playerId, nodeIds[0], nodeIds[1]);
-        const afterCount = gameState.map.bridges.length;
-
-        if (afterCount > beforeCount) {
-            console.log(`[DEF_SMOKE] bot=${this.bot.playerId} connect A-B -> OK reason=OK`);
-        } else {
-            console.log(`[DEF_SMOKE] bot=${this.bot.playerId} connect A-B -> FAIL reason=UNKNOWN`);
-        }
+        console.log(`[DEF_SMOKE] bot=${this.bot.playerId} connect A-B -> OK reason=SIM_OK dist=${connectionDistance.toFixed(1)}`);
     }
 
-    private updateTargets(difficulty: number) {
+    private updateTargets(difficulty: number, mapType?: string) {
         // Towers
-        if (difficulty <= 2) this.debugState.towersTarget = 2;
+        if (mapType === 'islands') this.debugState.towersTarget = 0;
+        else if (difficulty <= 2) this.debugState.towersTarget = 2;
         else if (difficulty <= 4) this.debugState.towersTarget = 3;
         else if (difficulty <= 6) this.debugState.towersTarget = 4;
         else if (difficulty <= 8) this.debugState.towersTarget = 6;
@@ -427,21 +375,289 @@ export class BaseDefenseBuilder {
         this.debugState.wallConnectionsExpected = this.debugState.wallNodesTarget;
     }
 
-    private getRingRadius(hqRadius: number): { ringMin: number; ringMax: number; ringRadius: number } {
-        const minDistFromHQ = hqRadius + 40;
-        const maxDistFromHQ = hqRadius + 170;
-        const preferred = hqRadius + 110;
+    private getRingRadius(hqRadius: number, structureType: 'tower' | 'wall_node'): { ringMin: number; ringMax: number; ringRadius: number } {
+        const structureRadius = this.getFootprintRadius(structureType);
+        const minDistFromHQ = hqRadius + structureRadius + 12;
+        const preferred = minDistFromHQ + (structureType === 'tower' ? 18 : 28);
+        const maxDistFromHQ = minDistFromHQ + (structureType === 'tower' ? 80 : 120);
         const ringRadius = Math.max(minDistFromHQ, Math.min(preferred, maxDistFromHQ));
         return { ringMin: minDistFromHQ, ringMax: maxDistFromHQ, ringRadius };
     }
 
     private getFootprintRadius(type: string): number {
-        if (type === 'base') return 140;
-        if (type === 'tower') return 80;
-        if (type === 'wall_node') return 50;
-        if (type === 'dock') return 90;
-        if (type === 'mine') return 60;
-        return 40;
+        const configured = BuildingData[type]?.radius;
+        if (typeof configured === 'number') return configured;
+        if (type === 'base') return 36;
+        if (type === 'tower') return 18;
+        if (type === 'wall_node' || type === 'bridge_node' || type === 'wall') return 10;
+        if (type === 'dock') return 28;
+        if (type === 'mine') return 24;
+        return 30;
+    }
+
+    private resolveBuildIsland(gameState: GameState, x: number, y: number): Island | null {
+        const matches = gameState.map.islands.filter(candidate => {
+            if (candidate.points) {
+                return MapGenerator.isPointInPolygon(x, y, candidate.points);
+            }
+            return Math.hypot(candidate.x - x, candidate.y - y) < candidate.radius + 50;
+        });
+
+        matches.sort((left, right) => left.radius - right.radius);
+        return matches[0] || null;
+    }
+
+    private normalizeAngle(angle: number): number {
+        let normalized = angle;
+        while (normalized <= -Math.PI) normalized += Math.PI * 2;
+        while (normalized > Math.PI) normalized -= Math.PI * 2;
+        return normalized;
+    }
+
+    private angularDistance(a: number, b: number): number {
+        return Math.abs(this.normalizeAngle(a - b));
+    }
+
+    private sampleIslandCoastline(
+        island: Island,
+        insideOffset: number,
+        sampleSpacing: number = 18
+    ): { edgeX: number; edgeY: number; x: number; y: number }[] {
+        const samples: { edgeX: number; edgeY: number; x: number; y: number }[] = [];
+
+        const pushSample = (edgeX: number, edgeY: number) => {
+            const dx = edgeX - island.x;
+            const dy = edgeY - island.y;
+            const length = Math.hypot(dx, dy) || 1;
+            const x = edgeX - (dx / length) * insideOffset;
+            const y = edgeY - (dy / length) * insideOffset;
+
+            if (island.points && !MapGenerator.isPointInPolygon(x, y, island.points)) {
+                return;
+            }
+
+            if (samples.some(sample => Math.hypot(sample.x - x, sample.y - y) < 8)) {
+                return;
+            }
+
+            samples.push({ edgeX, edgeY, x, y });
+        };
+
+        if (island.points && island.points.length > 1) {
+            for (let i = 0; i < island.points.length; i++) {
+                const start = island.points[i];
+                const end = island.points[(i + 1) % island.points.length];
+                const segmentLength = Math.hypot(end.x - start.x, end.y - start.y);
+                const steps = Math.max(2, Math.ceil(segmentLength / sampleSpacing));
+
+                for (let step = 0; step < steps; step++) {
+                    const t = step / steps;
+                    const edgeX = start.x + (end.x - start.x) * t;
+                    const edgeY = start.y + (end.y - start.y) * t;
+                    pushSample(edgeX, edgeY);
+                }
+            }
+            return samples;
+        }
+
+        const angleSamples = 36;
+        const radius = Math.max(0, island.radius);
+        for (let i = 0; i < angleSamples; i++) {
+            const angle = (i / angleSamples) * Math.PI * 2;
+            const edgeX = island.x + Math.cos(angle) * radius;
+            const edgeY = island.y + Math.sin(angle) * radius;
+            pushSample(edgeX, edgeY);
+        }
+        return samples;
+    }
+
+    private hasDockWaterSpawn(gameState: GameState, absX: number, absY: number): boolean {
+        const radii = [40, 60, 80, 100, 120, 150, 180, 200];
+        for (const radius of radii) {
+            for (let i = 0; i < 8; i++) {
+                const angle = (i / 8) * Math.PI * 2;
+                const tx = absX + Math.cos(angle) * radius;
+                const ty = absY + Math.sin(angle) * radius;
+                if (gameState.isValidPosition(tx, ty, 'destroyer')) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private isDockPlacementCandidate(gameState: GameState, island: Island, absX: number, absY: number): boolean {
+        if (!gameState.isBuildingPlacementClearOnIsland(island, 'dock', absX, absY)) {
+            return false;
+        }
+
+        if (island.points) {
+            if (!MapGenerator.isPointInPolygon(absX, absY, island.points)) {
+                return false;
+            }
+
+            const closest = MapGenerator.getClosestPointOnPolygon(absX, absY, island.points);
+            if (Math.hypot(absX - closest.x, absY - closest.y) > 20) {
+                return false;
+            }
+        } else {
+            const distance = Math.hypot(absX - island.x, absY - island.y);
+            if (distance < Math.max(0, island.radius - 24) || distance > island.radius + 2) {
+                return false;
+            }
+        }
+
+        return this.hasDockWaterSpawn(gameState, absX, absY);
+    }
+
+    public getPreferredDockPlacement(gameState: GameState, island: Island): { x: number; y: number; angle: number } | null {
+        const existingDock = island.buildings.find(
+            building => building.type === 'dock' && building.ownerId === this.bot.playerId
+        );
+        if (existingDock) {
+            const absX = island.x + (existingDock.x || 0);
+            const absY = island.y + (existingDock.y || 0);
+            return {
+                x: absX,
+                y: absY,
+                angle: Math.atan2(absY - island.y, absX - island.x)
+            };
+        }
+
+        const shorelineSamples = this.sampleIslandCoastline(island, 14, 14);
+        if (shorelineSamples.length === 0) {
+            return null;
+        }
+
+        const nearestOil = gameState.map.oilSpots.reduce<{ x: number; y: number } | null>((best, spot) => {
+            if (spot.occupiedBy && !String(spot.occupiedBy).startsWith('oil_')) {
+                return best;
+            }
+
+            const currentDistance = Math.hypot(spot.x - island.x, spot.y - island.y);
+            if (!best) {
+                return { x: spot.x, y: spot.y };
+            }
+
+            const bestDistance = Math.hypot(best.x - island.x, best.y - island.y);
+            return currentDistance < bestDistance ? { x: spot.x, y: spot.y } : best;
+        }, null);
+
+        let bestCandidate: { x: number; y: number; angle: number; score: number } | null = null;
+        for (const sample of shorelineSamples) {
+            if (!this.isDockPlacementCandidate(gameState, island, sample.x, sample.y)) {
+                continue;
+            }
+
+            let score = 0;
+            if (nearestOil) {
+                score += Math.hypot(sample.x - nearestOil.x, sample.y - nearestOil.y);
+            }
+
+            const crowdingPenalty = island.buildings.reduce((acc, building) => {
+                if (!building.ownerId || building.ownerId !== this.bot.playerId) return acc;
+                const buildingX = island.x + (building.x || 0);
+                const buildingY = island.y + (building.y || 0);
+                return acc + Math.max(0, 120 - Math.hypot(sample.x - buildingX, sample.y - buildingY));
+            }, 0);
+            score += crowdingPenalty * 2;
+
+            if (!bestCandidate || score < bestCandidate.score) {
+                bestCandidate = {
+                    x: sample.x,
+                    y: sample.y,
+                    angle: Math.atan2(sample.y - island.y, sample.x - island.x),
+                    score
+                };
+            }
+        }
+
+        if (!bestCandidate) {
+            return null;
+        }
+
+        return {
+            x: bestCandidate.x,
+            y: bestCandidate.y,
+            angle: bestCandidate.angle
+        };
+    }
+
+    private getIslandGateHalfAngle(island: Island): number {
+        const dockRadius = this.getFootprintRadius('dock');
+        const effectiveRadius = Math.max(40, island.radius - dockRadius);
+        return Math.max(0.32, Math.min(0.72, (dockRadius * 1.6) / effectiveRadius));
+    }
+
+    private getIslandEdgeNodePlan(
+        gameState: GameState,
+        island: Island,
+        targetCount: number
+    ): { x: number; y: number; angle: number }[] {
+        const base = island.buildings.find(building => building.type === 'base' && building.ownerId === this.bot.playerId);
+        if (!base || targetCount <= 0) {
+            return [];
+        }
+
+        const hqX = island.x + (base.x || 0);
+        const hqY = island.y + (base.y || 0);
+        const dockPlacement = this.getPreferredDockPlacement(gameState, island);
+        const gapCenterAngle = dockPlacement
+            ? Math.atan2(dockPlacement.y - hqY, dockPlacement.x - hqX)
+            : 0;
+        const gapHalfAngle = this.getIslandGateHalfAngle(island);
+        const nodeSpacing = this.getFootprintRadius('wall_node') * 2 + 4;
+        const shorelineSamples = this.sampleIslandCoastline(
+            island,
+            this.getFootprintRadius('wall_node') + 6,
+            16
+        );
+
+        const candidates: { x: number; y: number; angle: number }[] = [];
+        for (const sample of shorelineSamples) {
+            if (!gameState.isBuildingPlacementClearOnIsland(island, 'wall_node', sample.x, sample.y)) {
+                continue;
+            }
+
+            const angle = Math.atan2(sample.y - hqY, sample.x - hqX);
+            if (dockPlacement && this.angularDistance(angle, gapCenterAngle) < gapHalfAngle) {
+                continue;
+            }
+
+            if (candidates.some(candidate => Math.hypot(candidate.x - sample.x, candidate.y - sample.y) < nodeSpacing)) {
+                continue;
+            }
+
+            candidates.push({ x: sample.x, y: sample.y, angle });
+        }
+
+        if (candidates.length === 0) {
+            return [];
+        }
+
+        candidates.sort((left, right) => left.angle - right.angle);
+        const desiredCount = Math.min(targetCount, candidates.length);
+        const selected: { x: number; y: number; angle: number }[] = [];
+        const usedIndexes = new Set<number>();
+        const stride = candidates.length / desiredCount;
+
+        for (let i = 0; i < desiredCount; i++) {
+            let index = Math.floor(i * stride);
+            while (usedIndexes.has(index) && index < candidates.length - 1) {
+                index++;
+            }
+            if (usedIndexes.has(index)) {
+                break;
+            }
+            usedIndexes.add(index);
+            selected.push(candidates[index]);
+        }
+
+        if (selected.length < Math.min(4, candidates.length)) {
+            return candidates.slice(0, Math.min(targetCount, candidates.length));
+        }
+
+        return selected;
     }
 
     private findNearestBuildableLandPositions(
@@ -455,8 +671,9 @@ export class BaseDefenseBuilder {
         maxDist: number,
         stats?: { tried: number; reasons: Record<string, number> }
     ): { x: number; y: number; angle: number }[] {
-        const clampedMin = Math.max(40, minDist);
-        const clampedMax = Math.max(clampedMin + 20, Math.min(maxDist, island.radius + 40));
+        const footprint = this.getFootprintRadius(type);
+        const clampedMin = Math.max(footprint + 8, minDist);
+        const clampedMax = Math.max(clampedMin + 20, maxDist);
         const radii: number[] = [];
         const step = 40;
         for (let r = clampedMin; r <= clampedMax; r += step) {
@@ -495,44 +712,16 @@ export class BaseDefenseBuilder {
                     continue;
                 }
 
-                const relX = x - island.x;
-                const relY = y - island.y;
-                const distIsland = Math.hypot(relX, relY);
-
-                if (island.points && island.points.length > 0) {
-                    const inside = MapGenerator.isPointInPolygon(x, y, island.points);
-                    if (!inside) {
-                        recordReject('REJECT_WATER');
-                        continue;
-                    }
-                    const closest = MapGenerator.getClosestPointOnPolygon(x, y, island.points);
-                    const edgeDist = Math.hypot(x - closest.x, y - closest.y);
-                    if (edgeDist < 30) {
-                        recordReject('REJECT_OUT_OF_BOUNDS');
-                        continue;
-                    }
-                } else {
-                    const maxIslandRadius = Math.max(0, island.radius - 30);
-                    if (distIsland > maxIslandRadius) {
-                        recordReject('REJECT_OUT_OF_BOUNDS');
-                        continue;
-                    }
+                if (!gameState.isBuildingPlacementClearOnIsland(island, type, x, y)) {
+                    recordReject('REJECT_INVALID_FOOTPRINT');
+                    rejected = true;
                 }
 
-                for (const b of island.buildings) {
-                    const bx = island.x + (b.x || 0);
-                    const by = island.y + (b.y || 0);
-                    const d = Math.hypot(bx - x, by - y);
-
-                    let threshold = 80;
-                    if (gameState.mapType === 'islands' && type === 'tower' && b.type === 'base') {
-                        threshold = 40;
-                    }
-
-                    if (d < threshold) {
-                        recordReject('REJECT_COLLISION_WITH_BUILDING');
+                if (!rejected) {
+                    const resolvedIsland = this.resolveBuildIsland(gameState, x, y);
+                    if (resolvedIsland && resolvedIsland.id !== island.id) {
+                        recordReject('REJECT_WRONG_OVERLAY_ISLAND');
                         rejected = true;
-                        break;
                     }
                 }
 
@@ -600,7 +789,7 @@ export class BaseDefenseBuilder {
     }
 
     private buildTowers(gameState: GameState, player: Player, island: Island, budgetPerc: number): boolean {
-        const currentTowers = island.buildings.filter(b => b.type === 'tower').length;
+        const currentTowers = island.buildings.filter(b => b.type === 'tower' && b.ownerId === this.bot.playerId).length;
         this.debugState.towersBuilt = currentTowers;
 
         if (currentTowers >= this.debugState.towersTarget) return false;
@@ -632,104 +821,55 @@ export class BaseDefenseBuilder {
 
         const hqX = island.x + (base.x || 0);
         const hqY = island.y + (base.y || 0);
-        const isIslands = gameState.mapType === 'islands';
+        const hqRadius = this.getFootprintRadius('base');
+        const ring = this.getRingRadius(hqRadius, 'tower');
+        const stats = { tried: 0, reasons: {} as Record<string, number> };
+        const candidates = this.findNearestBuildableLandPositions(
+            gameState,
+            island,
+            hqX,
+            hqY,
+            'tower',
+            this.debugState.towersTarget,
+            ring.ringMin,
+            ring.ringMax,
+            stats
+        );
 
-        if (isIslands) {
-            const hqRadius = this.getFootprintRadius('base');
-            const ring = this.getRingRadius(hqRadius);
-            const desired = this.debugState.towersTarget;
-            const existingTowers = island.buildings.filter(b => b.type === 'tower');
-            const stats = { tried: 0, reasons: {} as Record<string, number> };
-            const candidates = this.findNearestBuildableLandPositions(
-                gameState,
-                island,
-                hqX,
-                hqY,
-                'tower',
-                desired,
-                ring.ringMin,
-                ring.ringMax,
-                stats
-            );
-            const reasonsSummary = Object.entries(stats.reasons)
-                .map(([k, v]) => `${k}:${v}`)
-                .join(',');
-            console.log(
-                `[TOWER_CANDIDATES] bot=${this.bot.playerId} map=${gameState.mapType} tried=${stats.tried} valid=${candidates.length} reasons={${reasonsSummary}}`
-            );
-            if (candidates.length === 0) {
-                this.debugState.lastSkipReason = 'NO_LAND_TOWER_CANDIDATES';
-                return false;
-            }
-            const plannedTowers: { id: string | null; x: number; y: number; angle: number }[] = [];
-            for (const c of candidates) {
-                const already = existingTowers.some(t => {
-                    const tx = island.x + (t.x || 0);
-                    const ty = island.y + (t.y || 0);
-                    return Math.hypot(tx - c.x, ty - c.y) < this.getFootprintRadius('tower');
-                });
-                if (already) continue;
-                if (this.bot.consumeApm(1)) {
-                    gameState.buildStructure(this.bot.playerId, builder.id, 'tower', c.x, c.y);
-                    this.debugState.lastAction = 'Build Tower (Islands)';
-                    this.lastActionTime = now;
-                    this.debugState.lastBuilderId = builder.id;
-                    plannedTowers.push({ id: null, x: c.x, y: c.y, angle: c.angle });
-                    this.debugState.defenceTowers = plannedTowers;
-                    return true;
-                }
-            }
-            this.debugState.lastSkipReason = 'NO_TOWER_SLOT_ISLANDS';
+        if (candidates.length === 0) {
+            this.debugState.lastSkipReason = 'NO_LAND_TOWER_CANDIDATES';
             return false;
         }
 
-        const hqRadius = this.getFootprintRadius('base');
-        const ring = this.getRingRadius(hqRadius);
-        const nodeCount = this.debugState.wallNodesTarget || this.debugState.towersTarget || 1;
-        const nodeStep = (Math.PI * 2) / nodeCount;
-        const towerRadius = Math.max(ring.ringMin, ring.ringRadius - 30);
-
-        const plannedTowers: { id: string | null, x: number, y: number, angle: number }[] = [];
-
-        for (let i = 0; i < this.debugState.towersTarget; i++) {
-            const angle = i * nodeStep + nodeStep * 0.5;
-            const tx = hqX + Math.cos(angle) * towerRadius;
-            const ty = hqY + Math.sin(angle) * towerRadius;
-
-            const dist = Math.hypot(tx - hqX, ty - hqY);
-            console.log(
-                `[DEF_RADIUS] bot=${this.bot.playerId} placed=Tower dist=${dist.toFixed(
-                    1
-                )} min=${ring.ringMin.toFixed(1)} max=${ring.ringMax.toFixed(1)}`
-            );
-
-            if (!gameState.isValidPosition(tx, ty, 'builder')) {
-                this.debugState.lastSkipReason = 'NOT_LAND_TOWER';
-                continue;
+        for (const candidate of candidates) {
+            if (!this.bot.consumeApm(1)) {
+                this.debugState.lastSkipReason = 'NO_APM_TOWER';
+                return false;
             }
 
-            const occupied = island.buildings.some(b => Math.hypot((island.x + (b.x || 0)) - tx, (island.y + (b.y || 0)) - ty) < this.getFootprintRadius('tower'));
-            if (!occupied) {
-                if (this.bot.consumeApm(1)) {
-                    gameState.buildStructure(this.bot.playerId, builder.id, 'tower', tx, ty);
-                    this.debugState.lastAction = `Build Tower ${i + 1}`;
-                    this.lastActionTime = now;
-                    this.debugState.lastBuilderId = builder.id;
-                    plannedTowers.push({ id: null, x: tx, y: ty, angle });
-                    this.debugState.defenceTowers = plannedTowers;
-                    return true;
-                }
-            } else {
-                this.debugState.skip_invalid_placement++;
-                this.debugState.lastSkipReason = 'INVALID_PLACEMENT';
+            if (gameState.buildStructure(this.bot.playerId, builder.id, 'tower', candidate.x, candidate.y)) {
+                this.debugState.lastAction = 'Build Tower';
+                this.lastActionTime = now;
+                this.debugState.lastBuilderId = builder.id;
+                this.debugState.defenceTowers = island.buildings
+                    .filter(b => b.type === 'tower' && b.ownerId === this.bot.playerId)
+                    .map(b => {
+                        const tx = island.x + (b.x || 0);
+                        const ty = island.y + (b.y || 0);
+                        return { id: b.id || null, x: tx, y: ty, angle: Math.atan2(ty - hqY, tx - hqX) };
+                    });
+                return true;
             }
+
+            this.debugState.skip_invalid_placement++;
+            this.debugState.lastSkipReason = 'INVALID_TOWER_PLACEMENT';
         }
 
         return false;
     }
 
     private buildWallNodes(gameState: GameState, player: Player, island: Island, budgetPerc: number): boolean {
-        const existingNodes = island.buildings.filter(b => b.type === 'wall_node');
+        const existingNodes = island.buildings.filter(b => b.type === 'wall_node' && b.ownerId === this.bot.playerId);
         this.debugState.wallNodesPlaced = existingNodes.length;
         if (existingNodes.length >= this.debugState.wallNodesTarget) return false;
 
@@ -751,124 +891,67 @@ export class BaseDefenseBuilder {
             return false;
         }
 
-        const isIslands = gameState.mapType === 'islands';
-
-        if (isIslands) {
-            const base = island.buildings.find(b => b.type === 'base' && b.ownerId === this.bot.playerId);
-            if (!base) {
-                this.debugState.lastSkipReason = 'NO_BASE_FOR_WALL_NODES';
-                return false;
-            }
-            const hqX = island.x + (base.x || 0);
-            const hqY = island.y + (base.y || 0);
-            const hqRadius = this.getFootprintRadius('base');
-            const ring = this.getRingRadius(hqRadius);
-            const desired = this.debugState.wallNodesTarget;
-            const candidates = this.findNearestBuildableLandPositions(
-                gameState,
-                island,
-                hqX,
-                hqY,
-                'wall_node',
-                desired,
-                ring.ringMin,
-                ring.ringMax
-            );
-            if (candidates.length === 0) {
-                this.debugState.lastSkipReason = 'NO_LAND_WALL_NODE_CANDIDATES';
-                return false;
-            }
-            for (const c of candidates) {
-                const already = existingNodes.some(n => {
-                    const nx = island.x + (n.x || 0);
-                    const ny = island.y + (n.y || 0);
-                    return Math.hypot(nx - c.x, ny - c.y) < 40;
-                });
-                if (already) continue;
-                if (this.bot.consumeApm(1)) {
-                    gameState.buildStructure(this.bot.playerId, builder.id, 'wall_node', c.x, c.y);
-                    this.debugState.lastAction = 'Build Wall Node (Islands)';
-                    this.lastActionTime = now;
-                    this.debugState.lastBuilderId = builder.id;
-                    this.debugState.wallNodesPlaced = existingNodes.length + 1;
-                    this.debugState.defenceNodes = island.buildings
-                        .filter(b => b.type === 'wall_node')
-                        .map(b => {
-                            const nx = island.x + (b.x || 0);
-                            const ny = island.y + (b.y || 0);
-                            const angle = Math.atan2(ny - hqY, nx - hqX);
-                            return { id: b.id || null, x: nx, y: ny, angle };
-                        });
-                    return true;
-                }
-            }
-            this.debugState.lastSkipReason = 'NO_WALL_NODE_SLOT_ISLANDS';
+        const base = island.buildings.find(b => b.type === 'base' && b.ownerId === this.bot.playerId);
+        if (!base) {
+            this.debugState.lastSkipReason = 'NO_BASE_FOR_WALL_NODES';
             return false;
         }
 
-        if (!this.wallRingState.planned || this.wallRingState.nodePositions.length !== this.debugState.wallNodesTarget) {
-            this.planWallRing(island);
+        const hqX = island.x + (base.x || 0);
+        const hqY = island.y + (base.y || 0);
+        const candidates = gameState.mapType === 'islands'
+            ? this.getIslandEdgeNodePlan(gameState, island, this.debugState.wallNodesTarget)
+            : (() => {
+                const hqRadius = this.getFootprintRadius('base');
+                const ring = this.getRingRadius(hqRadius, 'wall_node');
+                return this.findNearestBuildableLandPositions(
+                    gameState,
+                    island,
+                    hqX,
+                    hqY,
+                    'wall_node',
+                    this.debugState.wallNodesTarget,
+                    ring.ringMin,
+                    ring.ringMax
+                );
+            })();
+
+        if (candidates.length === 0) {
+            this.debugState.lastSkipReason = 'NO_LAND_WALL_NODE_CANDIDATES';
+            return false;
         }
 
-        this.wallRingState.nodePositions.forEach(p => {
-            const match = existingNodes.find(n => Math.hypot((island.x + (n.x||0)) - p.x, (island.y + (n.y||0)) - p.y) < 50);
-            if (match) {
-                p.built = true;
-                p.id = match.id;
-            } else {
-                p.built = false;
-                p.id = undefined;
-            }
-        });
-
-        const target = this.wallRingState.nodePositions.find(p => !p.built);
-        if (target) {
-            let wx = target.x;
-            let wy = target.y;
-
-            if (!gameState.isValidPosition(wx, wy, 'builder')) {
-                let fixed = false;
-                const offsets = [
-                    { dx: 0, dy: 0 },
-                    { dx: 30, dy: 0 }, { dx: -30, dy: 0 },
-                    { dx: 0, dy: 30 }, { dx: 0, dy: -30 },
-                    { dx: 30, dy: 30 }, { dx: -30, dy: 30 },
-                    { dx: 30, dy: -30 }, { dx: -30, dy: -30 }
-                ];
-                for (const o of offsets) {
-                    const fx = wx + o.dx;
-                    const fy = wy + o.dy;
-                    if (gameState.isValidPosition(fx, fy, 'builder')) {
-                        wx = fx;
-                        wy = fy;
-                        fixed = true;
-                        break;
-                    }
-                }
-
-                if (!fixed) {
-                    console.log(`[BUILD_REJECT] type=wall_node reason=NOT_LAND pos=${wx.toFixed(0)},${wy.toFixed(0)}`);
-                    this.debugState.lastSkipReason = 'NOT_LAND_WALL_NODE';
-                    return false;
-                }
+        for (const candidate of candidates) {
+            const alreadyCovered = existingNodes.some(node => {
+                const nodeX = island.x + (node.x || 0);
+                const nodeY = island.y + (node.y || 0);
+                return Math.hypot(nodeX - candidate.x, nodeY - candidate.y) < this.getFootprintRadius('wall_node') * 2 + 6;
+            });
+            if (alreadyCovered) {
+                continue;
             }
 
-            if (this.bot.consumeApm(1)) {
-                gameState.buildStructure(this.bot.playerId, builder.id, 'wall_node', wx, wy);
-                this.debugState.lastAction = `Build Wall Node`;
+            if (!this.bot.consumeApm(1)) {
+                this.debugState.lastSkipReason = 'NO_APM_WALL_NODE';
+                return false;
+            }
+
+            if (gameState.buildStructure(this.bot.playerId, builder.id, 'wall_node', candidate.x, candidate.y)) {
+                this.debugState.lastAction = 'Build Wall Node';
                 this.lastActionTime = now;
                 this.debugState.lastBuilderId = builder.id;
-                target.x = wx;
-                target.y = wy;
-                target.built = true; 
-                this.debugState.defenceNodes = this.wallRingState.nodePositions.map(p => ({
-                    id: p.id || null,
-                    x: p.x,
-                    y: p.y,
-                    angle: p.angle
-                }));
+                this.debugState.wallNodesPlaced = existingNodes.length + 1;
+                this.debugState.defenceNodes = island.buildings
+                    .filter(b => b.type === 'wall_node' && b.ownerId === this.bot.playerId)
+                    .map(b => {
+                        const nx = island.x + (b.x || 0);
+                        const ny = island.y + (b.y || 0);
+                        return { id: b.id || null, x: nx, y: ny, angle: Math.atan2(ny - hqY, nx - hqX) };
+                    });
                 return true;
             }
+
+            this.debugState.lastSkipReason = 'INVALID_WALL_NODE_PLACEMENT';
         }
 
         return false;
@@ -884,7 +967,7 @@ export class BaseDefenseBuilder {
         const hqX = island.x + (base.x || 0);
         const hqY = island.y + (base.y || 0);
         const hqRadius = this.getFootprintRadius('base');
-        const ring = this.getRingRadius(hqRadius);
+        const ring = this.getRingRadius(hqRadius, 'wall_node');
         const count = this.debugState.wallNodesTarget;
         if (count <= 0) {
             this.wallRingState.planned = false;
@@ -914,10 +997,11 @@ export class BaseDefenseBuilder {
     }
 
     private connectWalls(gameState: GameState, player: Player, island: Island, budgetPerc: number): boolean {
+        const minimumNodes = gameState.mapType === 'islands' ? 3 : 4;
         const nodes = island.buildings.filter(
             b => b.type === 'wall_node' && b.ownerId === this.bot.playerId && !(b as any).isConstructing
         );
-        if (nodes.length < 4) {
+        if (nodes.length < minimumNodes) {
             this.debugState.lastSkipReason = 'NOT_ENOUGH_NODES';
             return false;
         }
@@ -936,18 +1020,22 @@ export class BaseDefenseBuilder {
         const hqX = island.x + (base.x || 0);
         const hqY = island.y + (base.y || 0);
 
-        const hqRadius = this.getFootprintRadius('base');
-        const minR = hqRadius + 40;
-        const maxR = hqRadius + 190;
+        const ringNodes = gameState.mapType === 'islands'
+            ? nodes
+            : (() => {
+                const hqRadius = this.getFootprintRadius('base');
+                const nodeRing = this.getRingRadius(hqRadius, 'wall_node');
+                const minR = nodeRing.ringMin - 10;
+                const maxR = nodeRing.ringMax + 20;
+                return nodes.filter(n => {
+                    const nx = island.x + (n.x || 0);
+                    const ny = island.y + (n.y || 0);
+                    const distance = Math.hypot(nx - hqX, ny - hqY);
+                    return distance >= minR && distance <= maxR;
+                });
+            })();
 
-        const ringNodes = nodes.filter(n => {
-            const nx = island.x + (n.x || 0);
-            const ny = island.y + (n.y || 0);
-            const d = Math.hypot(nx - hqX, ny - hqY);
-            return d >= minR && d <= maxR;
-        });
-
-        if (ringNodes.length < 4) {
+        if (ringNodes.length < minimumNodes) {
             this.debugState.lastSkipReason = 'NOT_ENOUGH_RING_NODES';
             return false;
         }
@@ -998,8 +1086,9 @@ export class BaseDefenseBuilder {
         const expectedSegments = sortedNodes.length;
 
         if (sortedNodes.length >= 2) {
-            const hqRadius = this.getFootprintRadius('base');
-            const ring = this.getRingRadius(hqRadius);
+            const ring = gameState.mapType === 'islands'
+                ? { ringRadius: island.radius - this.getFootprintRadius('wall_node') }
+                : this.getRingRadius(this.getFootprintRadius('base'), 'wall_node');
             const angles = sortedNodes.map(s => s.angle);
             let maxGap = 0;
             let totalDist = 0;
@@ -1061,21 +1150,42 @@ export class BaseDefenseBuilder {
     }
 
     private upgradeGate(gameState: GameState, island: Island): boolean {
-        const nodes = island.buildings.filter(b => b.type === 'wall_node');
+        const existingGate = gameState.map.bridges.find(bridge =>
+            bridge.ownerId === this.bot.playerId &&
+            bridge.type === 'gate' &&
+            (bridge.islandAId === island.id || bridge.islandBId === island.id)
+        );
+        if (existingGate) {
+            return false;
+        }
+
+        const base = island.buildings.find(b => b.type === 'base' && b.ownerId === this.bot.playerId);
+        const centerX = base ? island.x + (base.x || 0) : island.x;
+        const centerY = base ? island.y + (base.y || 0) : island.y;
+        const nodes = island.buildings.filter(b => b.type === 'wall_node' && b.ownerId === this.bot.playerId);
         if (nodes.length < 2) return false;
 
         const sortedNodes = nodes.map(n => {
-            const angle = Math.atan2((island.y + (n.y || 0)) - island.y, (island.x + (n.x || 0)) - island.x);
+            const angle = Math.atan2((island.y + (n.y || 0)) - centerY, (island.x + (n.x || 0)) - centerX);
             return { node: n, angle };
         }).sort((a, b) => a.angle - b.angle);
 
-        for (let i = 0; i < sortedNodes.length; i++) {
-            const current = sortedNodes[i].node;
-            const next = sortedNodes[(i + 1) % sortedNodes.length].node;
+        const preferredPairs = sortedNodes.map((entry, index) => {
+            const nextEntry = sortedNodes[(index + 1) % sortedNodes.length];
+            const gap = index === sortedNodes.length - 1
+                ? (sortedNodes[0].angle + Math.PI * 2) - entry.angle
+                : nextEntry.angle - entry.angle;
+            return {
+                current: entry.node,
+                next: nextEntry.node,
+                gap
+            };
+        }).sort((left, right) => right.gap - left.gap);
 
+        for (const pair of preferredPairs) {
             const bridge = gameState.map.bridges.find(b =>
-                ((b.nodeAId === current.id && b.nodeBId === next.id) ||
-                 (b.nodeAId === next.id && b.nodeBId === current.id)) &&
+                ((b.nodeAId === pair.current.id && b.nodeBId === pair.next.id) ||
+                 (b.nodeAId === pair.next.id && b.nodeBId === pair.current.id)) &&
                 b.ownerId === this.bot.playerId &&
                 b.type === 'wall'
             );
@@ -1088,8 +1198,8 @@ export class BaseDefenseBuilder {
                 return false;
             }
 
-            gameState.convertWallToGate(this.bot.playerId, current.id, next.id);
-            this.debugState.lastAction = `Upgrade Gate ${current.id}-${next.id}`;
+            gameState.convertWallToGate(this.bot.playerId, pair.current.id, pair.next.id);
+            this.debugState.lastAction = `Upgrade Gate ${pair.current.id}-${pair.next.id}`;
             this.debugState.wallConnectionsMade = this.debugState.wallConnectionsExpected;
             return true;
         }

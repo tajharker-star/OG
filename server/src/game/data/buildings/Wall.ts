@@ -5,6 +5,7 @@ export const WallStats: BuildingStats = {
     name: 'Wall',
     health: 500,
     maxHealth: 500,
+    radius: 10,
     cost: { gold: 10, oil: 0 },
     constructionTime: 50,
     description: 'Defensive barrier.'

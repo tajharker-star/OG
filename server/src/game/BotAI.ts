@@ -1,5 +1,5 @@
 import { GameState, Unit, Player } from './GameState';
-import { Island } from './MapGenerator';
+import { Island, MapGenerator } from './MapGenerator';
 import { BuildingData, UnitData } from './data/Registry';
 import { AttackManager } from './AttackManager';
 import { BaseDefenseBuilder } from './BaseDefenseBuilder';
@@ -169,7 +169,7 @@ export class BotAI {
     this.debugState.intents = []; // Clear previous intents
     const player = gameState.players.get(this.playerId);
     if (!player) return;
-    const myIslands = gameState.map.islands.filter(i => i.ownerId === this.playerId);
+    const myIslands = this.getControlledIslands(gameState);
     const myUnits = gameState.units.filter(u => u.ownerId === this.playerId);
     if (myIslands.length === 0 && myUnits.length === 0) return; // Dead
 
@@ -179,7 +179,12 @@ export class BotAI {
         console.log(`[BOT_OPENING] bot=${this.playerId} startedAt=${this.openingStartedAt}`);
     }
     const beforeDefenceActions = this.baseDefenseBuilder.debugState.lastAction;
-    this.baseDefenseBuilder.tick(gameState, now);
+    const hasEarlyBarracks = myIslands.some(island => this.islandHasReadyOwnedBuildingOfType(island, 'barracks'));
+    const earlyCombatUnits = myUnits.filter(u => this.isCombatUnitType(u.type)).length;
+    const shouldDelayDesertDefences = gameState.mapType === 'desert' && (!hasEarlyBarracks || earlyCombatUnits < 6) && ((now - this.startTime) < 60000);
+    if (!shouldDelayDesertDefences) {
+        this.baseDefenseBuilder.tick(gameState, now);
+    }
     if (!this.openingFirstActionAt && this.baseDefenseBuilder.debugState.lastAction !== beforeDefenceActions) {
         this.openingFirstActionAt = now;
         console.log(`[BOT_OPENING] bot=${this.playerId} firstAction=${this.baseDefenseBuilder.debugState.lastAction} at=${this.openingFirstActionAt}`);
@@ -440,13 +445,14 @@ export class BotAI {
       let defendScore = 0;
       // Simple check: Any enemies near my buildings?
       const enemies = gameState.units.filter(u => u.ownerId !== this.playerId);
-      const myBuildings = gameState.map.islands
-          .filter(i => i.ownerId === this.playerId)
-          .flatMap(i => i.buildings);
+      const myBuildings = this.getControlledIslands(gameState)
+          .flatMap(i => i.buildings
+              .filter(b => b.ownerId === this.playerId)
+              .map(b => ({ x: i.x + (b.x || 0), y: i.y + (b.y || 0) })));
           
       for (const enemy of enemies) {
           for (const b of myBuildings) {
-              if (Math.hypot(enemy.x - (b.x||0) - (b as any).islandX, enemy.y - (b.y||0) - (b as any).islandY) < 500) {
+              if (Math.hypot(enemy.x - b.x, enemy.y - b.y) < 500) {
                   defendScore = 200; // Emergency Priority
                   break;
               }
@@ -487,7 +493,7 @@ export class BotAI {
           this.buildAvailableMines(gameState, player, island);
 
           // 2. Dock
-          const docks = island.buildings.filter(b => b.type === 'dock').length;
+          const docks = this.countOwnedBuildingsOfType(island, 'dock');
           // Cap: L1-3=1, L4-6=2, L7-8=3, L9-10=4
           let dockCap = 1;
           if (this.difficulty >= 9) dockCap = 4;
@@ -500,7 +506,7 @@ export class BotAI {
       });
 
       // 3. Naval Economy (Construction Ships)
-      const hasDock = myIslands.some(i => i.buildings.some(b => b.type === 'dock'));
+      const hasDock = myIslands.some(i => this.islandHasOwnedBuildingOfType(i, 'dock'));
       if (hasDock) {
           const consShips = myUnits.filter(u => u.type === 'construction_ship').length;
           const desiredShips = Math.max(1, Math.floor(this.difficulty / 3));
@@ -548,7 +554,7 @@ export class BotAI {
       const builders = myUnits.filter(u => u.type === 'builder');
       builders.forEach(b => {
            if (b.status !== 'idle') return;
-           const hasDock = myIslands.some(i => i.buildings.some(build => build.type === 'dock'));
+           const hasDock = myIslands.some(i => this.islandHasOwnedBuildingOfType(i, 'dock'));
            if (!hasDock) {
                const nearestOil: any = this.findNearestUnoccupiedOil(gameState, b.x, b.y, false);
                if (nearestOil) {
@@ -567,7 +573,7 @@ export class BotAI {
           
           const nearbyOil = gameState.map.oilSpots?.some(s => Math.hypot(s.x - island.x, s.y - island.y) < island.radius + 800);
           if (nearbyOil) {
-              const docks = island.buildings.filter(b => b.type === 'dock').length;
+              const docks = this.countOwnedBuildingsOfType(island, 'dock');
               // "second dock at level>=6"
               const dockCap = this.difficulty >= 6 ? 2 : 1;
               
@@ -578,7 +584,7 @@ export class BotAI {
       });
 
       // 3. Oil Expansion
-      const hasDock = myIslands.some(i => i.buildings.some(b => b.type === 'dock'));
+      const hasDock = myIslands.some(i => this.islandHasOwnedBuildingOfType(i, 'dock'));
       if (hasDock) {
            const consShips = myUnits.filter(u => u.type === 'construction_ship').length;
            if (consShips < 2) {
@@ -600,12 +606,12 @@ export class BotAI {
 
       // 5. Land Army
       workingIslands.forEach(island => {
-          const barracks = island.buildings.filter(b => b.type === 'barracks').length;
+          const barracks = this.countOwnedBuildingsOfType(island, 'barracks');
           if (barracks < 2 && this.canAfford(player, 'barracks')) {
               this.ensureBuilderAndBuild(gameState, island, 'barracks');
           }
           if (this.difficulty >= 5) {
-               const factories = island.buildings.filter(b => b.type === 'tank_factory').length;
+               const factories = this.countOwnedBuildingsOfType(island, 'tank_factory');
                if (factories < 2 && this.canAfford(player, 'tank_factory')) {
                    this.ensureBuilderAndBuild(gameState, island, 'tank_factory');
                }
@@ -616,17 +622,15 @@ export class BotAI {
 
   private runDesertStrategy(gameState: GameState, player: Player, myIslands: Island[], myUnits: Unit[]) {
       const workingIslands = this.getWorkingIslands(gameState, myIslands, myUnits);
-      
-      workingIslands.forEach(island => this.buildAvailableMines(gameState, player, island));
 
       // "always exactly 2 builders total"
       const builders = myUnits.filter(u => u.type === 'builder').length;
       const totalBuilders = gameState.units.filter(u => u.ownerId === this.playerId && u.type === 'builder').length;
       const cap = this.getBuilderCap();
       if (builders < 2 && totalBuilders < cap && player.resources.gold >= 150) {
-          const base = myIslands.find(i => i.buildings.some(b => b.type === 'base'));
+          const base = this.getOwnedBaseIsland(gameState, myIslands);
           if (base) {
-              const baseB = base.buildings.find(b => b.type === 'base');
+              const baseB = base.buildings.find(b => b.type === 'base' && b.ownerId === this.playerId);
               if (baseB && this.consumeApm(1)) {
                   gameState.recruitUnit(this.playerId, base.id, 'builder', baseB.id);
                   this.markAction(Date.now());
@@ -635,19 +639,20 @@ export class BotAI {
       }
 
       workingIslands.forEach(island => {
-          const barracks = island.buildings.filter(b => b.type === 'barracks').length;
+          const barracks = this.countOwnedBuildingsOfType(island, 'barracks');
           if (barracks === 0 && builders >= 2 && this.canAfford(player, 'barracks')) {
               this.ensureBuilderAndBuild(gameState, island, 'barracks');
           }
       });
 
-      const hasBarracks = myIslands.some(i => i.buildings.some(b => b.type === 'barracks'));
-      if (hasBarracks) {
-          const seekers = myUnits.filter(u => u.type === 'oil_seeker').length;
-          if (seekers < 1) {
-              this.recruitUnitType(gameState, player, myIslands, 'oil_seeker', 'barracks');
-          }
+      const hasReadyBarracks = myIslands.some(i => this.islandHasReadyOwnedBuildingOfType(i, 'barracks'));
+      if (hasReadyBarracks) {
+          workingIslands.forEach(island => this.buildAvailableMines(gameState, player, island));
+      }
+
+      if (hasReadyBarracks) {
           this.manageOnshoreOil(gameState, player, myUnits, myIslands);
+          this.recruitUnitType(gameState, player, myIslands, 'soldier', 'barracks');
       }
 
       if (this.hasStableOil(player)) {
@@ -690,9 +695,53 @@ export class BotAI {
       return true;
   }
 
+  private getControlledIslands(gameState: GameState): Island[] {
+      return gameState.map.islands.filter(i =>
+          i.ownerId === this.playerId || i.buildings.some(b => b.ownerId === this.playerId)
+      );
+  }
+
+  private islandHasOwnedBuildingOfType(island: Island, type: string): boolean {
+      return island.buildings.some(b => b.type === type && b.ownerId === this.playerId);
+  }
+
+  private islandHasReadyOwnedBuildingOfType(island: Island, type: string): boolean {
+      return island.buildings.some(b => b.type === type && b.ownerId === this.playerId && !b.isConstructing);
+  }
+
+  private countOwnedBuildingsOfType(island: Island, type: string): number {
+      return island.buildings.filter(b => b.type === type && b.ownerId === this.playerId).length;
+  }
+
+  private getOwnedBaseIsland(gameState: GameState, islands?: Island[]): Island | undefined {
+      const candidates = islands ?? this.getControlledIslands(gameState);
+      return candidates.find(i => i.buildings.some(b => b.type === 'base' && b.ownerId === this.playerId));
+  }
+
+  private getEnemyBuildings(gameState: GameState): { id: string; x: number; y: number; ownerId?: string; type: string }[] {
+      const enemyBuildings: { id: string; x: number; y: number; ownerId?: string; type: string }[] = [];
+
+      gameState.map.islands.forEach(island => {
+          island.buildings.forEach(building => {
+              const ownerId = building.ownerId || island.ownerId;
+              if (!ownerId || ownerId === this.playerId) return;
+
+              enemyBuildings.push({
+                  id: building.id,
+                  x: island.x + (building.x || 0),
+                  y: island.y + (building.y || 0),
+                  ownerId,
+                  type: building.type
+              });
+          });
+      });
+
+      return enemyBuildings;
+  }
+
   private playerHasOilBuilding(gameState: GameState, myIslands: Island[]): boolean {
       const hasIslandOil = myIslands.some(i => 
-          i.buildings.some(b => b.type === 'oil_rig' || b.type === 'oil_well')
+          i.buildings.some(b => (b.type === 'oil_rig' || b.type === 'oil_well') && b.ownerId === this.playerId)
       );
       if (hasIslandOil) return true;
       return gameState.map.oilSpots.some(s => (s as any).ownerId === this.playerId);
@@ -700,8 +749,8 @@ export class BotAI {
 
   private considerHQUpgrade(gameState: GameState, player: Player) {
       const now = Date.now();
-      const myIslands = gameState.map.islands.filter(i => i.ownerId === this.playerId);
-      const baseIsland = myIslands.find(i => i.buildings.some(b => b.type === 'base' && b.ownerId === this.playerId));
+      const myIslands = this.getControlledIslands(gameState);
+      const baseIsland = this.getOwnedBaseIsland(gameState, myIslands);
       if (!baseIsland) return;
 
       const base = baseIsland.buildings.find(b => b.type === 'base' && b.ownerId === this.playerId);
@@ -808,7 +857,7 @@ export class BotAI {
       if (!hasOilIncome) {
           forcedObjective = 'OIL';
           if (baseIsland) {
-              const docks = baseIsland.buildings.filter(b => b.type === 'dock').length;
+              const docks = this.countOwnedBuildingsOfType(baseIsland, 'dock');
               if (docks === 0 && this.canAfford(player, 'dock')) {
                   this.ensureBuilderAndBuild(gameState, baseIsland, 'dock');
               } else {
@@ -847,9 +896,11 @@ export class BotAI {
 
       const hasOilIncome = this.hasStableOil(player) || this.playerHasOilBuilding(gameState, myIslands);
 
-      const docks = myIslands.some(i => i.buildings.some(b => b.type === 'dock'));
+      const docks = myIslands.some(i => this.islandHasOwnedBuildingOfType(i, 'dock'));
       const ships = myUnits.some(u => u.type === 'construction_ship');
-      const oilBuildings = myIslands.some(i => i.buildings.some(b => b.type === 'oil_rig' || b.type === 'oil_well'));
+      const oilBuildings = myIslands.some(i =>
+          i.buildings.some(b => (b.type === 'oil_rig' || b.type === 'oil_well') && b.ownerId === this.playerId)
+      );
 
       let oilState = 'NONE';
       if (!docks && !ships && !oilBuildings) oilState = 'NONE';
@@ -912,12 +963,12 @@ export class BotAI {
 
       const workingIslands = this.getWorkingIslands(gameState, myIslands, myUnits);
       let airBaseCount = 0;
-      myIslands.forEach(i => airBaseCount += i.buildings.filter(b => b.type === 'air_base').length);
+      myIslands.forEach(i => airBaseCount += this.countOwnedBuildingsOfType(i, 'air_base'));
 
       if (airBaseCount < 2) {
           workingIslands.forEach(island => {
               if (this.canAfford(player, 'air_base')) {
-                   const existing = island.buildings.filter(b => b.type === 'air_base').length;
+                   const existing = this.countOwnedBuildingsOfType(island, 'air_base');
                    if (existing < 1) {
                        this.ensureBuilderAndBuild(gameState, island, 'air_base');
                    }
@@ -971,8 +1022,8 @@ export class BotAI {
             if (motherships.length > 0) rally = motherships[0];
             else if (carriers.length > 0) rally = carriers[0];
             else {
-                 const myIslands = gameState.map.islands.filter(i => i.ownerId === this.playerId);
-                 const airbase = myIslands.find(i => i.buildings.some(b => b.type === 'air_base'));
+                 const myIslands = this.getControlledIslands(gameState);
+                 const airbase = myIslands.find(i => this.islandHasOwnedBuildingOfType(i, 'air_base'));
                  if (airbase) rally = airbase;
                  else if (myIslands.length > 0) rally = myIslands[0];
             }
@@ -1032,11 +1083,11 @@ export class BotAI {
                          this.moveUnitSafe(gameState, ms.id, target.x, target.y);
                      }
                  }
-             } else {
-                 // Stay near base
-                 const myIslands = gameState.map.islands.filter(i => i.ownerId === this.playerId);
+            } else {
+                // Stay near base
+                 const myIslands = this.getControlledIslands(gameState);
                  if (myIslands.length > 0) {
-                     const home = myIslands[0];
+                     const home = this.getOwnedBaseIsland(gameState, myIslands) || myIslands[0];
                      const dist = Math.hypot(home.x - ms.x, home.y - ms.y);
                      if (dist > 300) {
                          this.moveUnitSafe(gameState, ms.id, home.x, home.y);
@@ -1063,8 +1114,8 @@ export class BotAI {
                     rally = { x: c.x, y: c.y };
                 } else {
                     // Find Airbase
-                    const myIslands = gameState.map.islands.filter(i => i.ownerId === this.playerId);
-                    const airbase = myIslands.find(i => i.buildings.some(b => b.type === 'air_base'));
+                    const myIslands = this.getControlledIslands(gameState);
+                    const airbase = myIslands.find(i => this.islandHasOwnedBuildingOfType(i, 'air_base'));
                     if (airbase) rally = { x: airbase.x, y: airbase.y };
                     else if (myIslands.length > 0) rally = { x: myIslands[0].x, y: myIslands[0].y };
                 }
@@ -1084,13 +1135,13 @@ export class BotAI {
         });
     }
 
-    private isBaseUnderAttack(gameState: GameState): boolean {
+  private isBaseUnderAttack(gameState: GameState): boolean {
         // Check if any significant building is taking damage or has enemies nearby
-        const myIslands = gameState.map.islands.filter(i => i.ownerId === this.playerId);
+        const myIslands = this.getControlledIslands(gameState);
         
         for (const island of myIslands) {
             // Check Buildings Health
-            const damagedBuildings = island.buildings.some(b => b.health < b.maxHealth * 0.9);
+            const damagedBuildings = island.buildings.some(b => b.ownerId === this.playerId && b.health < b.maxHealth * 0.9);
             if (damagedBuildings) {
                 // Confirm it's enemy damage (enemy unit nearby)
                 const enemyNearby = gameState.units.some(u => 
@@ -1270,12 +1321,12 @@ export class BotAI {
 
     private findHomePatrolCenter(gameState: GameState): {x: number, y: number} | null {
         // Prefer Dock -> Base -> First Island
-        const myIslands = gameState.map.islands.filter(i => i.ownerId === this.playerId);
+        const myIslands = this.getControlledIslands(gameState);
         for (const i of myIslands) {
-            if (i.buildings.some(b => b.type === 'dock')) return { x: i.x, y: i.y };
+            if (this.islandHasOwnedBuildingOfType(i, 'dock')) return { x: i.x, y: i.y };
         }
         for (const i of myIslands) {
-            if (i.buildings.some(b => b.type === 'base')) return { x: i.x, y: i.y };
+            if (this.islandHasOwnedBuildingOfType(i, 'base')) return { x: i.x, y: i.y };
         }
         if (myIslands.length > 0) return { x: myIslands[0].x, y: myIslands[0].y };
         return null;
@@ -1319,9 +1370,9 @@ export class BotAI {
          
          // 1. Decapitate Strike (Level 10+)
          if (this.difficulty >= 10) {
-             const enemyBases = gameState.map.islands
-                 .filter(i => i.ownerId && i.ownerId !== this.playerId && i.buildings.some(b => b.type === 'base'))
-                 .map(i => ({ x: i.x, y: i.y, type: 'HQ_STRIKE' }));
+             const enemyBases = this.getEnemyBuildings(gameState)
+                 .filter(b => b.type === 'base')
+                 .map(b => ({ x: b.x, y: b.y, type: 'HQ_STRIKE' }));
              
              if (enemyBases.length > 0) {
                  const best = this.findClosest(unit, enemyBases);
@@ -1346,10 +1397,10 @@ export class BotAI {
          }
 
          // 4. Enemy Islands (Base Assault)
-         const enemyIslands = gameState.map.islands.filter(i => i.ownerId && i.ownerId !== this.playerId);
-         if (enemyIslands.length > 0) {
-             const bestIsland = this.findClosest(unit, enemyIslands);
-             return { x: bestIsland.x, y: bestIsland.y, type: 'ISLAND_ASSAULT' };
+         const enemyBuildings = this.getEnemyBuildings(gameState);
+         if (enemyBuildings.length > 0) {
+             const bestBuilding = this.findClosest(unit, enemyBuildings);
+             return { x: bestBuilding.x, y: bestBuilding.y, type: 'ISLAND_ASSAULT' };
          }
          
          // 5. Any Enemy Unit
@@ -1387,7 +1438,7 @@ export class BotAI {
         // Count existing
         let currentDefences = 0;
         myIslands.forEach(i => {
-            currentDefences += i.buildings.filter(b => b.type === 'tower').length;
+            currentDefences += i.buildings.filter(b => b.type === 'tower' && b.ownerId === this.playerId).length;
         });
 
         if (currentDefences >= maxDefences) return;
@@ -1396,7 +1447,7 @@ export class BotAI {
         // Prefer: Ring 1 (HQ), Ring 2 (Prod), Ring 3 (Res)
         // Find best island (Base > Factory > Mine)
         
-        const baseIsland = myIslands.find(i => i.buildings.some(b => b.type === 'base'));
+        const baseIsland = myIslands.find(i => i.buildings.some(b => b.type === 'base' && b.ownerId === this.playerId));
         if (baseIsland && this.canAfford(player, 'tower')) { 
              // Try to build tower near base
              this.orderBuilderToDefend(gameState, player, baseIsland);
@@ -1407,11 +1458,17 @@ export class BotAI {
         const builder = gameState.units.find(u => u.ownerId === this.playerId && u.type === 'builder' && u.status === 'idle');
         if (!builder) return;
 
-        const existingDefences = island.buildings.filter(b => b.type === 'tower').length;
-        
-        let minR = 250, maxR = 350;
-        if (existingDefences >= 2) { minR = 400; maxR = 500; }
-        if (existingDefences >= 4) { minR = 550; maxR = 650; }
+        const existingDefences = island.buildings.filter(b => b.type === 'tower' && b.ownerId === this.playerId).length;
+        const base = island.buildings.find(b => b.type === 'base' && b.ownerId === this.playerId);
+        const hqX = base ? island.x + (base.x || 0) : island.x;
+        const hqY = base ? island.y + (base.y || 0) : island.y;
+        const baseRadius = gameState.getBuildingFootprintRadius('base');
+        const towerRadius = gameState.getBuildingFootprintRadius('tower');
+
+        let minR = baseRadius + towerRadius + 12;
+        let maxR = minR + 80;
+        if (existingDefences >= 2) { minR += 24; maxR += 36; }
+        if (existingDefences >= 4) { minR += 36; maxR += 48; }
 
         // Scan for a valid spot
         let bestSpot: {x: number, y: number} | null = null;
@@ -1421,14 +1478,11 @@ export class BotAI {
         const steps = 16;
         for (let i = 0; i < steps; i++) {
             const angle = (i * Math.PI * 2 / steps) + (Date.now() / 10000); // Rotate slowly
-            const dist = (minR + maxR) / 2;
-            const bx = island.x + Math.cos(angle) * dist;
-            const by = island.y + Math.sin(angle) * dist;
+            const dist = minR + ((maxR - minR) * ((i % 4) / 3));
+            const bx = hqX + Math.cos(angle) * dist;
+            const by = hqY + Math.sin(angle) * dist;
 
-            // Simple collision check (avoid building on top of other buildings)
-            // b.x/b.y are relative to island. bx/by are absolute.
-            const overlap = island.buildings.some(b => Math.hypot((island.x + (b.x||0)) - bx, (island.y + (b.y||0)) - by) < 80);
-            if (overlap) continue;
+            if (!gameState.isBuildingPlacementClearOnIsland(island, 'tower', bx, by)) continue;
             
             // Distance from builder
             const d = Math.hypot(bx - builder.x, by - builder.y);
@@ -1443,10 +1497,6 @@ export class BotAI {
         if (bestSpot) {
             if (this.consumeApm(1)) {
                  if (this.canAfford(player, 'tower')) {
-                     if (!gameState.isValidPosition(bestSpot.x, bestSpot.y, 'builder')) {
-                         console.log(`[BUILD_REJECT] type=tower reason=NOT_LAND pos=${bestSpot.x.toFixed(0)},${bestSpot.y.toFixed(0)}`);
-                         return;
-                     }
                      if (bestDist <= 400) {
                          gameState.buildStructure(this.playerId, builder.id, 'tower', bestSpot.x, bestSpot.y);
                          this.logEvent('BUILD_DEFENCE', { type: 'tower', x: bestSpot.x, y: bestSpot.y });
@@ -1474,9 +1524,8 @@ export class BotAI {
           const humans = Array.from(gameState.players.values()).filter(p => !p.isBot && p.id !== this.playerId);
           if (humans.length > 0) {
               // Find human buildings
-              const humanBuildings = gameState.map.islands
-                  .filter(i => humans.some(h => h.id === i.ownerId))
-                  .flatMap(i => i.buildings.map(b => ({...b, x: i.x + (b.x||0), y: i.y + (b.y||0)})));
+              const humanIds = new Set(humans.map(h => h.id));
+              const humanBuildings = this.getEnemyBuildings(gameState).filter(b => b.ownerId && humanIds.has(b.ownerId));
               
               if (humanBuildings.length > 0) {
                   // Pick random or closest
@@ -1495,9 +1544,7 @@ export class BotAI {
 
       // 2. Standard Targeting (Closest Enemy)
       const enemies = gameState.units.filter(u => u.ownerId !== this.playerId);
-      const enemyBuildings = gameState.map.islands
-          .filter(i => i.ownerId && i.ownerId !== this.playerId)
-          .flatMap(i => i.buildings.map(b => ({...b, x: i.x + (b.x||0), y: i.y + (b.y||0)})));
+      const enemyBuildings = this.getEnemyBuildings(gameState);
 
       const all = [...enemies, ...enemyBuildings];
       if (all.length === 0) return null;
@@ -1538,13 +1585,11 @@ export class BotAI {
        let bestDock: any = null;
        let minD = Infinity;
        
-       gameState.map.islands.forEach(i => {
-           if (i.ownerId === this.playerId) {
-               const dock = i.buildings.find(b => b.type === 'dock');
-               if (dock) {
-                   const d = Math.hypot(i.x - unit.x, i.y - unit.y);
-                   if (d < minD) { minD = d; bestDock = i; }
-               }
+       this.getControlledIslands(gameState).forEach(i => {
+           const dock = i.buildings.find(b => b.type === 'dock' && b.ownerId === this.playerId);
+           if (dock) {
+               const d = Math.hypot(i.x - unit.x, i.y - unit.y);
+               if (d < minD) { minD = d; bestDock = i; }
            }
        });
 
@@ -1584,18 +1629,13 @@ export class BotAI {
       let highestScore = -Infinity;
 
       const enemies = gameState.units.filter(u => u.ownerId !== this.playerId);
-      const enemyBuildings: any[] = [];
-      gameState.map.islands.forEach(i => {
-          if (i.ownerId && i.ownerId !== this.playerId) {
-              i.buildings.forEach(b => enemyBuildings.push({...b, islandX: i.x, islandY: i.y}));
-          }
-      });
+      const enemyBuildings: any[] = this.getEnemyBuildings(gameState);
 
       const allTargets = [...enemies, ...enemyBuildings];
 
       allTargets.forEach(t => {
-          const tx = t.x || (t as any).islandX + (t.x||0);
-          const ty = t.y || (t as any).islandY + (t.y||0);
+          const tx = t.x;
+          const ty = t.y;
           
           let score = 0;
           const dist = Math.hypot(tx - unit.x, ty - unit.y);
@@ -1974,6 +2014,63 @@ export class BotAI {
       }
   }
 
+  private findAutoBuildPosition(gameState: GameState, island: Island, buildingType: string): { x: number; y: number } | null {
+      if (buildingType === 'dock') {
+          const preferredDock = this.baseDefenseBuilder.getPreferredDockPlacement(gameState, island);
+          if (preferredDock) {
+              return { x: preferredDock.x, y: preferredDock.y };
+          }
+      }
+
+      const baseIsland = this.getOwnedBaseIsland(gameState, [island]) || this.getOwnedBaseIsland(gameState);
+      const base = baseIsland?.buildings.find(b => b.type === 'base' && b.ownerId === this.playerId);
+      const anchorX = baseIsland && base ? baseIsland.x + (base.x || 0) : island.x;
+      const anchorY = baseIsland && base ? baseIsland.y + (base.y || 0) : island.y;
+      const targetFootprint = gameState.getBuildingFootprintRadius(buildingType);
+      const baseFootprint = base ? gameState.getBuildingFootprintRadius('base') : 0;
+      const minDistance = Math.max(targetFootprint + 20, baseFootprint + targetFootprint + 12);
+      const preferredMaxDistance = minDistance + 220;
+
+      const accept = (x: number, y: number) => {
+          return gameState.isBuildingPlacementClearOnIsland(island, buildingType, x, y);
+      };
+
+      for (let ring = 0; ring < 6; ring++) {
+          const distance = minDistance + ring * 36;
+          for (let step = 0; step < 20; step++) {
+              const angle = (step / 20) * Math.PI * 2 + ring * 0.17;
+              const x = anchorX + Math.cos(angle) * distance;
+              const y = anchorY + Math.sin(angle) * distance;
+              if (accept(x, y)) return { x, y };
+          }
+      }
+
+      if (island.points) {
+          const xs = island.points.map(p => p.x);
+          const ys = island.points.map(p => p.y);
+          const minX = Math.max(targetFootprint, Math.min(...xs) + targetFootprint + 4);
+          const maxX = Math.min(gameState.map.width - targetFootprint, Math.max(...xs) - targetFootprint - 4);
+          const minY = Math.max(targetFootprint, Math.min(...ys) + targetFootprint + 4);
+          const maxY = Math.min(gameState.map.height - targetFootprint, Math.max(...ys) - targetFootprint - 4);
+
+          for (let attempt = 0; attempt < 48; attempt++) {
+              const x = minX + Math.random() * Math.max(1, maxX - minX);
+              const y = minY + Math.random() * Math.max(1, maxY - minY);
+              if (accept(x, y)) return { x, y };
+          }
+      } else {
+          for (let attempt = 0; attempt < 48; attempt++) {
+              const angle = Math.random() * Math.PI * 2;
+              const distance = minDistance + Math.random() * Math.max(20, Math.min(preferredMaxDistance, Math.max(minDistance + 20, island.radius - targetFootprint - 8)) - minDistance);
+              const x = anchorX + Math.cos(angle) * distance;
+              const y = anchorY + Math.sin(angle) * distance;
+              if (accept(x, y)) return { x, y };
+          }
+      }
+
+      return null;
+  }
+
   private manageOffshoreOil(gameState: GameState, player: Player, myUnits: Unit[]) {
       const myConsShips = myUnits.filter(u => u.type === 'construction_ship' && u.status === 'idle');
       if (myConsShips.length === 0) return;
@@ -2008,15 +2105,26 @@ export class BotAI {
   }
 
   private manageOnshoreOil(gameState: GameState, player: Player, myUnits: Unit[], myIslands: Island[]) {
+      const allowHiddenOil = gameState.mapType === 'desert';
       myIslands.forEach(island => {
            const visibleOil = gameState.map.oilSpots?.filter(s => 
-               (!s.id.startsWith('hidden') || this.revealedSpots.has(s.id)) &&
+               (allowHiddenOil || !s.id.startsWith('hidden') || this.revealedSpots.has(s.id)) &&
                Math.hypot(s.x - island.x, s.y - island.y) < island.radius + 100 && 
                !(s as any).occupiedBy
            ) || [];
 
            if (visibleOil.length > 0 && this.canAfford(player, 'oil_well')) {
-                const target = visibleOil[0];
+                const base = this.getOwnedBaseIsland(gameState, [island])?.buildings.find(
+                    b => b.type === 'base' && b.ownerId === this.playerId
+                );
+                const anchorX = base ? island.x + (base.x || 0) : island.x;
+                const anchorY = base ? island.y + (base.y || 0) : island.y;
+                const target = visibleOil.reduce((best, spot) => {
+                    if (!best) return spot;
+                    const bestDist = Math.hypot(best.x - anchorX, best.y - anchorY);
+                    const spotDist = Math.hypot(spot.x - anchorX, spot.y - anchorY);
+                    return spotDist < bestDist ? spot : best;
+                }, visibleOil[0]);
                 this.ensureBuilderAndBuild(gameState, island, 'oil_well', target.x, target.y);
            }
       });
@@ -2055,6 +2163,7 @@ export class BotAI {
       for (const island of myIslands) {
           const building = island.buildings.find(b => 
               b.type === buildingType && 
+              b.ownerId === this.playerId &&
               !b.isConstructing && 
               (!b.recruitmentQueue || b.recruitmentQueue.length < 5)
           );
@@ -2093,7 +2202,7 @@ export class BotAI {
   private updateOilSecured(gameState: GameState, player: Player, myIslands: Island[], now: number) {
       let rigCount = 0;
       myIslands.forEach(island => {
-          rigCount += island.buildings.filter(b => b.type === 'oil_rig' || b.type === 'oil_well').length;
+          rigCount += island.buildings.filter(b => (b.type === 'oil_rig' || b.type === 'oil_well') && b.ownerId === this.playerId).length;
       });
       rigCount += gameState.map.oilSpots.filter(s => (s as any).ownerId === this.playerId).length;
 
@@ -2154,12 +2263,10 @@ export class BotAI {
                       buildType: type
                   });
               } else {
-                  // Auto pos
-                  // Simple radial search for valid spot
-                  const angle = Math.random() * Math.PI * 2;
-                  const dist = Math.random() * (island.radius - 20);
-                  const bx = island.x + Math.cos(angle) * dist;
-                  const by = island.y + Math.sin(angle) * dist;
+                  const buildSite = this.findAutoBuildPosition(gameState, island, type);
+                  if (!buildSite) return;
+                  const bx = buildSite.x;
+                  const by = buildSite.y;
                   gameState.buildStructure(this.playerId, builder.id, type as any, bx, by);
                   this.logEvent('BUILD_ORDER', { type, builderId: builder.id, x: bx, y: by });
                   this.debugState.intents.push({
@@ -2176,7 +2283,7 @@ export class BotAI {
           const totalBuilders = gameState.units.filter(u => u.ownerId === this.playerId && u.type === 'builder').length;
           const cap = this.getBuilderCap();
           if (totalBuilders >= cap) return;
-          const base = island.buildings.find(b => b.type === 'base');
+          const base = island.buildings.find(b => b.type === 'base' && b.ownerId === this.playerId);
           if (base && this.canAfford(gameState.players.get(this.playerId)!, 'builder')) {
               this.recruitUnitType(gameState, gameState.players.get(this.playerId)!, [island], 'builder', 'base');
           }

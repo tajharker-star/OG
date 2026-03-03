@@ -2,11 +2,72 @@ const electron = require('electron');
 const { app, BrowserWindow, ipcMain, dialog, globalShortcut } = electron;
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const { spawn } = require('child_process');
+
+const brokenStdIoErrorCodes = new Set(['EBADF', 'EINVAL', 'ENXIO']);
+const fallbackConsoleLogPath = path.join(os.tmpdir(), 'conquerors-domination-demo-main.log');
+
+function formatConsoleArg(arg) {
+  if (arg instanceof Error) {
+    return arg.stack || `${arg.name}: ${arg.message}`;
+  }
+
+  if (typeof arg === 'string') {
+    return arg;
+  }
+
+  try {
+    return JSON.stringify(arg);
+  } catch {
+    return String(arg);
+  }
+}
+
+function patchConsoleMethod(method) {
+  const original = console[method].bind(console);
+
+  console[method] = (...args) => {
+    try {
+      original(...args);
+      return;
+    } catch (err) {
+      if (!err || !brokenStdIoErrorCodes.has(err.code)) {
+        throw err;
+      }
+    }
+
+    try {
+      const line = `[${new Date().toISOString()}] [${method}] ${args.map(formatConsoleArg).join(' ')}\n`;
+      fs.appendFileSync(fallbackConsoleLogPath, line);
+    } catch {
+      // No further fallback is available if file logging also fails.
+    }
+  };
+}
+
+['log', 'warn', 'error'].forEach(patchConsoleMethod);
 
 // In CJS, __dirname and __filename are already defined
 let steamClient;
 let serverProcess;
+const isSmokeTest = process.env.SMOKE_TEST === '1';
+const appIconPath = path.join(__dirname, 'icons', 'app-icon.png');
+const appCopyright = 'Copyright © 2026 Cody Harker';
+
+function stopServerProcess() {
+  if (!serverProcess) {
+    return;
+  }
+
+  if (process.platform === 'win32') {
+    spawn('taskkill', ['/F', '/PID', serverProcess.pid, '/T']);
+  } else {
+    serverProcess.kill();
+  }
+
+  serverProcess = null;
+}
 
 // Steam native binaries may be missing on CI/Linux. Allow skipping via
 // DISABLE_STEAM=1 so smoke tests can launch the app without Steam present.
@@ -30,12 +91,20 @@ app.commandLine.appendSwitch('disable-features', 'OutOfBlinkCors');
 app.commandLine.appendSwitch('enable-gpu-rasterization');
 app.commandLine.appendSwitch('enable-zero-copy');
 
+app.setAboutPanelOptions({
+  applicationName: 'ConquerorsDominationDemo',
+  applicationVersion: app.getVersion(),
+  copyright: appCopyright,
+  authors: ['Cody Harker'],
+});
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1280,
     height: 720,
     backgroundColor: '#000000', // Black background to match game
     show: false, // Wait until ready to avoid flicker
+    icon: fs.existsSync(appIconPath) ? appIconPath : undefined,
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false, // Simplified security for local app
@@ -46,6 +115,29 @@ function createWindow() {
   win.once('ready-to-show', () => {
     win.show();
   });
+
+  if (isSmokeTest) {
+    const fallbackQuit = setTimeout(() => {
+      console.log('[SmokeTest] Fallback quit triggered.');
+      stopServerProcess();
+      if (!win.isDestroyed()) {
+        win.destroy();
+      }
+      app.exit(0);
+    }, 12000);
+
+    win.webContents.once('did-finish-load', () => {
+      console.log('[SmokeTest] Renderer loaded. Closing app shortly.');
+      setTimeout(() => {
+        clearTimeout(fallbackQuit);
+        stopServerProcess();
+        if (!win.isDestroyed()) {
+          win.destroy();
+        }
+        setTimeout(() => app.exit(0), 250);
+      }, 3000);
+    });
+  }
 
   // Crash Guard: Reload on renderer crash
   win.webContents.on('render-process-gone', (event, details) => {
@@ -136,7 +228,7 @@ function createWindow() {
     // Use Electron's embedded Node runtime so Steam users do not need Node installed.
     const useEmbeddedNode = process.execPath.toLowerCase().includes('electron') || isPackaged;
     const serverCommand = useEmbeddedNode ? process.execPath : 'node';
-    const serverEnv = { ...process.env, PORT: '3001', NODE_ENV: 'production' };
+    const serverEnv = { ...process.env, PORT: process.env.PORT || '3001', NODE_ENV: 'production' };
     if (useEmbeddedNode) {
       serverEnv.ELECTRON_RUN_AS_NODE = '1';
 
@@ -305,6 +397,10 @@ const handleSteamLaunchArgs = (argv) => {
 };
 
 app.whenReady().then(() => {
+  if (process.platform === 'darwin' && app.dock && fs.existsSync(appIconPath)) {
+    app.dock.setIcon(appIconPath);
+  }
+
   createWindow();
 
   // --- Secret Bypass Shortcut ---
@@ -334,14 +430,8 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  if (serverProcess) {
-    if (process.platform === 'win32') {
-      spawn('taskkill', ['/F', '/PID', serverProcess.pid, '/T']);
-    } else {
-      serverProcess.kill();
-    }
-  }
-  if (process.platform !== 'darwin') {
+  stopServerProcess();
+  if (process.platform !== 'darwin' || isSmokeTest) {
     app.quit();
   }
 });

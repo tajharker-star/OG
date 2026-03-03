@@ -388,6 +388,8 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
     const [matchLoadTimedOut, setMatchLoadTimedOut] = useState(false);
     const [hasPlayersSnapshot, setHasPlayersSnapshot] = useState(false);
     const [hasUnitsSnapshot, setHasUnitsSnapshot] = useState(false);
+    const [localBaseVisible, setLocalBaseVisible] = useState(false);
+    const [localHqConfirmed, setLocalHqConfirmed] = useState(false);
     const [lobbyLoadChecks, setLobbyLoadChecks] = useState({
         connection: false,
         players: false,
@@ -398,6 +400,8 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
         map: false,
         units: false,
         player: false,
+        baseVisible: false,
+        hqConfirmed: false,
         ping: false,
         fps: false
     });
@@ -483,6 +487,7 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
     const [tunnelPassword, setTunnelPassword] = useState<string | null>(null);
     const [tunnelUrl, setTunnelUrl] = useState<string | null>(null);
     const [connectionState, setConnectionState] = useState<ConnectionState>(connectionManager.getState());
+    const [socketHandlersReady, setSocketHandlersReady] = useState(false);
 
     const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -498,11 +503,12 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
     }, [connectionState.phase]);
 
     useEffect(() => {
-        // Request game state when ready
-        if (connectionState.phase === 'READY') {
+        // Request game state only after socket listeners are attached,
+        // otherwise initial sync events such as PLAYER_HQ_STATUS can be missed.
+        if (connectionState.phase === 'READY' && socketHandlersReady) {
             socket.emit('request_game_state');
         }
-    }, [connectionState.phase]);
+    }, [connectionState.phase, socketHandlersReady]);
 
     const lobbyConnectionReady = isLocalMode || isDevBypass || connectionState.phase === 'READY';
 
@@ -534,11 +540,15 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
             pingSamplesRef.current = [];
             fpsSamplesRef.current = [];
             setHasUnitsSnapshot(false);
+            setLocalBaseVisible(false);
+            setLocalHqConfirmed(false);
             setMatchLoadTimedOut(false);
             setMatchLoadChecks({
                 map: false,
                 units: false,
                 player: false,
+                baseVisible: false,
+                hqConfirmed: false,
                 ping: false,
                 fps: false
             });
@@ -595,6 +605,18 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
     }, [isMatchLoading, mapData]);
 
     useEffect(() => {
+        if (!socket.id || !mapData) {
+            setLocalBaseVisible(false);
+            return;
+        }
+
+        const hasBase = mapData.islands.some(island =>
+            island.buildings.some(building => building.type === 'base' && building.ownerId === socket.id)
+        );
+        setLocalBaseVisible(hasBase);
+    }, [mapData, player?.id, socket.id]);
+
+    useEffect(() => {
         if (!isMatchLoading) return;
         setMatchLoadChecks(prev => {
             if (prev.units === hasUnitsSnapshot) return prev;
@@ -610,6 +632,22 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
             return { ...prev, player: playerReady };
         });
     }, [isMatchLoading, player]);
+
+    useEffect(() => {
+        if (!isMatchLoading) return;
+        setMatchLoadChecks(prev => {
+            if (prev.baseVisible === localBaseVisible) return prev;
+            return { ...prev, baseVisible: localBaseVisible };
+        });
+    }, [isMatchLoading, localBaseVisible]);
+
+    useEffect(() => {
+        if (!isMatchLoading) return;
+        setMatchLoadChecks(prev => {
+            if (prev.hqConfirmed === localHqConfirmed) return prev;
+            return { ...prev, hqConfirmed: localHqConfirmed };
+        });
+    }, [isMatchLoading, localHqConfirmed]);
 
     useEffect(() => {
         if (ping <= 0) return;
@@ -670,7 +708,14 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
         if (!isMatchLoading) return;
         const timer = window.setInterval(() => {
             const elapsed = Date.now() - matchLoadStartedAtRef.current;
-            const ready = matchLoadChecks.map && matchLoadChecks.units && matchLoadChecks.player && matchLoadChecks.ping && matchLoadChecks.fps;
+            const ready =
+                matchLoadChecks.map &&
+                matchLoadChecks.player &&
+                matchLoadChecks.units &&
+                matchLoadChecks.baseVisible &&
+                matchLoadChecks.hqConfirmed &&
+                matchLoadChecks.ping &&
+                matchLoadChecks.fps;
             if (ready && elapsed >= MATCH_MIN_WARMUP_MS) {
                 setIsMatchLoading(false);
                 return;
@@ -678,12 +723,21 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
 
             if (elapsed >= MATCH_MAX_WARMUP_MS) {
                 setMatchLoadTimedOut(true);
-                setIsMatchLoading(false);
+                if (matchLoadChecks.baseVisible && matchLoadChecks.hqConfirmed) {
+                    setIsMatchLoading(false);
+                }
             }
         }, 120);
 
         return () => window.clearInterval(timer);
     }, [isMatchLoading, matchLoadChecks]);
+
+    useEffect(() => {
+        const shouldLockMatchInput = gameStatus === 'playing' && isMatchLoading;
+        if ((window as any).gameMenuMode === shouldLockMatchInput) return;
+        (window as any).gameMenuMode = shouldLockMatchInput;
+        window.dispatchEvent(new CustomEvent('game-menu-mode', { detail: shouldLockMatchInput }));
+    }, [gameStatus, isMatchLoading]);
 
     useEffect(() => {
         // Ping Loop
@@ -762,11 +816,15 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
             pingSamplesRef.current = [];
             fpsSamplesRef.current = [];
             setHasUnitsSnapshot(false);
+            setLocalBaseVisible(false);
+            setLocalHqConfirmed(false);
             setMatchLoadTimedOut(false);
             setMatchLoadChecks({
                 map: false,
                 units: false,
                 player: false,
+                baseVisible: false,
+                hqConfirmed: false,
                 ping: false,
                 fps: false
             });
@@ -845,6 +903,12 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
             setGameStatus('waiting');
         };
 
+        const handlePlayerHqStatus = (data: { playerId: string; confirmed: boolean }) => {
+            if (data.playerId !== socket.id) return;
+            console.log(`[HQ_STATUS] player=${data.playerId} confirmed=${data.confirmed}`);
+            setLocalHqConfirmed(data.confirmed);
+        };
+
         socket.on('pong_check', handlePong);
         socket.on('tunnelPassword', handleTunnelPassword);
         socket.on('tunnelUrl', handleTunnelUrl);
@@ -858,6 +922,7 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
         socket.on('MATCH_ENDED', handleMatchEnded);
         socket.on('playerEliminated', handlePlayerEliminated);
         socket.on('MATCH_START_FAILED', handleMatchStartFailed);
+        socket.on('PLAYER_HQ_STATUS', handlePlayerHqStatus);
 
         const handlePlayers = (players: Player[]) => {
             const me = players.find(p => p.id === socket.id);
@@ -928,8 +993,10 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
         window.addEventListener('building-selection-changed', handleBuildingSelection as any);
         window.addEventListener('minimap-update', handleMinimapUpdate as any);
         window.addEventListener('oil-revealed', handleOilRevealed as any);
+        setSocketHandlersReady(true);
 
         return () => {
+            setSocketHandlersReady(false);
             clearInterval(pingInterval);
             clearInterval(memoryInterval);
             socket.off('pong_check', handlePong);
@@ -945,6 +1012,10 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
             socket.off('votingUpdate', handleVotingUpdate);
             socket.off('gameStarted', handleGameStarted);
             socket.off('gameOver', handleGameOver);
+            socket.off('MATCH_ENDED', handleMatchEnded);
+            socket.off('playerEliminated', handlePlayerEliminated);
+            socket.off('MATCH_START_FAILED', handleMatchStartFailed);
+            socket.off('PLAYER_HQ_STATUS', handlePlayerHqStatus);
             socket.off('chat_message', handleChatMessage);
 
             window.removeEventListener('game-hover', handleHover as any);
@@ -1596,6 +1667,8 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
         { label: 'Map data loaded', ready: matchLoadChecks.map },
         { label: 'Player snapshot loaded', ready: matchLoadChecks.player },
         { label: 'Units snapshot loaded', ready: matchLoadChecks.units },
+        { label: 'Local HQ visible on map', ready: matchLoadChecks.baseVisible },
+        { label: 'Server confirmed local HQ', ready: matchLoadChecks.hqConfirmed },
         { label: 'Ping stabilized', ready: matchLoadChecks.ping },
         { label: 'Frame rate stabilized', ready: matchLoadChecks.fps }
     ];
@@ -2047,11 +2120,16 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
     }
 
     if (gameStatus === 'playing' && (isMatchLoading || !player)) {
+        const waitingForHq = !matchLoadChecks.baseVisible || !matchLoadChecks.hqConfirmed;
         return renderLoadingScreen(
             'Starting Match',
             matchLoadTimedOut
-                ? 'Network is still syncing. Entering game view as soon as core data is ready.'
-                : 'Loading map, units, and stabilizing ping/FPS',
+                ? (waitingForHq
+                    ? 'Waiting for your headquarters to be confirmed before gameplay can begin.'
+                    : 'Network is still syncing. Entering game view as soon as core data is ready.')
+                : (waitingForHq
+                    ? 'Verifying your headquarters and syncing the opening map state.'
+                    : 'Loading map, units, and stabilizing ping/FPS'),
             matchLoadItems
         );
     }

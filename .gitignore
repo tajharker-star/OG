@@ -6,6 +6,7 @@ dist/
 electron/dist/
 client/dist/
 client/dist_electron/
+client/releases/
 server/dist/
 
 # OS files
