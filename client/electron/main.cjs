@@ -369,6 +369,7 @@ function createWindow() {
           })()`);
           console.log('[SmokeTest] DOM probe:', JSON.stringify(probe));
 
+          await new Promise((resolve) => setTimeout(resolve, 1200));
           const image = await win.webContents.capturePage();
           fs.mkdirSync(path.dirname(smokeCapturePath), { recursive: true });
           fs.writeFileSync(smokeCapturePath, image.toPNG());
