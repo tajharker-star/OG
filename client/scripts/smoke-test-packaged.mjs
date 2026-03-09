@@ -217,7 +217,9 @@ async function runDirectSmokeTest(packagedTarget) {
   const launchArgs = isLinuxTarget
     ? ["--no-sandbox", "--disable-setuid-sandbox", "--disable-gpu"]
     : [];
-  const smokeCapturePath = path.join(os.tmpdir(), `conquerors-${target.key}-packaged-smoke.png`);
+  const smokeCaptureDir = path.join(process.cwd(), "tests", "output");
+  fs.mkdirSync(smokeCaptureDir, { recursive: true });
+  const smokeCapturePath = path.join(smokeCaptureDir, `packaged-smoke-${target.key}.png`);
   fs.rmSync(smokeCapturePath, { force: true });
 
   const child = spawn(packagedTarget.binaryPath, launchArgs, {

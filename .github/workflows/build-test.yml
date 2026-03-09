@@ -99,10 +99,6 @@ jobs:
 
       - name: Run Packaged Smoke Test
         shell: bash
-        env:
-          TMPDIR: ${{ runner.temp }}
-          TMP: ${{ runner.temp }}
-          TEMP: ${{ runner.temp }}
         run: |
           cd client
           if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
@@ -117,9 +113,9 @@ jobs:
         with:
           name: packaged-smoke-${{ matrix.os }}
           path: |
-            ${{ runner.temp }}/conquerors-windows-packaged-smoke.png
-            ${{ runner.temp }}/conquerors-linux-packaged-smoke.png
-            ${{ runner.temp }}/conquerors-macos-packaged-smoke.png
+            client/tests/output/packaged-smoke-windows.png
+            client/tests/output/packaged-smoke-linux.png
+            client/tests/output/packaged-smoke-macos.png
           if-no-files-found: ignore
 
       - name: Upload Build Artifacts
