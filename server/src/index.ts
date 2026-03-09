@@ -4,6 +4,7 @@ import { Server } from 'socket.io';
 import cors from 'cors';
 import path from 'path';
 import https from 'https';
+import { randomUUID } from 'crypto';
 import { GameState } from './game/GameState';
 import { MapGenerator } from './game/MapGenerator';
 import { BotAI } from './game/BotAI';
@@ -74,14 +75,6 @@ setInterval(() => {
 
 // Rooms management
 const rooms = new Map<string, GameState>();
-const MAX_HQ_RESPAWNS = 1;
-
-const consumeHqRespawn = (player: any): boolean => {
-    const used = Number(player?.hqRespawnsUsed || 0);
-    if (used >= MAX_HQ_RESPAWNS) return false;
-    player.hqRespawnsUsed = used + 1;
-    return true;
-};
 
 const getOrCreateRoom = (roomId: string, mapType: string = 'random'): GameState => {
     if (!rooms.has(roomId)) {
@@ -199,6 +192,29 @@ io.on('connection', (socket) => {
 
     const switchRoom = (roomId: string, mapType: string = 'random', suppressBroadcast: boolean = false) => {
         console.log(`[Server] switchRoom called for ${roomId} with mapType: ${mapType}`);
+
+        if (roomId === currentRoom) {
+            const existingGs = rooms.get(currentRoom);
+            if (!existingGs) return;
+
+            console.log(`[Server] switchRoom ignored duplicate join for ${socket.id} in ${roomId}`);
+            socket.join(roomId);
+            if (!(socket as any).isTunnel) {
+                socket.join(roomId + '_fast');
+            }
+
+            if (!suppressBroadcast) {
+                socket.emit('mapData', existingGs.map);
+                socket.emit('playersData', Array.from(existingGs.players.values()));
+                socket.emit('unitsData', existingGs.units);
+                socket.emit('lobbySettings', { requiredPlayers: existingGs.requiredPlayers });
+                socket.emit('gameStatus', existingGs.status);
+                socket.emit('joinedRoom', roomId);
+                existingGs.emitPlayerHqStatus(io, socket.id);
+            }
+            return;
+        }
+
         socket.leave(currentRoom);
         socket.leave(currentRoom + '_fast'); // Leave fast channel too
 
@@ -216,11 +232,6 @@ io.on('connection', (socket) => {
         }
 
         const gs = getOrCreateRoom(roomId, mapType);
-
-        // Fix: Ensure custom games are always in playing state to prevent lobby flash
-        if (roomId.startsWith('custom_')) {
-            gs.status = 'playing';
-        }
 
         gs.addPlayer(socket.id);
         gs.checkVotingStart(io, roomId);
@@ -291,6 +302,7 @@ io.on('connection', (socket) => {
                     votes: Array.from(gs.mapVotes.entries())
                 });
             }
+            gs.emitPlayerHqStatus(io, socket.id);
         }
     });
 
@@ -311,26 +323,32 @@ io.on('connection', (socket) => {
             // Verify if player really needs spawn
             const existingBase = gs.map.islands.some(i => i.buildings.some(b => b.type === 'base' && b.ownerId === socket.id));
             if (!existingBase) {
-                if (!consumeHqRespawn(player)) {
-                    console.log(`[Spawn] Blocked request_spawn for ${socket.id}; respawn limit reached.`);
+                if (player.hqSpawnedOnce) {
+                    console.log(`[Spawn] Blocked request_spawn for ${socket.id}; HQ already spawned once this match.`);
                     player.canBuildHQ = false;
                     (gs as any).eliminatePlayer(socket.id, 'HQ_DESTROYED');
                     io.to(currentRoom).emit('playersData', Array.from(gs.players.values()));
                     io.to(currentRoom).emit('mapData', gs.map);
                     io.to(currentRoom).emit('unitsData', gs.units);
+                    gs.emitPlayerHqStatus(io, socket.id);
                     return;
                 }
 
-                console.log(`[Spawn] Client ${socket.id} requested spawn (missing base). Respawn ${player.hqRespawnsUsed}/${MAX_HQ_RESPAWNS}`);
-                gs.assignStartingIsland(socket.id);
+                console.log(`[Spawn] Client ${socket.id} requested initial HQ spawn (missing base).`);
+                const spawned = gs.assignStartingIsland(socket.id);
+                if (!spawned) {
+                    console.log(`[Spawn] request_spawn failed for ${socket.id}.`);
+                }
                 // Broadcast updates
                 io.to(currentRoom).emit('mapData', gs.map);
                 io.to(currentRoom).emit('unitsData', gs.units);
                 io.to(currentRoom).emit('playersData', Array.from(gs.players.values()));
+                gs.emitPlayerHqStatus(io, socket.id);
             } else {
                 console.log(`[Spawn] Client ${socket.id} requested spawn but base ALREADY EXISTS.`);
                 // Resend map data just in case
                 socket.emit('mapData', gs.map);
+                gs.emitPlayerHqStatus(io, socket.id);
             }
         }
     });
@@ -360,21 +378,26 @@ io.on('connection', (socket) => {
             return;
         }
 
-        if (!consumeHqRespawn(player)) {
-            console.log(`[Spawn] Blocked force_spawn_hq for ${socket.id}; respawn limit reached.`);
+        if (player.hqSpawnedOnce) {
+            console.log(`[Spawn] Blocked force_spawn_hq for ${socket.id}; HQ already spawned once this match.`);
             player.canBuildHQ = false;
             (gs as any).eliminatePlayer(socket.id, 'HQ_DESTROYED');
             io.to(currentRoom).emit('playersData', Array.from((gs as any).players.values()));
             io.to(currentRoom).emit('mapData', gs.map);
             io.to(currentRoom).emit('unitsData', gs.units);
+            gs.emitPlayerHqStatus(io, socket.id);
             return;
         }
 
-        console.log(`[Spawn] Emergency force_spawn_hq for ${socket.id}. Respawn ${player.hqRespawnsUsed}/${MAX_HQ_RESPAWNS}`);
-        (gs as any).assignStartingIsland(socket.id);
+        console.log(`[Spawn] Emergency initial force_spawn_hq for ${socket.id}.`);
+        const spawned = (gs as any).assignStartingIsland(socket.id);
+        if (!spawned) {
+            console.log(`[Spawn] force_spawn_hq failed for ${socket.id}.`);
+        }
         io.to(currentRoom).emit('mapData', gs.map);
         io.to(currentRoom).emit('unitsData', gs.units);
         io.to(currentRoom).emit('playersData', Array.from((gs as any).players.values()));
+        gs.emitPlayerHqStatus(io, socket.id);
     });
 
     socket.on('set_tunnel_url', (url: string) => {
@@ -423,9 +446,10 @@ io.on('connection', (socket) => {
         // Create room with specific map type
         const requestedMapType = data.mapType || 'random';
 
-        // PRE-CREATE room and set status to playing to avoid 'waiting' flash
+        // PRE-CREATE room in a non-playing state so the host does not get an HQ
+        // on the temporary placeholder map before the real match map is generated.
         const gs = getOrCreateRoom(roomId, requestedMapType);
-        gs.status = 'playing';
+        gs.status = 'starting';
         gs.requiredPlayers = 1;
 
         // Suppress initial broadcast to avoid sending empty/wrong map data before generation
@@ -443,8 +467,8 @@ io.on('connection', (socket) => {
                 if (player) player.difficulty = difficulty; // Force update difficulty
             }
 
-            // Force Start (Bypass voting logic to ensure mapType is respected)
-            gs.status = 'playing';
+            // Keep the room in startup until the host HQ is verified.
+            gs.status = 'starting';
 
             // Handle Random Selection manually if needed
             if (gs.mapType === 'random') {
@@ -458,6 +482,7 @@ io.on('connection', (socket) => {
             gs.map = MapGenerator.generate(3200, 2400, 40, gs.mapType as any);
             gs.map.mapType = gs.mapType;
             gs.map.serverRegion = gs.serverRegion;
+            gs.map.version = randomUUID();
 
             // Reset Units (Clear any ghost units from pre-spawn)
             gs.units = [];
@@ -467,15 +492,29 @@ io.on('connection', (socket) => {
                 p.resources = { gold: 200, oil: 0 };
                 p.status = 'active';
                 p.canBuildHQ = true;
+                p.hqRespawnsUsed = 0;
+                p.hqSpawnedOnce = false;
             });
-
-            gs.startTime = Date.now();
 
             // Spawn Bases
             console.log(`[CustomGame] Spawning bases for ${gs.players.size} players...`);
             gs.players.forEach(p => {
                 gs.assignStartingIsland(p.id);
             });
+            const startingBases = gs.verifyHumanStartingBases();
+            if (!startingBases.ready) {
+                gs.status = 'waiting';
+                socket.emit('gameStatus', 'waiting');
+                socket.emit('MATCH_START_FAILED', {
+                    reason: `Unable to assign a starting HQ to players: ${startingBases.missingPlayerIds.join(', ')}`
+                });
+                io.to(roomId).emit('gameStatus', 'waiting');
+                return;
+            }
+
+            gs.status = 'playing';
+            gs.startTime = Date.now();
+            gs.scheduleStartupHqVerification(io, roomId);
 
             // Re-init Bots
             const botPlayers = Array.from(gs.players.values()).filter(p => p.isBot);
@@ -493,11 +532,13 @@ io.on('connection', (socket) => {
             socket.emit('mapData', gs.map);
             socket.emit('playersData', Array.from(gs.players.values()));
             socket.emit('unitsData', gs.units);
+            gs.emitPlayerHqStatus(io, socket.id);
 
             // Also broadcast to the room for any other players (though usually single player here)
             io.to(roomId).emit('gameStatus', 'playing');
             io.to(roomId).emit('mapData', gs.map);
             io.to(roomId).emit('playersData', Array.from(gs.players.values()));
+            gs.emitHumanHqStatuses(io);
         }
     });
 

@@ -2,11 +2,162 @@ const electron = require('electron');
 const { app, BrowserWindow, ipcMain, dialog, globalShortcut } = electron;
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const { spawn } = require('child_process');
+
+const brokenStdIoErrorCodes = new Set(['EBADF', 'EINVAL', 'ENXIO']);
+const fallbackConsoleLogPath = path.join(os.tmpdir(), 'conquerors-domination-demo-main.log');
+
+function formatConsoleArg(arg) {
+  if (arg instanceof Error) {
+    return arg.stack || `${arg.name}: ${arg.message}`;
+  }
+
+  if (typeof arg === 'string') {
+    return arg;
+  }
+
+  try {
+    return JSON.stringify(arg);
+  } catch {
+    return String(arg);
+  }
+}
+
+function patchConsoleMethod(method) {
+  const original = console[method].bind(console);
+
+  console[method] = (...args) => {
+    try {
+      original(...args);
+      return;
+    } catch (err) {
+      if (!err || !brokenStdIoErrorCodes.has(err.code)) {
+        throw err;
+      }
+    }
+
+    try {
+      const line = `[${new Date().toISOString()}] [${method}] ${args.map(formatConsoleArg).join(' ')}\n`;
+      fs.appendFileSync(fallbackConsoleLogPath, line);
+    } catch {
+      // No further fallback is available if file logging also fails.
+    }
+  };
+}
+
+['log', 'warn', 'error'].forEach(patchConsoleMethod);
+
+function writeMainLog(message) {
+  try {
+    fs.appendFileSync(fallbackConsoleLogPath, `[${new Date().toISOString()}] ${message}\n`);
+  } catch {
+    // Ignore logging failures.
+  }
+}
 
 // In CJS, __dirname and __filename are already defined
 let steamClient;
+let steamworksApi;
+let steamJoinRequestedHandle;
 let serverProcess;
+let mainWindow;
+const isSmokeTest = process.env.SMOKE_TEST === '1';
+const appIconPath = path.join(__dirname, 'icons', 'app-icon.png');
+const appCopyright = 'Copyright © 2026 Cody Harker';
+
+function stopServerProcess() {
+  if (!serverProcess) {
+    return;
+  }
+
+  if (process.platform === 'win32') {
+    spawn('taskkill', ['/F', '/PID', serverProcess.pid, '/T']);
+  } else {
+    serverProcess.kill();
+  }
+
+  serverProcess = null;
+}
+
+function getBestLanAddress() {
+  const interfaces = os.networkInterfaces();
+  let fallback = '127.0.0.1';
+
+  for (const entries of Object.values(interfaces)) {
+    if (!entries) continue;
+    for (const iface of entries) {
+      if (iface.family !== 'IPv4' || iface.internal) continue;
+      if (iface.address.startsWith('192.168.') || iface.address.startsWith('10.')) {
+        return iface.address;
+      }
+      fallback = iface.address;
+    }
+  }
+
+  return fallback;
+}
+
+function normalizeEndpointForLobby(rawValue, defaultPort = '3001') {
+  if (!rawValue || typeof rawValue !== 'string') {
+    return null;
+  }
+
+  let value = rawValue.trim();
+  if (!value) return null;
+
+  if (value.startsWith('PLAYIT:')) {
+    const parts = value.split(':');
+    if (parts.length >= 3) {
+      value = `http://${parts[1]}:${parts[2]}`;
+    }
+  }
+
+  if (value.startsWith('ws://')) {
+    value = `http://${value.slice('ws://'.length)}`;
+  } else if (value.startsWith('wss://')) {
+    value = `https://${value.slice('wss://'.length)}`;
+  }
+
+  if (value.startsWith('http://') || value.startsWith('https://')) {
+    return value;
+  }
+
+  if (/^[^/\s]+:\d+$/.test(value) || /^\[[^\]]+\]:\d+$/.test(value)) {
+    return `http://${value}`;
+  }
+
+  if (/^[^\s/:]+$/.test(value)) {
+    return `http://${value}:${defaultPort}`;
+  }
+
+  return null;
+}
+
+function emitSteamJoinLobby(lobbyId) {
+  if (!lobbyId) return;
+
+  const sendToReadyWindow = () => {
+    const wins = BrowserWindow.getAllWindows();
+    let delivered = false;
+    wins.forEach((win) => {
+      if (!win || win.isDestroyed() || win.webContents.isLoading()) return;
+      win.webContents.send('steam:join-lobby', lobbyId);
+      delivered = true;
+    });
+    return delivered;
+  };
+
+  if (sendToReadyWindow()) return;
+
+  const retry = setInterval(() => {
+    if (sendToReadyWindow()) {
+      clearInterval(retry);
+    }
+  }, 750);
+
+  setTimeout(() => clearInterval(retry), 15000);
+}
 
 // Steam native binaries may be missing on CI/Linux. Allow skipping via
 // DISABLE_STEAM=1 so smoke tests can launch the app without Steam present.
@@ -14,41 +165,235 @@ if (process.env.DISABLE_STEAM === '1') {
   console.log('[Steam] Disabled via DISABLE_STEAM=1');
 } else {
   try {
-    const steamworks = require('steamworks.js');
-    steamClient = steamworks.init(4432220);
+    steamworksApi = require('steamworks.js');
+    steamClient = steamworksApi.init(4432220);
   } catch (e) {
     console.error('[Steam] Failed to load or initialize:', e);
   }
 }
 
-// --- Performance Fixes ---
-// We enable HW Acceleration for better performance.
-// app.disableHardwareAcceleration(); 
-app.commandLine.appendSwitch('ignore-gpu-blocklist');
-app.commandLine.appendSwitch('disable-gpu-process-crash-limit');
-app.commandLine.appendSwitch('disable-features', 'OutOfBlinkCors');
-app.commandLine.appendSwitch('enable-gpu-rasterization');
-app.commandLine.appendSwitch('enable-zero-copy');
+function isWineRuntime() {
+  if (process.platform !== 'win32') {
+    return false;
+  }
+
+  if (process.env.WINELOADERNOEXEC || process.env.WINEPREFIX) {
+    return true;
+  }
+
+  return /^z:\\/i.test(process.execPath || '');
+}
+
+const runningUnderWine = isWineRuntime();
+const forceSoftwareRendering = process.env.AG_DISABLE_GPU === '1' || runningUnderWine;
+
+if (forceSoftwareRendering) {
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch('disable-gpu');
+  app.commandLine.appendSwitch('disable-gpu-compositing');
+  app.commandLine.appendSwitch('disable-gpu-sandbox');
+  if (runningUnderWine) {
+    app.commandLine.appendSwitch('disable-direct-composition');
+    app.commandLine.appendSwitch('use-angle', 'swiftshader');
+  }
+  console.log('[Electron] GPU acceleration disabled for compatibility mode.');
+} else if (process.platform === 'darwin') {
+  // Keep aggressive GPU tuning on native macOS builds only.
+  app.commandLine.appendSwitch('ignore-gpu-blocklist');
+  app.commandLine.appendSwitch('disable-gpu-process-crash-limit');
+  app.commandLine.appendSwitch('disable-features', 'OutOfBlinkCors');
+  app.commandLine.appendSwitch('enable-gpu-rasterization');
+  app.commandLine.appendSwitch('enable-zero-copy');
+}
+
+app.setAboutPanelOptions({
+  applicationName: 'ConquerorsDominationDemo',
+  applicationVersion: app.getVersion(),
+  copyright: appCopyright,
+  authors: ['Cody Harker'],
+});
+
+function presentWindow(win, reason) {
+  if (!win || win.isDestroyed()) {
+    return;
+  }
+
+  writeMainLog(`[Electron] Presenting window (${reason}).`);
+
+  if (process.platform === 'darwin') {
+    if (app.dock) {
+      app.dock.show();
+    }
+    app.focus({ steal: true });
+    win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    win.setAlwaysOnTop(true, 'screen-saver');
+  }
+
+  if (process.platform === 'win32') {
+    const [width, height] = win.getSize();
+    if (width < 1024 || height < 600) {
+      win.setSize(1280, 720);
+    }
+    if (runningUnderWine) {
+      win.setPosition(40, 40);
+    } else {
+      win.center();
+    }
+  } else {
+    win.center();
+  }
+  win.show();
+  if (process.platform === 'win32' && win.isMinimized()) {
+    win.restore();
+  }
+  win.focus();
+  win.moveTop();
+
+  if (process.platform === 'darwin') {
+    setTimeout(() => {
+      if (!win.isDestroyed()) {
+        win.setAlwaysOnTop(false);
+        win.setVisibleOnAllWorkspaces(false);
+      }
+    }, 1500);
+  } else if (process.platform === 'win32') {
+    // Wine/compat layers can leave a shown window off-screen unless we force z-order.
+    win.setAlwaysOnTop(true, 'screen-saver');
+    setTimeout(() => {
+      if (!win.isDestroyed()) {
+        win.setAlwaysOnTop(false);
+      }
+    }, 1200);
+  }
+}
+
+function getProductionIndexCandidates() {
+  const candidates = [path.join(__dirname, '../dist/index.html')];
+
+  if (app.isPackaged) {
+    candidates.push(
+      path.join(process.resourcesPath, 'app.asar', 'dist', 'index.html'),
+      path.join(process.resourcesPath, 'app', 'dist', 'index.html'),
+      path.join(process.resourcesPath, 'dist', 'index.html')
+    );
+  }
+
+  return [...new Set(candidates)];
+}
+
+function loadProductionRenderer(win) {
+  const candidates = getProductionIndexCandidates();
+
+  const tryLoadCandidate = (index) => {
+    if (index >= candidates.length) {
+      writeMainLog('[Electron] Exhausted all production renderer candidates.');
+      return;
+    }
+
+    const indexPath = candidates[index];
+    const exists = fs.existsSync(indexPath);
+    writeMainLog(`[Electron] Loading Production File candidate ${index + 1}/${candidates.length}: ${indexPath} (exists=${exists})`);
+    console.log('[Electron] Loading Production File:', indexPath);
+
+    win.loadFile(indexPath).catch(err => {
+      writeMainLog(`[Electron] Failed to load Production file candidate ${indexPath}: ${err?.message || err}`);
+      console.error('[Electron] Failed to load Production file:', err);
+      tryLoadCandidate(index + 1);
+    });
+  };
+
+  tryLoadCandidate(0);
+}
 
 function createWindow() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    writeMainLog('[Electron] Reusing existing main window.');
+    presentWindow(mainWindow, 'reuse');
+    return mainWindow;
+  }
+
+  writeMainLog('[Electron] Creating main window.');
   const win = new BrowserWindow({
     width: 1280,
     height: 720,
     backgroundColor: '#000000', // Black background to match game
-    show: false, // Wait until ready to avoid flicker
+    show: process.platform === 'win32', // Avoid hidden-window issues under Wine/compat layers.
+    icon: fs.existsSync(appIconPath) ? appIconPath : undefined,
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false, // Simplified security for local app
     },
   });
 
+  mainWindow = win;
+
   // Show window only when content is ready
   win.once('ready-to-show', () => {
-    win.show();
+    writeMainLog('[Electron] Window ready-to-show.');
+    console.log('[Electron] Window ready-to-show. Showing main window.');
+    presentWindow(win, 'ready-to-show');
   });
+
+  // Some macOS launches never emit ready-to-show even though the renderer is alive.
+  win.webContents.once('did-finish-load', () => {
+    writeMainLog('[Electron] Renderer finished loading.');
+    console.log('[Electron] Renderer finished loading.');
+    if (!win.isVisible()) {
+      writeMainLog('[Electron] Window still hidden after did-finish-load. Forcing show.');
+      console.log('[Electron] Window still hidden after did-finish-load. Forcing show.');
+    }
+    presentWindow(win, 'did-finish-load');
+  });
+
+  if (isSmokeTest) {
+    const fallbackQuit = setTimeout(() => {
+      console.log('[SmokeTest] Fallback quit triggered.');
+      stopServerProcess();
+      if (!win.isDestroyed()) {
+        win.destroy();
+      }
+      app.exit(0);
+    }, 12000);
+
+    win.webContents.once('did-finish-load', async () => {
+      const smokeCapturePath = process.env.SMOKE_CAPTURE_PATH;
+
+      if (smokeCapturePath) {
+        try {
+          const probe = await win.webContents.executeJavaScript(`(() => {
+            const splash = !!document.getElementById('boot-splash');
+            const title = document.title || '';
+            const htmlLength = document.documentElement?.outerHTML?.length || 0;
+            const bodyBackground = getComputedStyle(document.body).background || '';
+            return { splash, title, htmlLength, bodyBackground };
+          })()`);
+          console.log('[SmokeTest] DOM probe:', JSON.stringify(probe));
+
+          await new Promise((resolve) => setTimeout(resolve, 1200));
+          const image = await win.webContents.capturePage();
+          fs.mkdirSync(path.dirname(smokeCapturePath), { recursive: true });
+          fs.writeFileSync(smokeCapturePath, image.toPNG());
+          console.log('[SmokeTest] Renderer screenshot saved:', smokeCapturePath);
+        } catch (err) {
+          console.error('[SmokeTest] Failed to capture renderer screenshot:', err);
+        }
+      }
+
+      console.log('[SmokeTest] Renderer loaded. Closing app shortly.');
+      setTimeout(() => {
+        clearTimeout(fallbackQuit);
+        stopServerProcess();
+        if (!win.isDestroyed()) {
+          win.destroy();
+        }
+        setTimeout(() => app.exit(0), 250);
+      }, 6000);
+    });
+  }
 
   // Crash Guard: Reload on renderer crash
   win.webContents.on('render-process-gone', (event, details) => {
+    writeMainLog(`[Electron] Render process gone: ${JSON.stringify(details)}`);
     console.error('[Electron] Render process gone:', details);
     if (details.reason !== 'clean-exit') {
       console.log('[Electron] Reloading renderer due to crash...');
@@ -80,16 +425,42 @@ function createWindow() {
 
   if (isDev) {
     win.loadURL('http://localhost:5173').catch(err => {
+      writeMainLog(`[Electron] Failed to load Dev URL: ${err?.message || err}`);
       console.error('[Electron] Failed to load Dev URL:', err);
     });
   } else {
-    // 1. Load the GUI first so the user sees the menu immediately
-    const indexPath = path.join(__dirname, '../dist/index.html');
-    console.log('[Electron] Loading Production File:', indexPath);
-    win.loadFile(indexPath).catch(err => {
-      console.error('[Electron] Failed to load Production file:', err);
-    });
+    // Load the first valid production renderer path and fallback when a candidate fails.
+    loadProductionRenderer(win);
   }
+
+  const forceShowTimer = setTimeout(() => {
+    if (!win.isDestroyed() && !win.isVisible()) {
+      writeMainLog('[Electron] Force-show fallback triggered.');
+      console.log('[Electron] Force-show fallback triggered.');
+      presentWindow(win, 'force-show');
+    }
+  }, 5000);
+
+  win.on('show', () => {
+    writeMainLog('[Electron] Window show event.');
+    clearTimeout(forceShowTimer);
+  });
+
+  win.on('hide', () => {
+    writeMainLog('[Electron] Window hide event.');
+  });
+
+  win.on('close', () => {
+    writeMainLog('[Electron] Window close event.');
+  });
+
+  win.on('closed', () => {
+    writeMainLog('[Electron] Window closed event.');
+    clearTimeout(forceShowTimer);
+    if (mainWindow === win) {
+      mainWindow = null;
+    }
+  });
 
   // 2. Start the local server in the background for Campaign/Local play
   // This is needed for local development AND production
@@ -136,7 +507,7 @@ function createWindow() {
     // Use Electron's embedded Node runtime so Steam users do not need Node installed.
     const useEmbeddedNode = process.execPath.toLowerCase().includes('electron') || isPackaged;
     const serverCommand = useEmbeddedNode ? process.execPath : 'node';
-    const serverEnv = { ...process.env, PORT: '3001', NODE_ENV: 'production' };
+    const serverEnv = { ...process.env, PORT: process.env.PORT || '3001', NODE_ENV: 'production' };
     if (useEmbeddedNode) {
       serverEnv.ELECTRON_RUN_AS_NODE = '1';
 
@@ -183,6 +554,7 @@ function createWindow() {
 
   // Log load failures to help diagnose black screens
   win.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {
+    writeMainLog(`[Electron] did-fail-load ${validatedURL} code=${errorCode} description=${errorDescription}`);
     console.error(`[Electron] Failed to load: ${validatedURL}`);
     console.error(`  Error Code: ${errorCode}`);
     console.error(`  Description: ${errorDescription}`);
@@ -196,6 +568,17 @@ function createWindow() {
   // --- Steam Integration ---
   if (steamClient) {
     console.log('[Steam] Initialized successfully. Player:', steamClient.localplayer.getName());
+
+    if (!steamJoinRequestedHandle && steamClient.callback?.register && steamworksApi?.SteamCallback) {
+      steamJoinRequestedHandle = steamClient.callback.register(
+        steamworksApi.SteamCallback.GameLobbyJoinRequested,
+        ({ lobby_steam_id }) => {
+          const lobbyId = lobby_steam_id?.toString?.() || '';
+          console.log('[Steam] GameLobbyJoinRequested callback:', lobbyId);
+          emitSteamJoinLobby(lobbyId);
+        }
+      );
+    }
 
     // Notify renderer of success
     win.webContents.on('did-finish-load', () => {
@@ -220,12 +603,26 @@ function createWindow() {
     // Handle Lobby Creation
     ipcMain.handle('steam:create-lobby', async (_, data) => {
       try {
-        const lobby = await steamClient.matchmaking.createLobby(2, 4);
+        const lobby = await steamClient.matchmaking.createLobby(2, 10);
         if (lobby) {
-          await lobby.setData('ag_room', data.roomId);
-          await lobby.setData('map', data.map || 'Unknown');
-          await lobby.setData('mode', data.mode || 'Standard');
+          const localSteamId = steamClient.localplayer.getSteamId().steamId64.toString();
+          const endpointFromRequest = normalizeEndpointForLobby(data?.endpoint, process.env.PORT || '3001');
+          const fallbackEndpoint = normalizeEndpointForLobby(
+            `http://${getBestLanAddress()}:${process.env.PORT || '3001'}`,
+            process.env.PORT || '3001'
+          );
+          const endpoint = endpointFromRequest || fallbackEndpoint;
+
+          lobby.setData('ag_room', data.roomId);
+          lobby.setData('map', data.map || 'Unknown');
+          lobby.setData('mode', data.mode || 'Standard');
+          lobby.setData('ag_host_steam_id', localSteamId);
+          if (endpoint) {
+            lobby.setData('ag_endpoint', endpoint);
+          }
+
           console.log('[Steam] Created Lobby:', lobby.id, 'for Room:', data.roomId);
+          console.log('[Steam] Lobby Endpoint:', endpoint || 'none');
           return { success: true, lobbyId: lobby.id };
         }
         return { success: false };
@@ -240,9 +637,21 @@ function createWindow() {
       try {
         console.log('[Steam] Joining lobby to read data:', lobbyId);
         const lobby = await steamClient.matchmaking.joinLobby(lobbyId);
-        const roomId = await lobby.getData('ag_room');
-        console.log('[Steam] Got Room ID:', roomId);
-        return { success: true, roomId };
+        const roomId = lobby.getData('ag_room');
+        const endpoint = lobby.getData('ag_endpoint');
+        const hostSteamId = lobby.getData('ag_host_steam_id');
+        const map = lobby.getData('map');
+        const mode = lobby.getData('mode');
+
+        console.log('[Steam] Got Lobby Data:', { roomId, endpoint, hostSteamId, map, mode });
+        return {
+          success: true,
+          roomId,
+          endpoint,
+          hostSteamId,
+          map,
+          mode,
+        };
       } catch (err) {
         console.error('[Steam] Get Lobby Data Error:', err);
         return { success: false, error: err.message };
@@ -292,6 +701,8 @@ function createWindow() {
       return { success: false, error: err.message };
     }
   });
+
+  return win;
 }
 
 // Check for Steam Launch Args (+connect_lobby <lobbyId>)
@@ -305,6 +716,10 @@ const handleSteamLaunchArgs = (argv) => {
 };
 
 app.whenReady().then(() => {
+  if (process.platform === 'darwin' && app.dock && fs.existsSync(appIconPath)) {
+    app.dock.setIcon(appIconPath);
+  }
+
   createWindow();
 
   // --- Secret Bypass Shortcut ---
@@ -318,13 +733,7 @@ app.whenReady().then(() => {
 
   const lobbyId = handleSteamLaunchArgs(process.argv);
   if (lobbyId && steamClient) {
-    const checkWin = setInterval(() => {
-      const wins = BrowserWindow.getAllWindows();
-      if (wins.length > 0 && wins[0].webContents && !wins[0].webContents.isLoading()) {
-        wins[0].webContents.send('steam:join-lobby', lobbyId);
-        clearInterval(checkWin);
-      }
-    }, 1000);
+    emitSteamJoinLobby(lobbyId);
   }
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -334,14 +743,15 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  if (serverProcess) {
-    if (process.platform === 'win32') {
-      spawn('taskkill', ['/F', '/PID', serverProcess.pid, '/T']);
-    } else {
-      serverProcess.kill();
-    }
-  }
-  if (process.platform !== 'darwin') {
+  stopServerProcess();
+  if (process.platform !== 'darwin' || isSmokeTest) {
     app.quit();
+  }
+});
+
+app.on('before-quit', () => {
+  if (steamJoinRequestedHandle?.disconnect) {
+    steamJoinRequestedHandle.disconnect();
+    steamJoinRequestedHandle = null;
   }
 });

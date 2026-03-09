@@ -5,6 +5,7 @@ export const TowerStats: BuildingStats = {
     name: 'Defense Tower',
     health: 400,
     maxHealth: 400,
+    radius: 18,
     cost: { gold: 40, oil: 0 },
     constructionTime: 200,
     range: 200,
