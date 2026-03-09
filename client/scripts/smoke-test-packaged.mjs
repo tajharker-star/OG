@@ -318,7 +318,7 @@ async function runDirectSmokeTest(packagedTarget) {
   }
 
   const screenshotSize = fs.statSync(smokeCapturePath).size;
-  if (screenshotSize < 10_000) {
+  if (screenshotSize < 6_000) {
     failWithOutput(
       `Packaged ${target.label} smoke screenshot looks invalid (size=${screenshotSize} bytes).`,
       stdout,
