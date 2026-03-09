@@ -102,10 +102,21 @@ jobs:
         run: |
           cd client
           if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
-            xvfb-run -a npm run smoke:packaged
+            xvfb-run -a --server-args="-screen 0 1920x1080x24" npm run smoke:packaged
           else
             npm run smoke:packaged
           fi
+
+      - name: Upload Packaged Smoke Screenshot
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: packaged-smoke-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/conquerors-windows-packaged-smoke.png
+            ${{ runner.temp }}/conquerors-linux-packaged-smoke.png
+            ${{ runner.temp }}/conquerors-macos-packaged-smoke.png
+          if-no-files-found: ignore
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
@@ -180,23 +191,15 @@ jobs:
           flatten_if_nested client/dist_electron/mac
           flatten_if_nested client/dist_electron/linux-unpacked
 
-          # Steam app packages currently mount depot 4432222 on macOS for this app.
-          # Copy the .app bundle into that depot path as a compatibility fallback.
-          if [ -d client/dist_electron/mac/ConquerorsDominationDemo.app ] && [ ! -d client/dist_electron/win-unpacked/ConquerorsDominationDemo.app ]; then
-            cp -R client/dist_electron/mac/ConquerorsDominationDemo.app client/dist_electron/win-unpacked/
-          fi
-
           test -f client/dist_electron/win-unpacked/ConquerorsDominationDemo.exe
           test -d client/dist_electron/mac/ConquerorsDominationDemo.app
           test -f client/dist_electron/mac/ConquerorsDominationDemo.app/Contents/MacOS/ConquerorsDominationDemo
           test -f client/dist_electron/linux-unpacked/conquerors-domination-demo
-          test -d client/dist_electron/win-unpacked/ConquerorsDominationDemo.app
 
           echo "Verified expected launch targets:"
           echo "- Windows launch: client/dist_electron/win-unpacked/ConquerorsDominationDemo.exe"
           echo "- macOS launch:   client/dist_electron/mac/ConquerorsDominationDemo.app"
           echo "- Linux launch:   client/dist_electron/linux-unpacked/conquerors-domination-demo"
-          echo "- macOS fallback in depot 4432222: client/dist_electron/win-unpacked/ConquerorsDominationDemo.app"
 
       - name: Select Steam auth mode
         id: steam-auth
@@ -234,8 +237,8 @@ jobs:
           firstDepotIdOverride: 4432222
           buildDescription: "v${{ github.run_number }}"
           rootPath: client
-          depot1Path: dist_electron/win-unpacked
-          depot2Path: dist_electron/mac
+          depot1Path: dist_electron/mac
+          depot2Path: dist_electron/win-unpacked
           depot3Path: dist_electron/linux-unpacked
           releaseBranch: public
 
@@ -249,8 +252,8 @@ jobs:
           firstDepotIdOverride: 4432222
           buildDescription: "v${{ github.run_number }}"
           rootPath: client
-          depot1Path: dist_electron/win-unpacked
-          depot2Path: dist_electron/mac
+          depot1Path: dist_electron/mac
+          depot2Path: dist_electron/win-unpacked
           depot3Path: dist_electron/linux-unpacked
           releaseBranch: public
 
