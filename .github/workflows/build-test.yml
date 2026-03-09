@@ -130,9 +130,14 @@ jobs:
 
       - name: Run Smoke Test
         continue-on-error: true
+        shell: bash
         run: |
           cd client
-          xvfb-run npm run test:smoke || npm run test:smoke
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            xvfb-run -a npm run test:smoke || npm run test:smoke
+          else
+            npm run test:smoke
+          fi
 
       - name: Upload Screenshot
         uses: actions/upload-artifact@v4
