@@ -6,6 +6,8 @@ const appBuildPath = path.join(clientDir, "steampipe", "app_build_4432220.vdf");
 const appBuild = fs.readFileSync(appBuildPath, "utf8");
 const packageJson = JSON.parse(fs.readFileSync(path.join(clientDir, "package.json"), "utf8"));
 const errors = [];
+const depotIdsInAppBuild = [...appBuild.matchAll(/"(\d+)"\s+"depot_build_[^"]+\.vdf"/g)].map((match) => match[1]);
+const expectedDepotIds = platforms.map((platform) => platform.depotId).sort();
 
 function vdfValue(contents, key) {
   const match = contents.match(new RegExp(`"${key}"\\s+"([^"]+)"`));
@@ -38,6 +40,14 @@ check(fs.existsSync(releaseRoot), `Missing staged release root at ${path.relativ
 check(
   fs.existsSync(path.join(releaseRoot, "platform-manifest.json")),
   `Missing platform manifest at ${path.relative(clientDir, path.join(releaseRoot, "platform-manifest.json"))}`
+);
+check(
+  JSON.stringify([...depotIdsInAppBuild].sort()) === JSON.stringify(expectedDepotIds),
+  `app_build_4432220.vdf should contain only demo platform depots ${expectedDepotIds.join(", ")}, found ${depotIdsInAppBuild.join(", ") || "(none)"}`
+);
+check(
+  !appBuild.includes('"4432221" "depot_build_4432221.vdf"'),
+  "app_build_4432220.vdf must not include the placeholder shared-base depot 4432221"
 );
 
 for (const platform of platforms) {

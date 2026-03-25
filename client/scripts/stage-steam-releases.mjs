@@ -5,7 +5,11 @@ import { clientDir, installFolder, launchOptions, platforms, releaseRoot } from 
 function copyDirectoryContents(sourceDir, destinationDir) {
   fs.mkdirSync(destinationDir, { recursive: true });
   for (const entry of fs.readdirSync(sourceDir)) {
-    fs.cpSync(path.join(sourceDir, entry), path.join(destinationDir, entry), { recursive: true });
+    fs.cpSync(path.join(sourceDir, entry), path.join(destinationDir, entry), {
+      recursive: true,
+      dereference: false,
+      verbatimSymlinks: true,
+    });
   }
 }
 

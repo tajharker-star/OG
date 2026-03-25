@@ -11,7 +11,32 @@ function check(condition, message) {
   }
 }
 
+function countFilesRecursively(rootDir) {
+  let total = 0;
+  const pending = [rootDir];
+
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (!current || !fs.existsSync(current)) {
+      continue;
+    }
+
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const entryPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(entryPath);
+      } else if (entry.isFile()) {
+        total += 1;
+      }
+    }
+  }
+
+  return total;
+}
+
 for (const platform of platforms) {
+  const fileCount = countFilesRecursively(platform.stageDir);
+
   check(
     fs.existsSync(platform.binaryPath),
     `${platform.label} binary is missing at ${path.relative(clientDir, platform.binaryPath)}`
@@ -19,6 +44,18 @@ for (const platform of platforms) {
   check(
     fs.existsSync(platform.resourcePath),
     `${platform.label} resources/app.asar is missing at ${path.relative(clientDir, platform.resourcePath)}`
+  );
+  check(
+    fs.existsSync(platform.rendererIndexPath),
+    `${platform.label} renderer index is missing at ${path.relative(clientDir, platform.rendererIndexPath)}`
+  );
+  check(
+    fs.existsSync(platform.serverEntryPath),
+    `${platform.label} packaged server entry is missing at ${path.relative(clientDir, platform.serverEntryPath)}`
+  );
+  check(
+    fileCount >= platform.minimumFileCount,
+    `${platform.label} staged release looks incomplete. Expected at least ${platform.minimumFileCount} files, found ${fileCount}`
   );
 
   if (fs.existsSync(platform.binaryPath)) {
@@ -48,5 +85,6 @@ if (errors.length > 0) {
 console.log("Release binaries verified:");
 for (const platform of platforms) {
   const description = execFileSync("file", [platform.binaryPath], { encoding: "utf8" }).trim();
-  console.log(`- ${platform.label}: ${description}`);
+  const fileCount = countFilesRecursively(platform.stageDir);
+  console.log(`- ${platform.label}: ${description} (${fileCount} staged files)`);
 }

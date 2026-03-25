@@ -2,12 +2,13 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
+import fs from 'fs';
 import path from 'path';
 import https from 'https';
 import { randomUUID } from 'crypto';
 import { GameState } from './game/GameState';
 import { MapGenerator } from './game/MapGenerator';
-import { BotAI } from './game/BotAI';
+import { createBotAI } from './game/BotAIFactory';
 
 import os from 'os';
 
@@ -17,20 +18,28 @@ app.use(cors());
 // Serve static files from client build
 // In production, the client dist is often at the same level as the server executable
 // or in a 'client/dist' folder relative to the root.
-let clientBuildPath;
-if (process.env.NODE_ENV === 'production' || process.mainModule?.filename.includes('app.asar')) {
-    // If packaged, try common locations
+const packagedResourcesPath = typeof (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath === 'string'
+    ? (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath
+    : '';
+
+function resolveClientBuildPath() {
     const locations = [
+        process.env.CLIENT_DIST_DIR,
+        packagedResourcesPath ? path.join(packagedResourcesPath, 'dist') : '',
+        packagedResourcesPath ? path.join(packagedResourcesPath, 'app', 'dist') : '',
+        packagedResourcesPath ? path.join(packagedResourcesPath, 'app.asar', 'dist') : '',
         path.join(process.cwd(), 'client', 'dist'),
         path.join(process.cwd(), '..', 'client', 'dist'),
+        path.join(process.cwd(), '..', '..', 'client', 'dist'),
+        path.join(__dirname, '..', '..', 'client', 'dist'),
         path.join(__dirname, '..', 'client', 'dist'),
         path.join(__dirname, 'client', 'dist')
-    ];
-    const fs = require('fs');
-    clientBuildPath = locations.find(loc => fs.existsSync(loc)) || locations[0];
-} else {
-    clientBuildPath = path.join(process.cwd(), '..', 'client', 'dist');
+    ].filter((value): value is string => Boolean(value));
+
+    return locations.find((loc) => fs.existsSync(path.join(loc, 'index.html'))) || locations[0];
 }
+
+const clientBuildPath = resolveClientBuildPath();
 console.log('[Server] Serving client build from:', clientBuildPath);
 
 app.use(express.static(clientBuildPath));
@@ -58,20 +67,23 @@ const io = new Server(httpServer, {
 });
 
 const PORT = process.env.PORT || 3001;
+const ENABLE_HEARTBEAT_LOGS = process.env.ENABLE_HEARTBEAT_LOGS === '1';
 
 // Heartbeat / Connection Logging
-setInterval(() => {
-    const totalConnections = io.engine.clientsCount;
-    if (totalConnections > 0) {
-        console.log(`[Heartbeat] Active Connections: ${totalConnections}`);
-        rooms.forEach((gs, roomId) => {
-            const humanCount = Array.from(gs.players.values()).filter(p => !p.isBot).length;
-            if (humanCount > 0) {
-                console.log(`  Room ${roomId}: ${humanCount} humans, ${gs.units.length} units`);
-            }
-        });
-    }
-}, 10000); // Log every 10 seconds
+if (ENABLE_HEARTBEAT_LOGS) {
+    setInterval(() => {
+        const totalConnections = io.engine.clientsCount;
+        if (totalConnections > 0) {
+            console.log(`[Heartbeat] Active Connections: ${totalConnections}`);
+            rooms.forEach((gs, roomId) => {
+                const humanCount = Array.from(gs.players.values()).filter(p => !p.isBot).length;
+                if (humanCount > 0) {
+                    console.log(`  Room ${roomId}: ${humanCount} humans, ${gs.units.length} units`);
+                }
+            });
+        }
+    }, 10000);
+}
 
 // Rooms management
 const rooms = new Map<string, GameState>();
@@ -204,7 +216,7 @@ io.on('connection', (socket) => {
             }
 
             if (!suppressBroadcast) {
-                socket.emit('mapData', existingGs.map);
+                existingGs.emitVisibleMapDataToPlayer(io, socket.id);
                 socket.emit('playersData', Array.from(existingGs.players.values()));
                 socket.emit('unitsData', existingGs.units);
                 socket.emit('lobbySettings', { requiredPlayers: existingGs.requiredPlayers });
@@ -237,7 +249,7 @@ io.on('connection', (socket) => {
         gs.checkVotingStart(io, roomId);
 
         if (!suppressBroadcast) {
-            io.to(roomId).emit('mapData', gs.map);
+            gs.emitVisibleMapData(io, roomId);
             io.to(roomId).emit('playersData', Array.from(gs.players.values()));
             io.to(roomId).emit('unitsData', gs.units);
             if (gs.matchState === 'ENDED') {
@@ -275,7 +287,7 @@ io.on('connection', (socket) => {
         if (gs) {
             socket.emit('gameStatus', gs.status);
             socket.emit('lobbySettings', { requiredPlayers: gs.requiredPlayers });
-            socket.emit('mapData', gs.map);
+            gs.emitVisibleMapDataToPlayer(io, socket.id);
             socket.emit('playersData', Array.from(gs.players.values()));
             socket.emit('unitsData', gs.units);
             if (gs.matchState === 'ENDED') {
@@ -306,6 +318,12 @@ io.on('connection', (socket) => {
         }
     });
 
+    socket.on('player_match_ready', () => {
+        const gs = rooms.get(currentRoom);
+        if (!gs) return;
+        gs.markHumanPlayerMatchReady(socket.id);
+    });
+
     socket.on('request_spawn', () => {
         const gs = rooms.get(currentRoom);
         if (gs && gs.status === 'playing') {
@@ -328,7 +346,7 @@ io.on('connection', (socket) => {
                     player.canBuildHQ = false;
                     (gs as any).eliminatePlayer(socket.id, 'HQ_DESTROYED');
                     io.to(currentRoom).emit('playersData', Array.from(gs.players.values()));
-                    io.to(currentRoom).emit('mapData', gs.map);
+                    gs.emitVisibleMapData(io, currentRoom);
                     io.to(currentRoom).emit('unitsData', gs.units);
                     gs.emitPlayerHqStatus(io, socket.id);
                     return;
@@ -340,14 +358,14 @@ io.on('connection', (socket) => {
                     console.log(`[Spawn] request_spawn failed for ${socket.id}.`);
                 }
                 // Broadcast updates
-                io.to(currentRoom).emit('mapData', gs.map);
+                gs.emitVisibleMapData(io, currentRoom);
                 io.to(currentRoom).emit('unitsData', gs.units);
                 io.to(currentRoom).emit('playersData', Array.from(gs.players.values()));
                 gs.emitPlayerHqStatus(io, socket.id);
             } else {
                 console.log(`[Spawn] Client ${socket.id} requested spawn but base ALREADY EXISTS.`);
                 // Resend map data just in case
-                socket.emit('mapData', gs.map);
+                gs.emitVisibleMapDataToPlayer(io, socket.id);
                 gs.emitPlayerHqStatus(io, socket.id);
             }
         }
@@ -363,7 +381,7 @@ io.on('connection', (socket) => {
 
         const existingBase = gs.map.islands.some(i => i.buildings.some(b => b.type === 'base' && b.ownerId === socket.id));
         if (existingBase) {
-            socket.emit('mapData', gs.map);
+            gs.emitVisibleMapDataToPlayer(io, socket.id);
             return;
         }
 
@@ -383,7 +401,7 @@ io.on('connection', (socket) => {
             player.canBuildHQ = false;
             (gs as any).eliminatePlayer(socket.id, 'HQ_DESTROYED');
             io.to(currentRoom).emit('playersData', Array.from((gs as any).players.values()));
-            io.to(currentRoom).emit('mapData', gs.map);
+            gs.emitVisibleMapData(io, currentRoom);
             io.to(currentRoom).emit('unitsData', gs.units);
             gs.emitPlayerHqStatus(io, socket.id);
             return;
@@ -394,7 +412,7 @@ io.on('connection', (socket) => {
         if (!spawned) {
             console.log(`[Spawn] force_spawn_hq failed for ${socket.id}.`);
         }
-        io.to(currentRoom).emit('mapData', gs.map);
+        gs.emitVisibleMapData(io, currentRoom);
         io.to(currentRoom).emit('unitsData', gs.units);
         io.to(currentRoom).emit('playersData', Array.from((gs as any).players.values()));
         gs.emitPlayerHqStatus(io, socket.id);
@@ -433,7 +451,7 @@ io.on('connection', (socket) => {
 
             // Re-emit explicitly to the socket just in case io.to(roomId) was too early
             socket.emit('gameStatus', gs.status);
-            socket.emit('mapData', gs.map);
+            gs.emitVisibleMapDataToPlayer(io, socket.id);
             socket.emit('playersData', Array.from(gs.players.values()));
             socket.emit('unitsData', gs.units);
         }
@@ -482,6 +500,7 @@ io.on('connection', (socket) => {
             gs.map = MapGenerator.generate(3200, 2400, 40, gs.mapType as any);
             gs.map.mapType = gs.mapType;
             gs.map.serverRegion = gs.serverRegion;
+            gs.map.waterBuildings = gs.map.waterBuildings || [];
             gs.map.version = randomUUID();
 
             // Reset Units (Clear any ghost units from pre-spawn)
@@ -520,8 +539,9 @@ io.on('connection', (socket) => {
             const botPlayers = Array.from(gs.players.values()).filter(p => p.isBot);
             gs.bots = [];
             botPlayers.forEach(p => {
-                gs.bots.push(new BotAI(p.id, p.difficulty || 5));
+                gs.bots.push(createBotAI(p.id, p.difficulty || 5));
             });
+            gs.armHumanReadyBotStartGate();
 
             // Broadcast Start
             console.log(`[CustomGame] Broadcast Start to ${roomId}`);
@@ -529,14 +549,14 @@ io.on('connection', (socket) => {
             socket.emit('gameStatus', 'playing');
             socket.emit('joinedRoom', roomId);
             socket.emit('gameStarted', { mapType: gs.mapType });
-            socket.emit('mapData', gs.map);
+            gs.emitVisibleMapDataToPlayer(io, socket.id);
             socket.emit('playersData', Array.from(gs.players.values()));
             socket.emit('unitsData', gs.units);
             gs.emitPlayerHqStatus(io, socket.id);
 
             // Also broadcast to the room for any other players (though usually single player here)
             io.to(roomId).emit('gameStatus', 'playing');
-            io.to(roomId).emit('mapData', gs.map);
+            gs.emitVisibleMapData(io, roomId);
             io.to(roomId).emit('playersData', Array.from(gs.players.values()));
             gs.emitHumanHqStatuses(io);
         }
@@ -719,12 +739,12 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('build', (data: { islandId?: string, type: 'barracks' | 'mine' | 'tower' | 'dock' | 'base' | 'oil_rig' | 'wall' | 'bridge_node' | 'wall_node', x?: number, y?: number }) => {
+    socket.on('build', (data: { islandId?: string, type: 'barracks' | 'mine' | 'tower' | 'dock' | 'base' | 'oil_rig' | 'oil_well' | 'wall' | 'bridge_node' | 'wall_node' | 'farm' | 'tank_factory' | 'air_base' | 'hospital' | 'repair_dock' | 'naval_mine', x?: number, y?: number }) => {
         const gs = rooms.get(currentRoom);
         if (gs) {
             const success = gs.buildStructure(socket.id, data.islandId as any, data.type, data.x, data.y);
             if (success) {
-                io.to(currentRoom).emit('mapData', gs.map);
+                gs.emitVisibleMapData(io, currentRoom);
                 io.to(currentRoom).emit('playersData', Array.from(gs.players.values()));
             }
         }
@@ -734,7 +754,7 @@ io.on('connection', (socket) => {
         const gs = rooms.get(currentRoom);
         if (gs) {
             gs.deleteEntities(socket.id, data.entityIds);
-            io.to(currentRoom).emit('mapData', gs.map);
+            gs.emitVisibleMapData(io, currentRoom);
             io.to(currentRoom).emit('unitsData', gs.units);
         }
     });
@@ -743,7 +763,7 @@ io.on('connection', (socket) => {
         const gs = rooms.get(currentRoom);
         if (gs) {
             gs.connectNodes(socket.id, data.nodeAId, data.nodeBId);
-            io.to(currentRoom).emit('mapData', gs.map);
+            gs.emitVisibleMapData(io, currentRoom);
             io.to(currentRoom).emit('playersData', Array.from(gs.players.values()));
         }
     });
@@ -752,17 +772,17 @@ io.on('connection', (socket) => {
         const gs = rooms.get(currentRoom);
         if (gs) {
             gs.convertWallToGate(socket.id, data.nodeAId, data.nodeBId);
-            io.to(currentRoom).emit('mapData', gs.map);
+            gs.emitVisibleMapData(io, currentRoom);
             io.to(currentRoom).emit('playersData', Array.from(gs.players.values()));
         }
     });
 
-    socket.on('recruit', (data: { islandId: string, buildingId?: string, type: 'soldier' | 'destroyer' | 'construction_ship' | 'sniper' | 'rocketeer' | 'builder' | 'ferry' }) => {
+    socket.on('recruit', (data: { islandId: string | null, buildingId?: string, type: string }) => {
         const gs = rooms.get(currentRoom);
         if (gs) {
             const success = gs.recruitUnit(socket.id, data.islandId, data.type, data.buildingId);
             if (success) {
-                io.to(currentRoom).emit('mapData', gs.map); // Update queue
+                gs.emitVisibleMapData(io, currentRoom); // Update queue
             }
             io.to(currentRoom).emit('playersData', Array.from(gs.players.values()));
             io.to(currentRoom).emit('unitsData', gs.units);
@@ -773,7 +793,7 @@ io.on('connection', (socket) => {
         const gs = rooms.get(currentRoom);
         if (gs) {
             if (gs.upgradeBuilding(socket.id, data.buildingId)) {
-                io.to(currentRoom).emit('mapData', gs.map); // Map data contains buildings
+                gs.emitVisibleMapData(io, currentRoom); // Map data contains buildings
                 io.to(currentRoom).emit('playersData', Array.from(gs.players.values())); // Resources changed
             }
         }

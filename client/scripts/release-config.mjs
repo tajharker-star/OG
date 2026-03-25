@@ -15,7 +15,7 @@ export const platforms = [
     key: "windows",
     label: "Microsoft Windows",
     folder: "microsoft-windows",
-    depotId: "4432222",
+    depotId: "4432223",
     launchExecutable: "ConquerorsDominationDemo.exe",
     sourceDir: sourceDir("dist_electron", "win-unpacked"),
     sourceLocalPath: "dist_electron/win-unpacked",
@@ -24,12 +24,15 @@ export const platforms = [
     binaryPath: path.join(stageDir("microsoft-windows"), "ConquerorsDominationDemo.exe"),
     fileSignature: "PE32+ executable (GUI) x86-64, for MS Windows",
     resourcePath: path.join(stageDir("microsoft-windows"), "resources", "app.asar"),
+    rendererIndexPath: path.join(stageDir("microsoft-windows"), "resources", "dist", "index.html"),
+    serverEntryPath: path.join(stageDir("microsoft-windows"), "resources", "server", "dist", "index.js"),
+    minimumFileCount: 150,
   },
   {
     key: "macos",
     label: "macOS",
     folder: "macos",
-    depotId: "4432223",
+    depotId: "4432222",
     launchExecutable: "ConquerorsDominationDemo.app",
     sourceDir: sourceDir("dist_electron", "mac"),
     sourceLocalPath: "dist_electron/mac",
@@ -51,6 +54,24 @@ export const platforms = [
       "Resources",
       "app.asar"
     ),
+    rendererIndexPath: path.join(
+      stageDir("macos"),
+      "ConquerorsDominationDemo.app",
+      "Contents",
+      "Resources",
+      "dist",
+      "index.html"
+    ),
+    serverEntryPath: path.join(
+      stageDir("macos"),
+      "ConquerorsDominationDemo.app",
+      "Contents",
+      "Resources",
+      "server",
+      "dist",
+      "index.js"
+    ),
+    minimumFileCount: 250,
   },
   {
     key: "linux",
@@ -65,6 +86,9 @@ export const platforms = [
     binaryPath: path.join(stageDir("linux"), "conquerors-domination-demo"),
     fileSignature: "ELF 64-bit",
     resourcePath: path.join(stageDir("linux"), "resources", "app.asar"),
+    rendererIndexPath: path.join(stageDir("linux"), "resources", "dist", "index.html"),
+    serverEntryPath: path.join(stageDir("linux"), "resources", "server", "dist", "index.js"),
+    minimumFileCount: 150,
     requiresExecutableBit: true,
   },
 ];

@@ -4,7 +4,7 @@
 	"desc" "Conquerors: Domination Demo Build"
 	"buildoutput" "output"
 	"contentroot" ".."
-	"setlive" ""
+	"setlive" "public"
 	"preview" "0"
 	"local" ""
 	
