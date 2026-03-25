@@ -4,6 +4,29 @@ export interface SteamUser {
     name: string;
 }
 
+export interface SteamLobbyData {
+    success: boolean;
+    roomId?: string;
+    endpoint?: string;
+    hostSteamId?: string;
+    map?: string;
+    mode?: string;
+    error?: string;
+}
+
+export interface SteamStatsResult {
+    success: boolean;
+    stats: Record<string, number | null>;
+    error?: string;
+}
+
+export interface SteamStatsUpdateResult {
+    success: boolean;
+    stored: boolean;
+    rejected: string[];
+    error?: string;
+}
+
 // Add type declaration for window.require
 declare global {
     interface Window {
@@ -86,12 +109,12 @@ class SteamService {
         ipcRenderer.send('steam:set-rich-presence', { [key]: value });
     }
 
-    public async createLobby(roomId: string, map: string, mode: string): Promise<{ success: boolean; lobbyId?: string; error?: string }> {
+    public async createLobby(roomId: string, map: string, mode: string, endpoint?: string): Promise<{ success: boolean; lobbyId?: string; error?: string }> {
         if (!this.isInitialized || !ipcRenderer) return { success: false, error: 'Not initialized' };
-        return await ipcRenderer.invoke('steam:create-lobby', { roomId, map, mode });
+        return await ipcRenderer.invoke('steam:create-lobby', { roomId, map, mode, endpoint });
     }
 
-    public async getLobbyData(lobbyId: string): Promise<{ success: boolean; roomId?: string; error?: string }> {
+    public async getLobbyData(lobbyId: string): Promise<SteamLobbyData> {
         if (!this.isInitialized || !ipcRenderer) return { success: false, error: 'Not initialized' };
         return await ipcRenderer.invoke('steam:get-lobby-data', lobbyId);
     }
@@ -99,6 +122,20 @@ class SteamService {
     public activateAchievement(achievementId: string) {
         if (!this.isInitialized || !ipcRenderer) return;
         ipcRenderer.send('steam:activate-achievement', achievementId);
+    }
+
+    public async getStats(statNames: string[]): Promise<SteamStatsResult> {
+        if (!this.isInitialized || !ipcRenderer) {
+            return { success: false, stats: {}, error: 'Not initialized' };
+        }
+        return await ipcRenderer.invoke('steam:get-stats', statNames);
+    }
+
+    public async setStats(stats: Record<string, number>): Promise<SteamStatsUpdateResult> {
+        if (!this.isInitialized || !ipcRenderer) {
+            return { success: false, stored: false, rejected: Object.keys(stats), error: 'Not initialized' };
+        }
+        return await ipcRenderer.invoke('steam:set-stats', stats);
     }
 }
 

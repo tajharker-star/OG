@@ -1,9 +1,9 @@
 "DepotBuild"
 {
-	"DepotID" "4432223"
+	"DepotID" "4432213"
 	"FileMapping"
 	{
-		"LocalPath" "dist_electron\linux-unpacked\*"
+		"LocalPath" "releases/steam/linux/*"
 		"DepotPath" "."
 		"recursive" "1"
 	}

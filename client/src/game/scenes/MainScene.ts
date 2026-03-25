@@ -1,9 +1,11 @@
 import Phaser from 'phaser';
 import { socket } from '../../services/socket';
+import { soundEffectsManager } from '../../audio/soundEffects';
 import { settingsManager } from '../SettingsManager';
 import type { Settings } from '../SettingsManager';
-import type { GameMap, Island, Player, Unit } from '../../types/game';
+import type { Building, GameMap, Island, Player, Unit } from '../../types/game';
 import { createUnitArt } from '../rendering/unitArt';
+import type { UnitArtRenderMode } from '../rendering/unitArt';
 import { createBuildingArt } from '../rendering/buildingArt';
 
 interface MenuProjectile {
@@ -22,6 +24,68 @@ interface MenuProjectile {
     initialVy: number;
 }
 
+interface BuildingAudioSnapshot {
+    id: string;
+    type: Building['type'];
+    ownerId: string | null;
+    x: number;
+    y: number;
+}
+
+type PlacementValidation = {
+    valid: boolean;
+    reason: string;
+};
+
+const CLIENT_DEFINITE_PLACEMENT_FAILURE_REASONS = new Set([
+    'Map data still loading',
+    'Connection not ready',
+    'Player data still loading',
+    'HQ only spawns at match start'
+]);
+
+const SERVER_AUTHORITY_PLACEMENT_TYPES = new Set(['bridge_node', 'naval_mine']);
+
+const BUILDING_COSTS: Record<string, { gold: number; oil: number }> = {
+    barracks: { gold: 50, oil: 0 },
+    mine: { gold: 30, oil: 0 },
+    tower: { gold: 40, oil: 0 },
+    dock: { gold: 100, oil: 0 },
+    base: { gold: 9999, oil: 9999 },
+    oil_rig: { gold: 200, oil: 0 },
+    oil_well: { gold: 200, oil: 0 },
+    wall: { gold: 10, oil: 0 },
+    bridge_node: { gold: 50, oil: 0 },
+    wall_node: { gold: 20, oil: 0 },
+    farm: { gold: 50, oil: 0 },
+    tank_factory: { gold: 500, oil: 50 },
+    air_base: { gold: 400, oil: 100 },
+    hospital: { gold: 150, oil: 20 },
+    repair_dock: { gold: 220, oil: 40 },
+    naval_mine: { gold: 120, oil: 20 }
+};
+
+const BUILDING_FOOTPRINTS: Record<string, number> = {
+    base: 36,
+    barracks: 34,
+    mine: 24,
+    tower: 18,
+    dock: 28,
+    oil_rig: 24,
+    oil_well: 24,
+    wall: 10,
+    bridge_node: 10,
+    wall_node: 10,
+    farm: 24,
+    tank_factory: 42,
+    air_base: 40,
+    hospital: 30,
+    repair_dock: 32,
+    naval_mine: 12
+};
+
+const NON_BLOCKING_BUILDING_TYPES = new Set<string>(['mine', 'bridge_node', 'naval_mine']);
+
 export class MainScene extends Phaser.Scene {
   private islandsGroup!: Phaser.GameObjects.Group;
   private unitsGroup!: Phaser.GameObjects.Group;
@@ -32,7 +96,7 @@ export class MainScene extends Phaser.Scene {
   private menuProjectiles: MenuProjectile[] = [];
   private menuSpawnTimer: number = 0;
   private menuGraphics!: Phaser.GameObjects.Graphics;
-  private menuExplosions: {x: number, y: number, life: number, maxLife: number, color: number}[] = [];
+  private menuExplosions: {x: number, y: number, life: number, maxLife: number, color: number, radius: number}[] = [];
   private mainMenuMusic: Phaser.Sound.BaseSound | null = null;
   private ingameMusic: Phaser.Sound.BaseSound | null = null;
 
@@ -42,6 +106,7 @@ export class MainScene extends Phaser.Scene {
   private selectedBuildingIds: Set<string> = new Set();
   private selectedNodeIds: Set<string> = new Set();
   private currentUnits: Unit[] = [];
+  private infantryLodActive: boolean = false;
   private attackFacingOverrides: Map<string, { angle: number; expiresAt: number }> = new Map();
   private selectionGraphics!: Phaser.GameObjects.Graphics;
   private isSelecting: boolean = false;
@@ -50,6 +115,7 @@ export class MainScene extends Phaser.Scene {
   private placementMode: boolean = false;
   private placementType: string | null = null;
   private placementGhost: Phaser.GameObjects.Container | null = null;
+  private placementStatusText: Phaser.GameObjects.Text | null = null;
   private targetSelectionMode: boolean = false;
   private targetSelectionCallback: ((x: number, y: number) => void) | null = null;
   
@@ -57,6 +123,7 @@ export class MainScene extends Phaser.Scene {
     private tumbleweeds: { sprite: Phaser.GameObjects.Shape, dx: number, dy: number, life: number, maxLife: number, poly: Phaser.Geom.Polygon, bounds: Phaser.Geom.Rectangle }[] = [];
     private weatherParticles: { sprite: Phaser.GameObjects.Shape, dx: number, dy: number, type: string, life: number, maxLife: number, poly: Phaser.Geom.Polygon, bounds: Phaser.Geom.Rectangle }[] = [];
     private oilAnimations: { x: number, y: number, pulse: Phaser.GameObjects.Arc, timer: number, id: string }[] = [];
+    private goldSparkles: { sprite: Phaser.GameObjects.Star, timer: number, speed: number }[] = [];
     private oilSpotVisuals: Map<string, { main: Phaser.GameObjects.Shape, pulse: Phaser.GameObjects.Shape, ping?: Phaser.GameObjects.Rectangle }> = new Map();
     private revealedOilSpots: Set<string> = new Set();
     private unitUpdates: Map<string, { x: number, y: number, time: number }[]> = new Map();
@@ -68,9 +135,11 @@ export class MainScene extends Phaser.Scene {
     private dataArray: Uint8Array | null = null;
 
     private cameraInitialized: boolean = false;
-  private currentMap: GameMap | null = null;
+    private currentMap: GameMap | null = null;
   private currentMapVersion: string | null = null;
   private currentMapStateSignature: string | null = null;
+  private knownBuildingAudioState: Map<string, BuildingAudioSnapshot> = new Map();
+  private buildingAudioPrimed: boolean = false;
   private rangeGraphics!: Phaser.GameObjects.Graphics;
   private pathGraphics!: Phaser.GameObjects.Graphics;
   private scannerOverlay!: Phaser.GameObjects.Graphics;
@@ -85,9 +154,15 @@ export class MainScene extends Phaser.Scene {
         if (data.ownerId === socket.id) {
             const isHQ = data.entityType === 'base';
             if (isHQ) {
-                this.sound.play('explosion', { volume: 0.4, rate: 1.5 });
+                const volume = soundEffectsManager.getEffectVolume('damageAlertHq', 0.4);
+                if (volume > 0) {
+                    this.sound.play('explosion', { volume, rate: 1.5 });
+                }
             } else {
-                this.sound.play('shoot', { volume: 0.1, rate: 3.0 });
+                const volume = soundEffectsManager.getEffectVolume('damageAlertBuilding', 0.1);
+                if (volume > 0) {
+                    this.sound.play('shoot', { volume, rate: 3.0 });
+                }
             }
         }
     };
@@ -153,6 +228,739 @@ export class MainScene extends Phaser.Scene {
     art.rotation = Phaser.Math.Angle.RotateTo(art.rotation, targetAngle, 8 * dtSec);
   }
 
+  private isCrowdInfantryType(type: string) {
+    return type === 'soldier' || type === 'sniper' || type === 'rocketeer' || type === 'builder';
+  }
+
+  private shouldUseInfantryLod(units: Unit[] = this.currentUnits) {
+    const infantryCount = units.reduce(
+      (count, unit) => count + (this.isCrowdInfantryType(unit.type) ? 1 : 0),
+      0
+    );
+    const zoom = this.cameras.main?.zoom ?? 1;
+
+    if (this.infantryLodActive) {
+      return zoom <= 0.62 || infantryCount >= 72 || (infantryCount >= 44 && zoom <= 0.78);
+    }
+
+    return zoom <= 0.5 || infantryCount >= 96 || (infantryCount >= 56 && zoom <= 0.72);
+  }
+
+  private syncUnitDetailMode(units: Unit[] = this.currentUnits) {
+    const shouldUseLod = this.shouldUseInfantryLod(units);
+    if (shouldUseLod === this.infantryLodActive) return false;
+    this.infantryLodActive = shouldUseLod;
+    return true;
+  }
+
+  private getUnitRenderMode(unit: Unit, isSelected: boolean): UnitArtRenderMode {
+    if (!isSelected && this.infantryLodActive && this.isCrowdInfantryType(unit.type)) {
+      return 'lod';
+    }
+
+    return 'full';
+  }
+
+  private clearPlacementMode() {
+    this.placementMode = false;
+    this.placementType = null;
+
+    if (this.placementGhost) {
+      this.placementGhost.destroy();
+      this.placementGhost = null;
+    }
+
+    if (this.placementStatusText) {
+      this.placementStatusText.destroy();
+      this.placementStatusText = null;
+    }
+  }
+
+  private getPlacementSupportUnitTypes(type: string): string[] {
+    if (type === 'naval_mine' || type === 'oil_rig') return ['construction_ship'];
+    if (type === 'bridge_node') return ['builder', 'construction_ship'];
+    return ['builder'];
+  }
+
+  private getPlacementSupportRange(type: string): number {
+    if (type === 'oil_rig') return 150;
+    if (type === 'naval_mine') return 180;
+    if (type === 'bridge_node') return 220;
+    return 400;
+  }
+
+  private getPlacementSupportLabel(type: string): string {
+    const allowedTypes = this.getPlacementSupportUnitTypes(type);
+    if (allowedTypes.length === 2) return 'builder or construction ship';
+    return allowedTypes[0] === 'construction_ship' ? 'construction ship' : 'builder';
+  }
+
+  private getBuildingCost(type: string) {
+    return BUILDING_COSTS[type] ?? { gold: 0, oil: 0 };
+  }
+
+  private getBuildingFootprintRadius(type: string): number {
+    return BUILDING_FOOTPRINTS[type] ?? 30;
+  }
+
+  private isNonBlockingBuildingType(type: string): boolean {
+    return NON_BLOCKING_BUILDING_TYPES.has(type);
+  }
+
+  private getEffectivePlacementFootprintRadius(type: string): number {
+    if (this.isNonBlockingBuildingType(type)) return 0;
+
+    const baseRadius = this.getBuildingFootprintRadius(type);
+    const mapType = this.currentMap?.mapType;
+
+    if (type === 'air_base') {
+      if (mapType === 'islands') return Math.max(14, Math.round(baseRadius * 0.5));
+      return Math.max(22, Math.round(baseRadius * 0.7));
+    }
+
+    if (mapType === 'islands') {
+      if (['barracks', 'tank_factory', 'tower', 'farm', 'oil_well', 'dock', 'hospital', 'repair_dock'].includes(type)) {
+        return Math.max(9, Math.round(baseRadius * 0.68));
+      }
+      if (type === 'wall' || type === 'wall_node') {
+        return Math.max(5, Math.round(baseRadius * 0.7));
+      }
+    }
+
+    return baseRadius;
+  }
+
+  private getBuildingPlacementPadding(type: string): number {
+    if (this.isNonBlockingBuildingType(type)) return 0;
+
+    const mapType = this.currentMap?.mapType;
+    if (type === 'air_base') return mapType === 'islands' ? 0 : 2;
+    if (mapType === 'islands' && ['wall', 'wall_node'].includes(type)) return 1;
+    if (type === 'wall_node' || type === 'wall') return 2;
+    if (mapType === 'islands' && ['air_base', 'barracks', 'tank_factory', 'tower', 'farm', 'oil_well', 'dock', 'hospital', 'repair_dock'].includes(type)) {
+      return 0;
+    }
+
+    return 4;
+  }
+
+  private isPointOnLand(x: number, y: number) {
+    if (!this.currentMap) return false;
+
+    return this.currentMap.islands.some(island => {
+      return this.isPointOnIslandSurface(island, x, y);
+    });
+  }
+
+  private isPointOnIslandSurface(island: Island, x: number, y: number) {
+    if (island.points) {
+      return this.isPointInPolygon({ x, y }, island.points);
+    }
+    return Math.hypot(x - island.x, y - island.y) <= island.radius;
+  }
+
+  private getIslandShorelineProbe(
+    island: Island,
+    x: number,
+    y: number,
+    tolerance = 20
+  ): { edgeX: number; edgeY: number; outwardX: number; outwardY: number } | null {
+    if (island.points && island.points.length > 2) {
+      if (!this.isPointInPolygon({ x, y }, island.points)) {
+        return null;
+      }
+
+      const closest = this.getClosestPointOnPolygon({ x, y }, island.points);
+      if (Math.hypot(x - closest.x, y - closest.y) > tolerance) {
+        return null;
+      }
+
+      let outwardX = closest.x - island.x;
+      let outwardY = closest.y - island.y;
+      const outwardLength = Math.hypot(outwardX, outwardY);
+      if (outwardLength <= 0.001) {
+        outwardX = x - island.x;
+        outwardY = y - island.y;
+      }
+      const normalizedLength = Math.hypot(outwardX, outwardY) || 1;
+      return {
+        edgeX: closest.x,
+        edgeY: closest.y,
+        outwardX: outwardX / normalizedLength,
+        outwardY: outwardY / normalizedLength
+      };
+    }
+
+    const dx = x - island.x;
+    const dy = y - island.y;
+    const distance = Math.hypot(dx, dy);
+    const innerRadius = Math.max(0, island.radius - tolerance);
+    if (distance < innerRadius || distance > island.radius + 2) {
+      return null;
+    }
+
+    const length = distance || 1;
+    return {
+      edgeX: island.x + (dx / length) * island.radius,
+      edgeY: island.y + (dy / length) * island.radius,
+      outwardX: dx / length,
+      outwardY: dy / length
+    };
+  }
+
+  private isPointOnExposedIslandShoreline(island: Island, x: number, y: number, tolerance = 20) {
+    if (!this.currentMap) return false;
+
+    const probe = this.getIslandShorelineProbe(island, x, y, tolerance);
+    if (!probe) return false;
+
+    const probeDistances = [6, 12, 18];
+    return probeDistances.some(distance => {
+      const probeX = probe.edgeX + probe.outwardX * distance;
+      const probeY = probe.edgeY + probe.outwardY * distance;
+      return !this.isPointOnLand(probeX, probeY);
+    });
+  }
+
+  private getDockPlacementIslandCandidates(x: number, y: number) {
+    if (!this.currentMap) return [] as Island[];
+
+    return this.currentMap.islands
+      .filter(island => this.isPointOnExposedIslandShoreline(island, x, y))
+      .sort((left, right) => left.radius - right.radius);
+  }
+
+  private hasDockWaterSpawnSpace(x: number, y: number) {
+    const radii = [40, 60, 80, 100, 120, 150, 180, 200];
+    for (const radius of radii) {
+      for (let step = 0; step < 8; step += 1) {
+        const angle = (step / 8) * Math.PI * 2;
+        const testX = x + Math.cos(angle) * radius;
+        const testY = y + Math.sin(angle) * radius;
+        if (!this.isPointOnLand(testX, testY)) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  private getClosestOilSpot(x: number, y: number, maxDistance = 40) {
+    if (!this.currentMap) return null;
+
+    const nearby = this.currentMap.oilSpots
+      .map(spot => ({ spot, distance: Math.hypot(spot.x - x, spot.y - y) }))
+      .filter(entry => entry.distance <= maxDistance)
+      .sort((left, right) => left.distance - right.distance);
+
+    return nearby[0]?.spot ?? null;
+  }
+
+  private getHighGroundAtPoint(x: number, y: number) {
+    if (!this.currentMap?.highGrounds) return null;
+
+    return this.currentMap.highGrounds.find(highGround => {
+      if (
+        x < highGround.x - highGround.radius ||
+        x > highGround.x + highGround.radius ||
+        y < highGround.y - highGround.radius ||
+        y > highGround.y + highGround.radius
+      ) {
+        return false;
+      }
+
+      return this.isPointInPolygon({ x, y }, highGround.points);
+    }) ?? null;
+  }
+
+  private isPointInsideHighGround(x: number, y: number) {
+    return !!this.getHighGroundAtPoint(x, y);
+  }
+
+  private getPlacementIslandCandidates(x: number, y: number): Island[] {
+    if (!this.currentMap) return [];
+
+    return this.currentMap.islands
+      .filter(island => {
+        if (island.points) return this.isPointInPolygon({ x, y }, island.points);
+        return Math.hypot(x - island.x, y - island.y) < island.radius + 50;
+      })
+      .sort((left, right) => left.radius - right.radius);
+  }
+
+  private getPlacementSurfaceIslandCandidates(x: number, y: number): Island[] {
+    if (!this.currentMap) return [];
+
+    return this.currentMap.islands
+      .filter(island => {
+        if (island.points) return this.isPointInPolygon({ x, y }, island.points);
+        return Math.hypot(x - island.x, y - island.y) <= island.radius;
+      })
+      .sort((left, right) => left.radius - right.radius);
+  }
+
+  private getBuildSupportUnitsInRange(type: string, x: number, y: number): Unit[] {
+    const allowedTypes = new Set(this.getPlacementSupportUnitTypes(type));
+    const range = this.getPlacementSupportRange(type);
+
+    return this.currentUnits.filter(unit =>
+      unit.ownerId === socket.id &&
+      allowedTypes.has(unit.type) &&
+      Math.hypot(unit.x - x, unit.y - y) <= range
+    );
+  }
+
+  private getNodeView(nodeId: string): { building: any; x: number; y: number; island?: Island } | null {
+    if (!this.currentMap) return null;
+
+    for (const island of this.currentMap.islands) {
+      const building = island.buildings.find(candidate => candidate.id === nodeId);
+      if (!building) continue;
+      return {
+        building,
+        island,
+        x: island.x + (building.x || 0),
+        y: island.y + (building.y || 0)
+      };
+    }
+
+    for (const building of this.currentMap.waterBuildings || []) {
+      if (building.id !== nodeId) continue;
+      return {
+        building,
+        x: building.x || 0,
+        y: building.y || 0
+      };
+    }
+
+    return null;
+  }
+
+  private getBridgeEndpoints(bridge: GameMap['bridges'][number]): { ax: number; ay: number; bx: number; by: number } | null {
+    const nodeA = this.getNodeView(bridge.nodeAId);
+    const nodeB = this.getNodeView(bridge.nodeBId);
+    if (!nodeA || !nodeB) return null;
+
+    return {
+      ax: nodeA.x,
+      ay: nodeA.y,
+      bx: nodeB.x,
+      by: nodeB.y
+    };
+  }
+
+  private getBridgeChainPaths(bridges: GameMap['bridges']) {
+    const bridgeSegments = bridges.filter(bridge => bridge.type === 'bridge');
+    const adjacency = new Map<string, string[]>();
+    const visitedEdges = new Set<string>();
+    const chains: { points: { x: number; y: number }[]; ownerId: string }[] = [];
+
+    const edgeKey = (a: string, b: string) => [a, b].sort().join('::');
+
+    bridgeSegments.forEach(bridge => {
+      const nodeA = this.getNodeView(bridge.nodeAId);
+      const nodeB = this.getNodeView(bridge.nodeBId);
+      if (!nodeA || !nodeB) return;
+
+      adjacency.set(bridge.nodeAId, [...(adjacency.get(bridge.nodeAId) || []), bridge.nodeBId]);
+      adjacency.set(bridge.nodeBId, [...(adjacency.get(bridge.nodeBId) || []), bridge.nodeAId]);
+    });
+
+    const startNodeIds = [
+      ...Array.from(adjacency.entries())
+        .filter(([, neighbors]) => neighbors.length <= 1)
+        .map(([nodeId]) => nodeId),
+      ...Array.from(adjacency.keys())
+    ];
+
+    startNodeIds.forEach(startNodeId => {
+      const startNeighbors = adjacency.get(startNodeId) || [];
+      const hasUnvisitedEdge = startNeighbors.some(neighbor => !visitedEdges.has(edgeKey(startNodeId, neighbor)));
+      if (!hasUnvisitedEdge) return;
+
+      const firstNode = this.getNodeView(startNodeId);
+      if (!firstNode) return;
+
+      const points = [{ x: firstNode.x, y: firstNode.y }];
+      const firstBridge = bridgeSegments.find(bridge =>
+        bridge.nodeAId === startNodeId || bridge.nodeBId === startNodeId
+      );
+      let ownerId = firstBridge?.ownerId || '';
+      let previousNodeId: string | null = null;
+      let currentNodeId: string | null = startNodeId;
+
+      while (currentNodeId) {
+        const activeNodeId = currentNodeId;
+        const neighbors: string[] = (adjacency.get(activeNodeId) || []).filter(neighbor => {
+          if (neighbor === previousNodeId) return false;
+          return !visitedEdges.has(edgeKey(activeNodeId, neighbor));
+        });
+
+        if (neighbors.length === 0) break;
+
+        const nextNodeId: string = neighbors[0];
+        visitedEdges.add(edgeKey(activeNodeId, nextNodeId));
+
+        const bridge = bridgeSegments.find(candidate =>
+          (candidate.nodeAId === activeNodeId && candidate.nodeBId === nextNodeId) ||
+          (candidate.nodeAId === nextNodeId && candidate.nodeBId === activeNodeId)
+        );
+        if (bridge?.ownerId) ownerId = bridge.ownerId;
+
+        const nextNode = this.getNodeView(nextNodeId);
+        if (!nextNode) break;
+        points.push({ x: nextNode.x, y: nextNode.y });
+
+        previousNodeId = activeNodeId;
+        currentNodeId = nextNodeId;
+      }
+
+      if (points.length >= 2) {
+        chains.push({ points, ownerId });
+      }
+    });
+
+    return chains;
+  }
+
+  private isValidBridgeNodeWaterPlacement(x: number, y: number): boolean {
+    if (!this.currentMap) return false;
+
+    const footprint = this.getBuildingFootprintRadius('bridge_node');
+    const onLand = this.isPointOnLand(x, y);
+    if (onLand) return false;
+    if (x < footprint || x > this.currentMap.width - footprint || y < footprint || y > this.currentMap.height - footprint) return false;
+    if (this.isPointInsideHighGround(x, y)) return false;
+
+    const blockedOilSpot = this.currentMap.oilSpots.some(spot =>
+      Math.hypot(spot.x - x, spot.y - y) < spot.radius + 10
+    );
+    if (blockedOilSpot) return false;
+
+    const minSpacing = Math.max(18, footprint * 2);
+    return !(this.currentMap.waterBuildings || []).some(building =>
+      ['bridge_node', 'naval_mine', 'oil_rig'].includes(building.type) &&
+      Math.hypot((building.x || 0) - x, (building.y || 0) - y) < minSpacing
+    );
+  }
+
+  private isPlacementClearOnIsland(island: Island, buildingType: string, absX: number, absY: number): boolean {
+    const footprint = this.getEffectivePlacementFootprintRadius(buildingType);
+    const nonBlocking = this.isNonBlockingBuildingType(buildingType);
+
+    if (
+      absX < footprint ||
+      absX > this.currentMap!.width - footprint ||
+      absY < footprint ||
+      absY > this.currentMap!.height - footprint
+    ) {
+      return false;
+    }
+
+    if (this.currentMap?.highGrounds) {
+      for (const highGround of this.currentMap.highGrounds) {
+        if (
+          absX < highGround.x - highGround.radius - footprint ||
+          absX > highGround.x + highGround.radius + footprint ||
+          absY < highGround.y - highGround.radius - footprint ||
+          absY > highGround.y + highGround.radius + footprint
+        ) {
+          continue;
+        }
+
+        if (this.isPointInPolygon({ x: absX, y: absY }, highGround.points)) {
+          return false;
+        }
+
+        const closest = this.getClosestPointOnPolygon({ x: absX, y: absY }, highGround.points);
+        const highGroundEdgePadding = nonBlocking ? 0 : footprint + 4;
+        if (Math.hypot(absX - closest.x, absY - closest.y) < highGroundEdgePadding) {
+          return false;
+        }
+      }
+    }
+
+    if (buildingType !== 'dock' && buildingType !== 'oil_rig') {
+      const edgePadding = nonBlocking
+        ? 0
+        : this.currentMap?.mapType === 'islands'
+          ? ['air_base', 'barracks', 'tank_factory', 'tower', 'farm', 'oil_well', 'hospital', 'repair_dock'].includes(buildingType)
+            ? Math.max(1, Math.round(footprint * 0.15))
+            : Math.max(1, Math.round(footprint * 0.25))
+          : footprint + 4;
+
+      if (island.points) {
+        if (!this.isPointInPolygon({ x: absX, y: absY }, island.points)) {
+          return false;
+        }
+
+        const closest = this.getClosestPointOnPolygon({ x: absX, y: absY }, island.points);
+        if (Math.hypot(absX - closest.x, absY - closest.y) < edgePadding) {
+          return false;
+        }
+      } else if (Math.hypot(absX - island.x, absY - island.y) > Math.max(0, island.radius - footprint - edgePadding)) {
+        return false;
+      }
+    }
+
+    if (nonBlocking) return true;
+
+    return !island.buildings.some(existing => {
+      if (this.isNonBlockingBuildingType(existing.type)) return false;
+
+      const existingX = island.x + (existing.x || 0);
+      const existingY = island.y + (existing.y || 0);
+      const existingFootprint = this.getEffectivePlacementFootprintRadius(existing.type);
+      const requiredSeparation =
+        footprint +
+        existingFootprint +
+        Math.max(this.getBuildingPlacementPadding(buildingType), this.getBuildingPlacementPadding(existing.type));
+
+      if (requiredSeparation <= 0) return false;
+      return Math.hypot(absX - existingX, absY - existingY) < requiredSeparation;
+    });
+  }
+
+  private evaluatePlacement(type: string, x: number, y: number): PlacementValidation {
+    if (!this.currentMap) {
+      return { valid: false, reason: 'Map data still loading' };
+    }
+
+    if (!socket.id) {
+      return { valid: false, reason: 'Connection not ready' };
+    }
+
+    const player = this.players.get(socket.id);
+    if (!player) {
+      return { valid: false, reason: 'Player data still loading' };
+    }
+
+    if (type === 'base') {
+      return { valid: false, reason: 'HQ only spawns at match start' };
+    }
+
+    if (type !== 'naval_mine' && type !== 'oil_rig' && this.isPointInsideHighGround(x, y)) {
+      return { valid: false, reason: 'Cannot build on high ground' };
+    }
+
+    const cost = this.getBuildingCost(type);
+    if (player.resources.gold < cost.gold || player.resources.oil < cost.oil) {
+      const missingGold = Math.max(0, cost.gold - player.resources.gold);
+      const missingOil = Math.max(0, cost.oil - player.resources.oil);
+      const missingParts = [];
+      if (missingGold > 0) missingParts.push(`${missingGold}g`);
+      if (missingOil > 0) missingParts.push(`${missingOil}o`);
+      return {
+        valid: false,
+        reason: `Insufficient funds${missingParts.length > 0 ? ` (${missingParts.join(', ')})` : ''}`
+      };
+    }
+
+    if (type === 'naval_mine') {
+      if (!this.isValidNavalMinePlacement(x, y)) {
+        return { valid: false, reason: 'Naval mines need open water and spacing' };
+      }
+
+      if (this.getBuildSupportUnitsInRange(type, x, y).length === 0) {
+        return { valid: false, reason: 'Requires nearby construction ship' };
+      }
+
+      return { valid: true, reason: 'Ready to build' };
+    }
+
+    const oilSpot = this.getClosestOilSpot(x, y);
+    if (type === 'oil_rig') {
+      if (!oilSpot || oilSpot.occupiedBy || oilSpot.id.startsWith('hidden_oil_') || oilSpot.id.startsWith('oil_revealed_')) {
+        return { valid: false, reason: 'Oil rigs must be placed on a free water oil spot' };
+      }
+
+      const hasConstructionShip = this.currentUnits.some(unit =>
+        unit.ownerId === socket.id &&
+        unit.type === 'construction_ship' &&
+        Math.hypot(unit.x - oilSpot.x, unit.y - oilSpot.y) < 150
+      );
+      if (!hasConstructionShip) {
+        return { valid: false, reason: 'Requires nearby construction ship' };
+      }
+
+      const tooClose = this.currentMap.oilSpots.some(other =>
+        other.id !== oilSpot.id &&
+        other.occupiedBy &&
+        Math.hypot(other.x - oilSpot.x, other.y - oilSpot.y) < 80
+      );
+      if (tooClose) {
+        return { valid: false, reason: 'Too close to another oil rig' };
+      }
+
+      return { valid: true, reason: 'Ready to build' };
+    }
+
+    const island = type === 'bridge_node'
+      ? this.getPlacementSurfaceIslandCandidates(x, y)[0]
+      : type === 'dock'
+        ? this.getDockPlacementIslandCandidates(x, y)[0]
+        : this.getPlacementIslandCandidates(x, y)[0];
+    if (!island) {
+      if (type === 'bridge_node') {
+        if (!this.isValidBridgeNodeWaterPlacement(x, y)) {
+          return { valid: false, reason: 'Bridge nodes need open water and spacing' };
+        }
+        if (this.getBuildSupportUnitsInRange(type, x, y).length === 0) {
+          return { valid: false, reason: 'Requires nearby builder or construction ship' };
+        }
+        return { valid: true, reason: 'Ready to build' };
+      }
+      if (type === 'dock') {
+        return { valid: false, reason: 'Docks must be placed on a shoreline' };
+      }
+      return { valid: false, reason: 'Must be placed on land' };
+    }
+
+    const isSharedMap = this.currentMap.mapType === 'desert' || this.currentMap.mapType === 'grasslands';
+    const enemyOwnedIsland = !!island.ownerId && island.ownerId !== socket.id;
+    const allowNeutralBridgeNode = !island.ownerId && type === 'bridge_node';
+    const hasForwardBridgeFoothold =
+      !island.ownerId &&
+      island.buildings.some(building => building.ownerId === socket.id && building.type === 'bridge_node');
+    const neutralIslandAllowed = isSharedMap || allowNeutralBridgeNode || hasForwardBridgeFoothold;
+    if (!enemyOwnedIsland && island.ownerId !== socket.id && !neutralIslandAllowed) {
+      return {
+        valid: false,
+        reason: type === 'bridge_node'
+          ? 'Bridge nodes can claim neutral land'
+          : 'Need a bridge foothold on neutral land'
+      };
+    }
+
+    if (type === 'dock') {
+      if (!this.isValidDockPlacement(x, y)) {
+        return { valid: false, reason: 'Docks must be placed on a shoreline' };
+      }
+      if (!this.hasDockWaterSpawnSpace(x, y)) {
+        return { valid: false, reason: 'Dock needs open water for ship launch' };
+      }
+    }
+
+    if (type === 'mine') {
+      const freeSpot = island.goldSpots.find(spot =>
+        !spot.occupiedBy &&
+        Math.hypot(island.x + spot.x - x, island.y + spot.y - y) < 100
+      );
+      if (!freeSpot) {
+        return { valid: false, reason: 'Must be placed on an empty gold deposit' };
+      }
+    }
+
+    if (type === 'oil_well') {
+      if (!oilSpot || oilSpot.occupiedBy || oilSpot.radius < 30) {
+        return { valid: false, reason: 'Must be placed on a visible land oil spot' };
+      }
+    }
+
+    if (type === 'farm' && island.type !== 'forest' && island.type !== 'grasslands') {
+      return { valid: false, reason: 'Farms need forest or grasslands terrain' };
+    }
+
+    if (!this.isPlacementClearOnIsland(island, type, x, y)) {
+      return { valid: false, reason: 'Cannot place here' };
+    }
+
+    if (this.getBuildSupportUnitsInRange(type, x, y).length === 0) {
+      return {
+        valid: false,
+        reason: `Requires nearby ${this.getPlacementSupportLabel(type)}`
+      };
+    }
+
+    return { valid: true, reason: 'Ready to build' };
+  }
+
+  private updatePlacementPreview(x: number, y: number) {
+    if (!this.placementGhost || !this.placementType) return;
+
+    this.placementGhost.setPosition(x, y);
+    const validation = this.evaluatePlacement(this.placementType, x, y);
+    const deferToServer = this.shouldDeferPlacementValidationToServer(this.placementType, validation);
+
+    this.placementGhost.list.forEach((child: any) => {
+      if (child.setTint && child.clearTint) {
+        if (validation.valid) {
+          child.clearTint();
+        } else if (deferToServer) {
+          child.setTint(0xffc857);
+        } else {
+          child.setTint(0xff4d4d);
+        }
+      }
+    });
+
+    if (!this.placementStatusText) {
+      this.placementStatusText = this.add.text(x, y - 54, '', {
+        fontSize: '13px',
+        fontFamily: 'monospace',
+        color: '#7cffb2',
+        backgroundColor: 'rgba(0,0,0,0.72)',
+        padding: { left: 8, right: 8, top: 4, bottom: 4 }
+      });
+      this.placementStatusText.setOrigin(0.5, 1);
+      this.placementStatusText.setDepth(210);
+      this.placementStatusText.setStroke('#061015', 3);
+    }
+
+    this.placementStatusText.setPosition(x, y - 54);
+    this.placementStatusText.setText(
+      validation.valid
+        ? validation.reason
+        : deferToServer
+          ? `Server will verify: ${validation.reason}`
+          : `Invalid: ${validation.reason}`
+    );
+    this.placementStatusText.setColor(
+      validation.valid ? '#7cffb2' : deferToServer ? '#ffd27d' : '#ff7d7d'
+    );
+  }
+
+  private shouldDeferPlacementValidationToServer(type: string, validation: PlacementValidation): boolean {
+    if (validation.valid) return false;
+    if (!SERVER_AUTHORITY_PLACEMENT_TYPES.has(type)) return false;
+    if (CLIENT_DEFINITE_PLACEMENT_FAILURE_REASONS.has(validation.reason)) return false;
+    if (validation.reason.startsWith('Insufficient funds')) return false;
+    if (validation.reason.startsWith('Requires nearby')) return false;
+    return validation.reason === 'Cannot place here' ||
+      validation.reason === 'Bridge nodes need open water and spacing' ||
+      validation.reason === 'Naval mines need open water and spacing';
+  }
+
+  private tryPlaceCurrentBuilding(screenX: number, screenY: number, keepPlacementMode = false): boolean {
+    if (!this.placementMode || !this.placementGhost) return false;
+
+    const worldPoint = this.cameras.main.getWorldPoint(screenX, screenY);
+    const validation = this.placementType
+      ? this.evaluatePlacement(this.placementType, worldPoint.x, worldPoint.y)
+      : { valid: false, reason: 'Invalid placement' };
+    const deferToServer = this.placementType
+      ? this.shouldDeferPlacementValidationToServer(this.placementType, validation)
+      : false;
+
+    if (!validation.valid && !deferToServer) {
+      this.updatePlacementPreview(worldPoint.x, worldPoint.y);
+      return true;
+    }
+
+    socket.emit('build', {
+      x: worldPoint.x,
+      y: worldPoint.y,
+      type: this.placementType
+    });
+
+    if (!keepPlacementMode) {
+      this.clearPlacementMode();
+    }
+
+    return true;
+  }
+
   private getMapStateSignature(mapData: GameMap) {
     const buildingState = mapData.islands
       .flatMap(island =>
@@ -181,7 +989,141 @@ export class MainScene extends Phaser.Scene {
       .map(spot => `${spot.id}:${spot.occupiedBy ?? ''}:${(spot as any).ownerId ?? ''}`)
       .join('|');
 
-    return `${buildingState}#${oilState}`;
+    const waterBuildingState = (mapData.waterBuildings || [])
+      .map(building => [
+        building.id,
+        building.type,
+        building.ownerId ?? '',
+        Math.round(building.x ?? 0),
+        Math.round(building.y ?? 0),
+        Math.round(building.health),
+        Math.round(building.maxHealth),
+        building.isConstructing ? 1 : 0,
+        Math.round(building.constructionProgress ?? 0)
+      ].join(':'))
+      .join('|');
+
+    return `${buildingState}#${oilState}#${waterBuildingState}`;
+  }
+
+  private getSpatialSoundLocation(x: number, y: number) {
+    const zoom = this.cameras.main.zoom || 1;
+    return {
+      x,
+      y,
+      listenerX: this.cameras.main.scrollX + this.cameras.main.width / (2 * zoom),
+      listenerY: this.cameras.main.scrollY + this.cameras.main.height / (2 * zoom),
+      viewportWidth: this.cameras.main.width,
+      viewportHeight: this.cameras.main.height,
+      zoom
+    };
+  }
+
+  private collectBuildingAudioSnapshots(mapData: GameMap) {
+    const next = new Map<string, BuildingAudioSnapshot>();
+
+    mapData.islands.forEach(island => {
+      island.buildings.forEach(building => {
+        next.set(building.id, {
+          id: building.id,
+          type: building.type,
+          ownerId: building.ownerId ?? island.ownerId ?? null,
+          x: island.x + (building.x ?? 0),
+          y: island.y + (building.y ?? 0)
+        });
+      });
+    });
+
+    mapData.oilSpots.forEach(spot => {
+      const oilBuilding = (spot as { building?: Building; ownerId?: string | null }).building;
+      if (!spot.occupiedBy || !oilBuilding) {
+        return;
+      }
+
+      next.set(oilBuilding.id, {
+        id: oilBuilding.id,
+        type: oilBuilding.type,
+        ownerId: oilBuilding.ownerId ?? (spot as { ownerId?: string | null }).ownerId ?? null,
+        x: spot.x,
+        y: spot.y
+      });
+    });
+
+    (mapData.waterBuildings || []).forEach(building => {
+      next.set(building.id, {
+        id: building.id,
+        type: building.type,
+        ownerId: building.ownerId ?? null,
+        x: building.x ?? 0,
+        y: building.y ?? 0
+      });
+    });
+
+    return next;
+  }
+
+  private syncBuildingPlacementAudio(mapData: GameMap) {
+    const nextSnapshot = this.collectBuildingAudioSnapshots(mapData);
+
+    if (!this.buildingAudioPrimed) {
+      this.knownBuildingAudioState = nextSnapshot;
+      this.buildingAudioPrimed = true;
+      return;
+    }
+
+    nextSnapshot.forEach(snapshot => {
+      if (this.knownBuildingAudioState.has(snapshot.id)) {
+        return;
+      }
+
+      const ownership = snapshot.ownerId === socket.id
+        ? 'self'
+        : snapshot.ownerId
+          ? 'enemy'
+          : 'neutral';
+
+      soundEffectsManager.playBuildingPlacement(
+        snapshot.type,
+        ownership,
+        this.getSpatialSoundLocation(snapshot.x, snapshot.y)
+      );
+    });
+
+    this.knownBuildingAudioState = nextSnapshot;
+  }
+
+  private resolveCombatSoundSource(data: {
+    attackerId?: string;
+    type: string;
+  }) {
+    if (data.type === 'tesla') {
+      return 'tesla' as const;
+    }
+
+    if (data.attackerId) {
+      const attacker = this.currentUnits.find(unit => unit.id === data.attackerId);
+      if (attacker) {
+        return attacker.type;
+      }
+    }
+
+    if (data.type === 'rocket_missile') {
+      return 'aircraft_carrier' as const;
+    }
+
+    if (data.type === 'rocketeer_rocket') {
+      return 'rocketeer' as const;
+    }
+
+    if (data.type === 'cannon_ball') {
+      return 'pirate_ship' as const;
+    }
+
+    if (data.type === 'bullet') {
+      return 'tower' as const;
+    }
+
+    return 'unknown' as const;
   }
 
   private handleProjectileEvent(data: {
@@ -192,20 +1134,33 @@ export class MainScene extends Phaser.Scene {
     y2: number;
     type: string;
     speed: number;
+    radius?: number;
   }, playSound = true) {
-    this.registerAttackFacing(data.attackerId, data.x1, data.y1, data.x2, data.y2, data.type === 'rocket_missile' ? 420 : 220);
+    if (data.type === 'naval_mine_blast') {
+      this.renderNavalMineBlast(data.x2, data.y2, data.radius ?? 180);
+      return;
+    }
+
+    this.registerAttackFacing(
+      data.attackerId,
+      data.x1,
+      data.y1,
+      data.x2,
+      data.y2,
+      data.type === 'rocket_missile'
+        ? 420
+        : data.type === 'rocketeer_rocket'
+          ? 320
+          : data.type === 'cannon_ball'
+            ? 320
+            : 220
+    );
 
     if (playSound) {
-      const settings = settingsManager.getSettings();
-      const volume = settings.audio.masterVolume * settings.audio.sfxVolume;
-      if (volume > 0) {
-        try {
-          this.sound.play('shoot', {
-            volume: volume * 0.2,
-            detune: Phaser.Math.Between(-200, 200)
-          });
-        } catch (e) {}
-      }
+      soundEffectsManager.playUnitFire(
+        this.resolveCombatSoundSource(data),
+        this.getSpatialSoundLocation(data.x1, data.y1)
+      );
     }
 
     if (data.type === 'tesla') {
@@ -246,8 +1201,15 @@ export class MainScene extends Phaser.Scene {
       return;
     }
 
-    if (data.type === 'rocket_missile') {
-      const rocket = this.add.rectangle(data.x1, data.y1, 16, 6, 0x444444);
+    if (data.type === 'rocket_missile' || data.type === 'rocketeer_rocket') {
+      const isRocketeerRocket = data.type === 'rocketeer_rocket';
+      const rocket = this.add.rectangle(
+        data.x1,
+        data.y1,
+        isRocketeerRocket ? 12 : 16,
+        isRocketeerRocket ? 4 : 6,
+        isRocketeerRocket ? 0x60707c : 0x444444
+      );
       rocket.setStrokeStyle(1, 0x000000);
       rocket.setDepth(100);
 
@@ -263,31 +1225,101 @@ export class MainScene extends Phaser.Scene {
         y: data.y2,
         duration,
         onComplete: () => {
-          const explosion = this.add.circle(data.x2, data.y2, 20, 0xFF4500);
+          const explosion = this.add.circle(data.x2, data.y2, isRocketeerRocket ? 14 : 20, 0xFF4500);
           explosion.setDepth(101);
 
           this.tweens.add({
             targets: explosion,
-            scale: 6,
+            scale: isRocketeerRocket ? 3.2 : 6,
             alpha: 0,
-            duration: 500,
+            duration: isRocketeerRocket ? 260 : 500,
             onComplete: () => explosion.destroy()
           });
 
-          const ring = this.add.circle(data.x2, data.y2, 20, 0xFFFFFF);
+          const ring = this.add.circle(data.x2, data.y2, isRocketeerRocket ? 12 : 20, 0xFFFFFF);
           ring.setStrokeStyle(4, 0xFFFF00);
           ring.setFillStyle(0xFFFFFF, 0);
           ring.setDepth(101);
 
           this.tweens.add({
             targets: ring,
-            scale: 5,
+            scale: isRocketeerRocket ? 2.8 : 5,
             alpha: 0,
-            duration: 300,
+            duration: isRocketeerRocket ? 220 : 300,
             onComplete: () => ring.destroy()
           });
 
+          if (isRocketeerRocket) {
+            for (let i = 0; i < 4; i++) {
+              const spark = this.add.circle(data.x2, data.y2, 2, 0xffd27a);
+              spark.setDepth(101);
+              const sparkAngle = (Math.PI * 2 * i) / 4 + Math.random() * 0.4;
+              this.tweens.add({
+                targets: spark,
+                x: data.x2 + Math.cos(sparkAngle) * Phaser.Math.Between(12, 24),
+                y: data.y2 + Math.sin(sparkAngle) * Phaser.Math.Between(12, 24),
+                alpha: 0,
+                scale: 0.2,
+                duration: 180,
+                onComplete: () => spark.destroy()
+              });
+            }
+          }
+
           rocket.destroy();
+        }
+      });
+
+      return;
+    }
+
+    if (data.type === 'cannon_ball') {
+      const cannonBall = this.add.circle(data.x1, data.y1, 4, 0x1f2730);
+      cannonBall.setStrokeStyle(1, 0x0a1016);
+      cannonBall.setDepth(100);
+
+      const dist = Math.hypot(data.x2 - data.x1, data.y2 - data.y1);
+      const duration = (dist / data.speed) * 1000;
+      const arcHeight = Math.min(85, Math.max(24, dist * 0.22));
+      const arc = new Phaser.Curves.QuadraticBezier(
+        new Phaser.Math.Vector2(data.x1, data.y1),
+        new Phaser.Math.Vector2((data.x1 + data.x2) / 2, (data.y1 + data.y2) / 2 - arcHeight),
+        new Phaser.Math.Vector2(data.x2, data.y2)
+      );
+      const arcState = { t: 0 };
+
+      this.tweens.add({
+        targets: arcState,
+        t: 1,
+        duration,
+        onUpdate: () => {
+          const point = arc.getPoint(arcState.t);
+          cannonBall.setPosition(point.x, point.y);
+        },
+        onComplete: () => {
+          const splash = this.add.circle(data.x2, data.y2, 9, 0xd7dde4, 0.8);
+          splash.setDepth(101);
+          splash.setStrokeStyle(2, 0xf2f7ff);
+          this.tweens.add({
+            targets: splash,
+            scale: 2.2,
+            alpha: 0,
+            duration: 220,
+            onComplete: () => splash.destroy()
+          });
+
+          const smoke = this.add.circle(data.x2, data.y2, 6, 0x353e46, 0.7);
+          smoke.setDepth(101);
+          this.tweens.add({
+            targets: smoke,
+            y: data.y2 - 8,
+            scale: 1.8,
+            alpha: 0,
+            duration: 260,
+            onComplete: () => smoke.destroy()
+          });
+
+          cannonBall.destroy();
         }
       });
 
@@ -439,10 +1471,7 @@ export class MainScene extends Phaser.Scene {
 
         // Disable Placement
         if (this.placementMode) {
-            this.placementMode = false;
-            if (this.placementGhost) this.placementGhost.destroy();
-            this.placementGhost = null;
-            this.placementType = null;
+            this.clearPlacementMode();
         }
 
         // Disable Selection Box
@@ -586,10 +1615,7 @@ export class MainScene extends Phaser.Scene {
             });
         } else if (key === binds.cancel) {
             if (this.placementMode) {
-                this.placementMode = false;
-                if (this.placementGhost) this.placementGhost.destroy();
-                this.placementGhost = null;
-                this.placementType = null;
+                this.clearPlacementMode();
             }
             if (this.targetSelectionMode) {
                 this.targetSelectionMode = false;
@@ -614,6 +1640,7 @@ export class MainScene extends Phaser.Scene {
     const handleGameStartCleanup = () => {
         console.log('[MainScene] Clearing Game State for New Game');
         this.currentUnits = [];
+        this.clearPlacementMode();
         this.unitContainers.clear();
         this.unitUpdates.clear();
         this.attackFacingOverrides.clear();
@@ -624,6 +1651,9 @@ export class MainScene extends Phaser.Scene {
         this.cameraInitialized = false; // Reset camera so it centers on new base
         this.currentMapVersion = null; // Force map re-render
         this.currentMapStateSignature = null;
+        this.knownBuildingAudioState.clear();
+        this.buildingAudioPrimed = false;
+        this.goldSparkles = [];
         window.dispatchEvent(new CustomEvent('unit-selection-changed', { detail: { unitIds: [] } }));
         window.dispatchEvent(new CustomEvent('building-selection-changed', { detail: { buildingIds: [] } }));
         window.dispatchEvent(new CustomEvent('node-selection-changed', { detail: { nodes: [] } }));
@@ -639,6 +1669,11 @@ export class MainScene extends Phaser.Scene {
     socket.on('playersData', (players: Player[]) => {
       this.players.clear();
       players.forEach(p => this.players.set(p.id, p));
+      if (this.placementMode) {
+          const pointer = this.input.activePointer;
+          const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+          this.updatePlacementPreview(worldPoint.x, worldPoint.y);
+      }
     });
 
             socket.on('mapData', (mapData: GameMap) => {
@@ -652,11 +1687,20 @@ export class MainScene extends Phaser.Scene {
                 return;
             }
             
+            if (!this.isMenuMode) {
+                this.syncBuildingPlacementAudio(mapData);
+            }
+
             this.currentMapVersion = mapVersion || null;
             this.currentMapStateSignature = mapStateSignature;
             this.currentMap = mapData;
             if (this.isMenuMode) return;
             this.renderMap(mapData);
+            if (this.placementMode) {
+                const pointer = this.input.activePointer;
+                const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+                this.updatePlacementPreview(worldPoint.x, worldPoint.y);
+            }
 
             if (!this.cameraInitialized) {
                 if (this.centerCameraOnBase()) {
@@ -713,8 +1757,7 @@ export class MainScene extends Phaser.Scene {
       if (!this.isMenuMode) {
           const oldUnitIds = new Set(this.currentUnits.map(u => u.id));
           const newUnitIds = new Set(units.map(u => u.id));
-          const settings = settingsManager.getSettings();
-          const volume = settings.audio.masterVolume * settings.audio.sfxVolume;
+          const recruitVolume = soundEffectsManager.getEffectVolume('recruit', 0.4);
 
           // Check for Deaths (in old but not in new)
           this.currentUnits.forEach(u => {
@@ -730,9 +1773,9 @@ export class MainScene extends Phaser.Scene {
           units.forEach(u => {
               if (!oldUnitIds.has(u.id)) {
                   // New unit spawned
-                  if (u.ownerId === socket.id && volume > 0) {
+                  if (u.ownerId === socket.id && recruitVolume > 0) {
                       try {
-                          this.sound.play('recruit', { volume: volume * 0.4 });
+                          this.sound.play('recruit', { volume: recruitVolume });
                       } catch (e) {}
                   }
               }
@@ -757,16 +1800,17 @@ export class MainScene extends Phaser.Scene {
       this.renderUnits(units);
     });
 
-    socket.on('projectile', (data: { attackerId?: string, x1: number, y1: number, x2: number, y2: number, type: string, speed: number }) => {
+    socket.on('projectile', (data: { attackerId?: string, x1: number, y1: number, x2: number, y2: number, type: string, speed: number, radius?: number }) => {
         this.handleProjectileEvent(data);
     });
 
-    socket.on('projectilesBatch', (projectiles: { attackerId?: string, x1: number, y1: number, x2: number, y2: number, type: string, speed: number }[]) => {
-        projectiles.forEach((projectile, index) => this.handleProjectileEvent(projectile, index === 0));
+    socket.on('projectilesBatch', (projectiles: { attackerId?: string, x1: number, y1: number, x2: number, y2: number, type: string, speed: number, radius?: number }[]) => {
+        projectiles.forEach(projectile => this.handleProjectileEvent(projectile));
     });
 
     socket.on('laserBeam', (data: { attackerId: string, targetId: string, x1: number, y1: number, x2: number, y2: number, duration: number, color: number }) => {
         this.registerAttackFacing(data.attackerId, data.x1, data.y1, data.x2, data.y2, data.duration);
+        soundEffectsManager.playUnitFire('mothership', this.getSpatialSoundLocation(data.x1, data.y1));
         const beam = this.add.graphics();
         beam.setDepth(9999);
         
@@ -920,9 +1964,9 @@ export class MainScene extends Phaser.Scene {
 
     // Placement Event
     window.addEventListener('enter-placement-mode', (e: any) => {
+        this.clearPlacementMode();
         this.placementMode = true;
         this.placementType = e.detail.type;
-        if (this.placementGhost) this.placementGhost.destroy();
         this.placementGhost = this.drawDetailedBuilding(0, 0, this.placementType!, 0xAAFFAA);
         this.placementGhost.setAlpha(0.6);
         this.placementGhost.setDepth(200);
@@ -939,6 +1983,10 @@ export class MainScene extends Phaser.Scene {
             hitbox.setStrokeStyle(2, 0x00FF00, 0.8);
             this.placementGhost.add(hitbox);
         }
+
+        const pointer = this.input.activePointer;
+        const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+        this.updatePlacementPreview(worldPoint.x, worldPoint.y);
     });
 
     // Ferry Events
@@ -1003,24 +2051,7 @@ export class MainScene extends Phaser.Scene {
         const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
         
         if (this.placementMode && this.placementGhost) {
-            this.placementGhost.setPosition(worldPoint.x, worldPoint.y);
-
-            // Validation Visuals
-            let isValid = true;
-            if (this.placementType === 'dock') {
-                isValid = this.isValidDockPlacement(worldPoint.x, worldPoint.y);
-            }
-            
-            // Tint children based on validity
-            this.placementGhost.list.forEach((child: any) => {
-                if (child.setTint && child.clearTint) {
-                     if (isValid) {
-                         child.clearTint();
-                     } else {
-                         child.setTint(0xff0000);
-                     }
-                }
-            });
+            this.updatePlacementPreview(worldPoint.x, worldPoint.y);
         }
 
         if (this.isSelecting) {
@@ -1048,24 +2079,9 @@ export class MainScene extends Phaser.Scene {
 
         if (this.placementMode && this.placementGhost) {
             if (pointer.leftButtonDown()) {
-                const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
-                socket.emit('build', { 
-                    x: worldPoint.x, 
-                    y: worldPoint.y, 
-                    type: this.placementType 
-                });
-                
-                if (!pointer.event.shiftKey) {
-                    this.placementMode = false;
-                    this.placementGhost.destroy();
-                    this.placementGhost = null;
-                    this.placementType = null;
-                }
+                this.tryPlaceCurrentBuilding(pointer.x, pointer.y, !!pointer.event?.shiftKey);
             } else if (pointer.rightButtonDown()) {
-                this.placementMode = false;
-                if (this.placementGhost) this.placementGhost.destroy();
-                this.placementGhost = null;
-                this.placementType = null;
+                this.clearPlacementMode();
             }
             return;
         }
@@ -1199,6 +2215,19 @@ export class MainScene extends Phaser.Scene {
                                 }
                             });
                         });
+
+                        (this.currentMap.waterBuildings || []).forEach(b => {
+                            if (b.ownerId !== socket.id) return;
+                            const bx = b.x || 0;
+                            const by = b.y || 0;
+                            const bRect = new Phaser.Geom.Rectangle(bx - 12, by - 12, 24, 24);
+                            if (!Phaser.Geom.Intersects.RectangleToRectangle(selectionRect, bRect)) return;
+                            if (b.type === 'bridge_node' || b.type === 'wall_node') {
+                                this.selectedNodeIds.add(b.id);
+                            } else {
+                                this.selectedBuildingIds.add(b.id);
+                            }
+                        });
                         
                         window.dispatchEvent(new CustomEvent('building-selection-changed', { 
                             detail: { buildingIds: Array.from(this.selectedBuildingIds) } 
@@ -1231,6 +2260,9 @@ export class MainScene extends Phaser.Scene {
 
         const newZoom = this.cameras.main.zoom - deltaY * 0.001;
         this.cameras.main.setZoom(Phaser.Math.Clamp(newZoom, minZoom, 2));
+        if (this.currentUnits.length > 0 && this.syncUnitDetailMode(this.currentUnits)) {
+            this.renderUnits(this.currentUnits);
+        }
     });
 
     // Steering Update Loop (20Hz)
@@ -1279,7 +2311,6 @@ export class MainScene extends Phaser.Scene {
             }
 
             if (inRange) {
-                console.log(`[MainScene] Hidden Spot REVEALED: ${spot.id} at (${spot.x}, ${spot.y})`);
                 currentlyVisible.add(spot.id);
             }
         });
@@ -1520,16 +2551,6 @@ export class MainScene extends Phaser.Scene {
       this.updateOilScanner();
       this.renderRangeRings();
 
-      // Pulse Animations (moved from update to ensure they run)
-      this.oilAnimations.forEach(anim => {
-          anim.timer += delta;
-          const scale = 1 + Math.sin(anim.timer * 0.005) * 0.2;
-          anim.pulse.setScale(scale);
-          anim.pulse.setAlpha(0.5 - Math.sin(anim.timer * 0.005) * 0.2);
-      });
-
-
-
     // Unit Interpolation
       const renderTime = Date.now() - 100; // 100ms interpolation delay
       
@@ -1761,6 +2782,12 @@ export class MainScene extends Phaser.Scene {
           }
       });
 
+      this.goldSparkles.forEach(sparkle => {
+          sparkle.timer += delta * sparkle.speed;
+          sparkle.sprite.setAlpha(0.35 + Math.sin(sparkle.timer * 0.004) * 0.35);
+          sparkle.sprite.setScale(0.7 + Math.sin(sparkle.timer * 0.005) * 0.18);
+      });
+
       // Camera Movement
       // Spectators get faster movement
       const baseSpeed = this.isSpectating ? 40 : 20;
@@ -1834,9 +2861,7 @@ export class MainScene extends Phaser.Scene {
       this.lastCommandTime = now;
 
         // Play Move Sound
-        const settings = settingsManager.getSettings();
-        const volume = settings.audio.masterVolume * settings.audio.sfxVolume;
-        if (volume > 0 && this.selectedUnitIds.size > 0) {
+        if (this.selectedUnitIds.size > 0) {
             // Determine dominant unit type in selection
             let landCount = 0;
             let waterCount = 0;
@@ -1845,7 +2870,7 @@ export class MainScene extends Phaser.Scene {
             this.currentUnits.forEach(u => {
                 if (this.selectedUnitIds.has(u.id)) {
                     const type = u.type;
-                    if (['ship', 'destroyer', 'carrier', 'construction_ship', 'oil_tanker'].includes(type)) {
+                    if (['ship', 'destroyer', 'pirate_ship', 'carrier', 'construction_ship', 'ferry', 'oil_tanker'].includes(type)) {
                         waterCount++;
                     } else if (['light_plane', 'heavy_plane', 'aircraft_carrier', 'mothership'].includes(type)) {
                         airCount++;
@@ -1856,12 +2881,19 @@ export class MainScene extends Phaser.Scene {
             });
 
             let soundKey = 'move_land';
+            let effectId: 'moveLand' | 'moveWater' | 'moveAir' = 'moveLand';
             if (waterCount > landCount && waterCount > airCount) soundKey = 'move_water';
             if (airCount > landCount && airCount > waterCount) soundKey = 'move_air';
+            if (soundKey === 'move_water') effectId = 'moveWater';
+            if (soundKey === 'move_air') effectId = 'moveAir';
 
-            try {
-                this.sound.play(soundKey, { volume: volume * 0.4 });
-            } catch (e) {}
+            const volume = soundEffectsManager.getEffectVolume(effectId, 0.4);
+
+            if (volume > 0) {
+                try {
+                    this.sound.play(soundKey, { volume });
+                } catch (e) {}
+            }
         }
 
         console.log('Issuing move command to:', x, y);
@@ -1871,12 +2903,13 @@ export class MainScene extends Phaser.Scene {
             const unit = this.currentUnits.find(u => u.id === id);
             if (unit) {
                 const intentId = `intent_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+                const adjustedTarget = this.getAdjustedTarget(unit.type, x, y);
                 
                 // Client-Side Prediction: Start moving immediately
                 // Optimistic direct line (Navmesh will be handled by server/steering)
                 this.predictedMoves.set(id, {
-                    targetX: x,
-                    targetY: y,
+                    targetX: adjustedTarget.x,
+                    targetY: adjustedTarget.y,
                     speed: unit.speed || 150, // Default speed if missing
                     type: unit.type,
                     intentId: intentId
@@ -1886,8 +2919,8 @@ export class MainScene extends Phaser.Scene {
                 socket.emit('moveIntent', {
                     unitId: id,
                     intentId: intentId,
-                    destX: x,
-                    destY: y,
+                    destX: adjustedTarget.x,
+                    destY: adjustedTarget.y,
                     clientTime: Date.now()
                 });
             }
@@ -1937,6 +2970,14 @@ export class MainScene extends Phaser.Scene {
         // Air units ignore terrain constraints
         const isAirUnit = ['mothership', 'light_plane', 'heavy_plane', 'alien_scout', 'heavy_alien'].includes(unitType);
         if (isAirUnit) return { x: targetX, y: targetY };
+
+        const highGround = this.getHighGroundAtPoint(targetX, targetY);
+        if (highGround) {
+            const closest = this.getClosestPointOnPolygon({ x: targetX, y: targetY }, highGround.points);
+            const angle = Math.atan2(closest.y - highGround.y, closest.x - highGround.x);
+            targetX = closest.x + Math.cos(angle) * 10;
+            targetY = closest.y + Math.sin(angle) * 10;
+        }
 
         // Land units (cannot move on water)
         const isLandUnit = ['soldier', 'sniper', 'rocketeer', 'builder', 'tank', 'humvee', 'oil_seeker', 'missile_launcher'].includes(unitType);
@@ -2034,30 +3075,26 @@ export class MainScene extends Phaser.Scene {
 
     private isValidDockPlacement(x: number, y: number): boolean {
         if (!this.currentMap) return false;
-        
-        // Find closest island
-        let closestIsland: Island | null = null;
-        let minDist = Infinity;
-        
-        for (const island of this.currentMap.islands) {
-            const dist = Math.hypot(x - island.x, y - island.y);
-            // Quick bounding box check
-            if (dist < island.radius + 100) { 
-                if (dist < minDist) {
-                    minDist = dist;
-                    closestIsland = island;
-                }
+
+        return this.currentMap.islands.some(island => this.isPointOnExposedIslandShoreline(island, x, y));
+    }
+
+    private isValidNavalMinePlacement(x: number, y: number): boolean {
+        if (!this.currentMap) return false;
+
+        const onLand = this.currentMap.islands.some(island => {
+            if (island.points) {
+                return this.isPointInPolygon({ x, y }, island.points);
             }
-        }
-        
-        if (!closestIsland || !closestIsland.points) return false;
-        
-        // Check distance to polygon edge
-        // Points in Island are absolute
-        const closestPoint = this.getClosestPointOnPolygon({x, y}, closestIsland.points);
-        const distToEdge = Math.hypot(x - closestPoint.x, y - closestPoint.y);
-        
-        return distToEdge <= 20; // 20px tolerance matches server
+            return Math.hypot(x - island.x, y - island.y) <= island.radius;
+        });
+        if (onLand) return false;
+
+        const minSpacing = 110;
+        return !(this.currentMap.waterBuildings || []).some(building =>
+            building.type === 'naval_mine' &&
+            Math.hypot((building.x || 0) - x, (building.y || 0) - y) < minSpacing
+        );
     }
 
     private getClosestPointOnPolygon(p: {x: number, y: number}, points: {x: number, y: number}[]): {x: number, y: number} {
@@ -2090,21 +3127,30 @@ export class MainScene extends Phaser.Scene {
       return createBuildingArt(this, x, y, type as any, color, data);
   }
 
-  drawDetailedUnit(x: number, y: number, type: string, color: number, isSelected: boolean): Phaser.GameObjects.Container {
-      return createUnitArt(this, x, y, type, color, isSelected);
+  drawDetailedUnit(
+      x: number,
+      y: number,
+      type: string,
+      color: number,
+      isSelected: boolean,
+      renderMode: UnitArtRenderMode = 'full'
+  ): Phaser.GameObjects.Container {
+      return createUnitArt(this, x, y, type, color, isSelected, { renderMode });
   }
 
   createUnitContainer(unit: Unit, isMine: boolean, isSelected: boolean) {
       const player = this.players.get(unit.ownerId);
       const color = player ? parseInt(player.color.replace('#', '0x')) : (isMine ? 0xAAAAFF : 0xFFAAAA);
+      const renderMode = this.getUnitRenderMode(unit, isSelected);
       
       const uContainer = this.add.container(unit.x, unit.y);
-      const art = this.drawDetailedUnit(0, 0, unit.type, color, isSelected);
+      const art = this.drawDetailedUnit(0, 0, unit.type, color, isSelected, renderMode);
       art.setName('art');
       uContainer.add(art);
       uContainer.setPosition(unit.x, unit.y);
       uContainer.setDepth(20); // Ensure units are above everything else
       uContainer.setData('isSelected', isSelected);
+      uContainer.setData('renderMode', renderMode);
       uContainer.setData('unitType', unit.type);
       
       // Add Health Bar to container
@@ -2123,6 +3169,7 @@ export class MainScene extends Phaser.Scene {
              case 'aircraft_carrier': hpBarWidth = 140; hpBarY = -50; break;
              case 'heavy_plane': hpBarWidth = 40; hpBarY = -25; break;
              case 'destroyer': hpBarWidth = 32; hpBarY = -15; break;
+             case 'pirate_ship': hpBarWidth = 34; hpBarY = -15; break;
              case 'construction_ship': hpBarWidth = 36; hpBarY = -15; break;
              case 'ferry': hpBarWidth = 32; hpBarY = -15; break;
              case 'missile_launcher': hpBarWidth = 24; hpBarY = -15; break;
@@ -2144,6 +3191,7 @@ export class MainScene extends Phaser.Scene {
           case 'aircraft_carrier': width = 180; height = 80; break;
           case 'heavy_plane': width = 50; height = 50; break;
           case 'destroyer': width = 40; height = 20; break;
+          case 'pirate_ship': width = 42; height = 24; break;
           case 'construction_ship': width = 45; height = 25; break;
           case 'ferry': width = 40; height = 25; break;
           case 'tank':
@@ -2157,6 +3205,11 @@ export class MainScene extends Phaser.Scene {
       uContainer.setInteractive(hitArea, Phaser.Geom.Rectangle.Contains);
 
       uContainer.on('pointerdown', (pointer: any) => {
+        if (this.placementMode) {
+             if (pointer.event) pointer.event.stopPropagation();
+             this.tryPlaceCurrentBuilding(pointer.x, pointer.y, !!pointer.event?.shiftKey);
+             return;
+        }
         if (pointer.rightButtonDown()) {
              // Right Click: Select Unit (Fix for user request)
              pointer.event.stopPropagation(); 
@@ -2226,6 +3279,7 @@ export class MainScene extends Phaser.Scene {
 
   renderUnits(units: Unit[]) {
     this.currentUnits = units;
+    this.syncUnitDetailMode(units);
     this.rangeGraphics.clear();
     
     // Track active unit IDs to remove dead ones later
@@ -2236,6 +3290,7 @@ export class MainScene extends Phaser.Scene {
       
       const isMine = unit.ownerId === socket.id;
       const isSelected = this.selectedUnitIds.has(unit.id);
+      const renderMode = this.getUnitRenderMode(unit, isSelected);
       
       // Check if unit already exists
       if (this.unitContainers.has(unit.id)) {
@@ -2246,9 +3301,10 @@ export class MainScene extends Phaser.Scene {
           
           // Check selection change
           const wasSelected = container.getData('isSelected');
+          const previousRenderMode = container.getData('renderMode');
           
-          if (wasSelected !== isSelected) {
-              // Recreate if selection changed
+          if (wasSelected !== isSelected || previousRenderMode !== renderMode) {
+              // Recreate if selection or detail mode changed
               container.destroy();
               this.createUnitContainer(unit, isMine, isSelected);
           } else {
@@ -2469,12 +3525,9 @@ export class MainScene extends Phaser.Scene {
         this.tumbleweeds = [];
         this.weatherParticles = [];
         this.oilAnimations = [];
+        this.goldSparkles = [];
         this.oilSpotVisuals.clear();
         // this.revealedOilSpots.clear(); // Persistence Fix: Do not clear revealed spots on re-render
-
-        // DEBUG: Count Hidden Spots
-        const hiddenCount = mapData.oilSpots ? mapData.oilSpots.filter(s => s.id.startsWith('hidden_oil_')).length : 0;
-        console.log(`[MainScene] Rendering Map. Total Oil Spots: ${mapData.oilSpots?.length || 0}, Hidden: ${hiddenCount}`);
 
         // Render Oil Spots
         if (mapData.oilSpots) {
@@ -2500,16 +3553,6 @@ export class MainScene extends Phaser.Scene {
                      ping.setDepth(11); // Above the black spot
                      ping.setVisible(isRevealed); // Only visible if revealed
                      this.islandsGroup.add(ping);
-                     
-                     // Animation for the ping
-                     this.tweens.add({
-                         targets: ping,
-                         scale: 1.5,
-                         alpha: 0.5,
-                         yoyo: true,
-                         repeat: -1,
-                         duration: 800
-                     });
                 }
                 
                 // Pulse Animation (Red waves if hidden/revealed)
@@ -2567,46 +3610,140 @@ export class MainScene extends Phaser.Scene {
             });
         }
 
+        (mapData.waterBuildings || []).forEach(building => {
+            const bx = building.x || 0;
+            const by = building.y || 0;
+            const owner = building.ownerId ? this.players.get(building.ownerId) : undefined;
+            const color = owner ? parseInt(owner.color.replace('#', '0x')) : 0x555555;
+            const isMine = building.ownerId === socket.id;
+
+            const bContainer = this.drawDetailedBuilding(bx, by, building.type, color, building);
+            bContainer.setDepth(3);
+            this.islandsGroup.add(bContainer);
+            bContainer.setSize(24, 24);
+            bContainer.setInteractive();
+
+            const isSelected = this.selectedNodeIds.has(building.id) || this.selectedBuildingIds.has(building.id);
+            if (isSelected) {
+                const ring = this.add.circle(0, 0, 18);
+                ring.setStrokeStyle(2, 0x00FF00);
+                bContainer.add(ring);
+            }
+
+            if (building.isConstructing) {
+                const p = building.constructionProgress || 0;
+                const blueBar = this.add.rectangle(bx, by - 15, 16 * (p / 100), 3, 0x0000FF);
+                this.islandsGroup.add(blueBar);
+            } else {
+                const hpPercent = Math.max(0, building.health / building.maxHealth);
+                const hpBar = this.add.rectangle(bx, by - 15, 16 * hpPercent, 3, isMine ? 0x00FF00 : 0xFF0000);
+                this.islandsGroup.add(hpBar);
+            }
+
+            bContainer.on('pointerover', () => {
+                window.dispatchEvent(new CustomEvent('game-hover', {
+                    detail: {
+                        title: building.type.charAt(0).toUpperCase() + building.type.slice(1).replace('_', ' '),
+                        owner: building.ownerId,
+                        type: 'Building',
+                        health: building.health,
+                        maxHealth: building.maxHealth,
+                        id: building.id
+                    }
+                }));
+            });
+            bContainer.on('pointerout', () => window.dispatchEvent(new CustomEvent('game-hover', { detail: null })));
+            bContainer.on('pointerdown', (pointer: any) => {
+                if (this.placementMode) {
+                    if (pointer.event) pointer.event.stopPropagation();
+                    this.tryPlaceCurrentBuilding(pointer.x, pointer.y, !!pointer.event?.shiftKey);
+                    return;
+                }
+                if (pointer.event) pointer.event.stopPropagation();
+
+                if (building.type === 'bridge_node' || building.type === 'wall_node') {
+                    if (building.ownerId !== socket.id) return;
+                    if (this.selectedNodeIds.has(building.id)) {
+                        this.selectedNodeIds.delete(building.id);
+                    } else {
+                        this.selectedNodeIds.add(building.id);
+                    }
+                    window.dispatchEvent(new CustomEvent('node-selection-changed', {
+                        detail: { nodes: Array.from(this.selectedNodeIds) }
+                    }));
+                    this.renderMap(this.currentMap!);
+                    return;
+                }
+
+                this.selectedBuildingIds.clear();
+                this.selectedUnitIds.clear();
+                this.selectedNodeIds.clear();
+                this.selectedBuildingIds.add(building.id);
+                window.dispatchEvent(new CustomEvent('building-selection-changed', {
+                    detail: { buildingIds: Array.from(this.selectedBuildingIds) }
+                }));
+                window.dispatchEvent(new CustomEvent('node-selection-changed', { detail: { nodes: [] } }));
+                this.renderMap(this.currentMap!);
+            });
+        });
+
     // Render Bridges
     if (mapData.bridges) {
-        mapData.bridges.forEach(bridge => {
-            const islandA = mapData.islands.find(i => i.id === bridge.islandAId);
-            const islandB = mapData.islands.find(i => i.id === bridge.islandBId);
-            if (islandA && islandB) {
-                const nodeA = islandA.buildings.find(b => b.id === bridge.nodeAId);
-                const nodeB = islandB.buildings.find(b => b.id === bridge.nodeBId);
-                if (nodeA && nodeB) {
-                    const ax = islandA.x + (nodeA.x || 0);
-                    const ay = islandA.y + (nodeA.y || 0);
-                    const bx = islandB.x + (nodeB.x || 0);
-                    const by = islandB.y + (nodeB.y || 0);
+        this.getBridgeChainPaths(mapData.bridges).forEach(chain => {
+            const graphics = this.add.graphics();
+            graphics.setDepth(2);
+            this.islandsGroup.add(graphics);
+
+            graphics.lineStyle(20, 0x8B4513);
+            graphics.beginPath();
+            graphics.moveTo(chain.points[0].x, chain.points[0].y);
+            for (let i = 1; i < chain.points.length; i += 1) {
+                graphics.lineTo(chain.points[i].x, chain.points[i].y);
+            }
+            graphics.strokePath();
+
+            graphics.lineStyle(16, 0xDEB887);
+            graphics.beginPath();
+            graphics.moveTo(chain.points[0].x, chain.points[0].y);
+            for (let i = 1; i < chain.points.length; i += 1) {
+                graphics.lineTo(chain.points[i].x, chain.points[i].y);
+            }
+            graphics.strokePath();
+
+            graphics.lineStyle(1, 0x5C4033);
+            for (let i = 0; i < chain.points.length - 1; i += 1) {
+                const ax = chain.points[i].x;
+                const ay = chain.points[i].y;
+                const bx = chain.points[i + 1].x;
+                const by = chain.points[i + 1].y;
+                const dist = Math.hypot(bx - ax, by - ay);
+                const angle = Math.atan2(by - ay, bx - ax);
+                const steps = dist / 10;
+
+                for (let step = 0; step < steps; step += 1) {
+                    const px = ax + Math.cos(angle) * step * 10;
+                    const py = ay + Math.sin(angle) * step * 10;
+                    const p1x = px + Math.cos(angle + Math.PI / 2) * 8;
+                    const p1y = py + Math.sin(angle + Math.PI / 2) * 8;
+                    const p2x = px + Math.cos(angle - Math.PI / 2) * 8;
+                    const p2y = py + Math.sin(angle - Math.PI / 2) * 8;
+                    graphics.lineBetween(p1x, p1y, p2x, p2y);
+                }
+            }
+        });
+
+        mapData.bridges
+            .filter(bridge => bridge.type !== 'bridge')
+            .forEach(bridge => {
+                const endpoints = this.getBridgeEndpoints(bridge);
+                if (endpoints) {
+                    const { ax, ay, bx, by } = endpoints;
 
                     const graphics = this.add.graphics();
                     graphics.setDepth(2);
                     this.islandsGroup.add(graphics);
 
-                    if (bridge.type === 'bridge') {
-                        // Wood bridge
-                        graphics.lineStyle(20, 0x8B4513);
-                        graphics.lineBetween(ax, ay, bx, by);
-                        graphics.lineStyle(16, 0xDEB887);
-                        graphics.lineBetween(ax, ay, bx, by);
-                        
-                        // Planks
-                        const dist = Math.hypot(bx - ax, by - ay);
-                        const angle = Math.atan2(by - ay, bx - ax);
-                        const steps = dist / 10;
-                        graphics.lineStyle(1, 0x5C4033);
-                        for(let i=0; i<steps; i++) {
-                            const px = ax + Math.cos(angle) * i * 10;
-                            const py = ay + Math.sin(angle) * i * 10;
-                            const p1x = px + Math.cos(angle + Math.PI/2) * 8;
-                            const p1y = py + Math.sin(angle + Math.PI/2) * 8;
-                            const p2x = px + Math.cos(angle - Math.PI/2) * 8;
-                            const p2y = py + Math.sin(angle - Math.PI/2) * 8;
-                            graphics.lineBetween(p1x, p1y, p2x, p2y);
-                        }
-                    } else if (bridge.type === 'gate') {
+                    if (bridge.type === 'gate') {
                         // Gate Rendering
                         // Darker, wider base
                         graphics.lineStyle(16, 0x222222);
@@ -2640,8 +3777,7 @@ export class MainScene extends Phaser.Scene {
                         graphics.lineBetween(ax, ay, bx, by);
                     }
                 }
-            }
-        });
+            });
     }
 
     // Render High Grounds
@@ -2736,13 +3872,10 @@ export class MainScene extends Phaser.Scene {
              
              // Sparkle
              const sparkle = this.add.star(0, -8, 4, 2, 4, 0xFFFFFF);
-             this.tweens.add({
-                 targets: sparkle,
-                 alpha: 0,
-                 scale: 0.5,
-                 duration: 1000 + Math.random() * 500,
-                 yoyo: true,
-                 repeat: -1
+             this.goldSparkles.push({
+                 sprite: sparkle,
+                 timer: Math.random() * 1000,
+                 speed: 0.8 + Math.random() * 0.6
              });
              
              container.add([n1, n2, n3, sparkle]);
@@ -2859,6 +3992,11 @@ export class MainScene extends Phaser.Scene {
 
 
         bContainer.on('pointerdown', (pointer: any) => {
+          if (this.placementMode) {
+              if (pointer.event) pointer.event.stopPropagation();
+              this.tryPlaceCurrentBuilding(pointer.x, pointer.y, !!pointer.event?.shiftKey);
+              return;
+          }
           // Allow selection of any building (for info display)
           // Stop propagation to avoid map click clearing selection
           if (pointer.event) pointer.event.stopPropagation();
@@ -2913,7 +4051,12 @@ export class MainScene extends Phaser.Scene {
       });
 
       // Interaction
-      fillPoly.on('pointerdown', () => {
+      fillPoly.on('pointerdown', (pointer: any) => {
+        if (this.placementMode) {
+            if (pointer.event) pointer.event.stopPropagation();
+            this.tryPlaceCurrentBuilding(pointer.x, pointer.y, !!pointer.event?.shiftKey);
+            return;
+        }
         // Select island
         const event = new CustomEvent('game-selection', { detail: { islandId: island.id } });
         window.dispatchEvent(event);
@@ -2927,13 +4070,23 @@ export class MainScene extends Phaser.Scene {
   }
 
   createExplosion(x: number, y: number, color: number) {
+      const menuExplosionDensity = this.isMenuMode
+          ? Math.max(0, Math.min(2, settingsManager.getSettings().graphics.menuExplosionDensity ?? 1))
+          : 1;
+
+      if (this.isMenuMode && menuExplosionDensity <= 0) {
+          return;
+      }
+
       // Play explosion sound
-      const settings = settingsManager.getSettings();
-      const volume = settings.audio.masterVolume * settings.audio.sfxVolume;
+      const volume = soundEffectsManager.getEffectVolume(
+          'explosion',
+          0.5 * (this.isMenuMode ? menuExplosionDensity : 1)
+      );
       if (volume > 0) {
           try {
               this.sound.play('explosion', { 
-                  volume: volume * 0.5,
+                  volume,
                   detune: Phaser.Math.Between(-200, 200)
               });
           } catch (e) {
@@ -2942,17 +4095,103 @@ export class MainScene extends Phaser.Scene {
       }
       
       // Screen shake
-      this.cameras.main.shake(100, 0.005);
+      this.cameras.main.shake(100, 0.005 * (this.isMenuMode ? menuExplosionDensity : 1));
 
-      this.menuExplosions.push({x, y, life: 0.5, maxLife: 0.5, color});
-      for(let i=0; i<8; i++) {
+      const baseRadius = this.isMenuMode ? 14 + menuExplosionDensity * 16 : 30;
+      const baseLife = this.isMenuMode ? 0.22 + menuExplosionDensity * 0.18 : 0.5;
+      this.menuExplosions.push({x, y, life: baseLife, maxLife: baseLife, color, radius: baseRadius});
+
+      const particleCount = this.isMenuMode ? Math.round(8 * menuExplosionDensity) : 8;
+      const scatterRange = this.isMenuMode ? 12 + menuExplosionDensity * 18 : 30;
+      for(let i=0; i<particleCount; i++) {
+           const sparkLife = this.isMenuMode
+               ? 0.12 + Math.random() * (0.14 + menuExplosionDensity * 0.12)
+               : 0.2 + Math.random() * 0.3;
+           const sparkRadius = this.isMenuMode
+               ? Phaser.Math.FloatBetween(8, 14 + menuExplosionDensity * 8)
+               : Phaser.Math.FloatBetween(12, 24);
            this.menuExplosions.push({
-               x: x + Phaser.Math.Between(-30, 30),
-               y: y + Phaser.Math.Between(-30, 30),
-               life: 0.2 + Math.random() * 0.3,
-               maxLife: 0.5,
-               color: color
+               x: x + Phaser.Math.Between(-scatterRange, scatterRange),
+               y: y + Phaser.Math.Between(-scatterRange, scatterRange),
+               life: sparkLife,
+               maxLife: sparkLife,
+               color,
+               radius: sparkRadius
            });
+      }
+  }
+
+  private renderNavalMineBlast(x: number, y: number, radius: number) {
+      const volume = soundEffectsManager.getEffectVolume('explosion', 0.55);
+      if (volume > 0) {
+          try {
+              this.sound.play('explosion', {
+                  volume,
+                  detune: Phaser.Math.Between(-100, 100)
+              });
+          } catch (e) {}
+      }
+
+      this.cameras.main.shake(140, 0.007);
+
+      const flash = this.add.circle(x, y, 24, 0xffc76b, 0.95);
+      flash.setDepth(101);
+      this.tweens.add({
+          targets: flash,
+          scale: 4,
+          alpha: 0,
+          duration: 220,
+          onComplete: () => flash.destroy()
+      });
+
+      const innerFire = this.add.circle(x, y, 42, 0xff6a2a, 0.7);
+      innerFire.setDepth(101);
+      innerFire.setScale(0.2);
+      this.tweens.add({
+          targets: innerFire,
+          scale: 1.6,
+          alpha: 0,
+          duration: 320,
+          onComplete: () => innerFire.destroy()
+      });
+
+      const shockwave = this.add.circle(x, y, radius, 0xffffff, 0);
+      shockwave.setDepth(101);
+      shockwave.setStrokeStyle(7, 0xbfefff, 0.95);
+      shockwave.setScale(0.12);
+      this.tweens.add({
+          targets: shockwave,
+          scale: 1,
+          alpha: 0,
+          duration: 360,
+          onComplete: () => shockwave.destroy()
+      });
+
+      const outerWave = this.add.circle(x, y, radius * 0.78, 0x5dc6ff, 0);
+      outerWave.setDepth(100);
+      outerWave.setStrokeStyle(4, 0x82d8ff, 0.8);
+      outerWave.setScale(0.25);
+      this.tweens.add({
+          targets: outerWave,
+          scale: 1.2,
+          alpha: 0,
+          duration: 420,
+          onComplete: () => outerWave.destroy()
+      });
+
+      for (let i = 0; i < 10; i += 1) {
+          const angle = (Math.PI * 2 * i) / 10 + Math.random() * 0.18;
+          const ember = this.add.circle(x, y, Phaser.Math.Between(3, 6), i % 2 === 0 ? 0xffb347 : 0xffe2a8, 0.95);
+          ember.setDepth(101);
+          this.tweens.add({
+              targets: ember,
+              x: x + Math.cos(angle) * Phaser.Math.Between(38, 92),
+              y: y + Math.sin(angle) * Phaser.Math.Between(38, 92),
+              alpha: 0,
+              scale: 0.25,
+              duration: Phaser.Math.Between(180, 260),
+              onComplete: () => ember.destroy()
+          });
       }
   }
 
@@ -2972,6 +4211,7 @@ export class MainScene extends Phaser.Scene {
           this.tumbleweeds = [];
         this.weatherParticles = [];
         this.oilAnimations = [];
+        this.goldSparkles = [];
         this.oilSpotVisuals.clear();
         this.revealedOilSpots.clear();
         
@@ -3058,11 +4298,11 @@ export class MainScene extends Phaser.Scene {
               const y = Phaser.Math.Between(50, height - 50);
               
               // Play shoot sound (Limit to first spawn of the frame to prevent audio death)
-              const sfxVol = settings.audio.sfxVolume;
-              if (sfxVol > 0 && spawnedCount === 1) {
+              const menuProjectileVolume = soundEffectsManager.getEffectVolume('menuProjectile', 0.3);
+              if (menuProjectileVolume > 0 && spawnedCount === 1) {
                   try {
                       this.sound.play('shoot', {
-                          volume: sfxVol * 0.3, 
+                          volume: menuProjectileVolume, 
                           detune: Phaser.Math.Between(-100, 100)
                       });
                   } catch (e) {
@@ -3247,7 +4487,7 @@ export class MainScene extends Phaser.Scene {
           }
           
           this.menuGraphics.fillStyle(e.color, e.life / e.maxLife);
-          this.menuGraphics.fillCircle(e.x, e.y, (1 - e.life / e.maxLife) * 30);
+          this.menuGraphics.fillCircle(e.x, e.y, (1 - e.life / e.maxLife) * e.radius);
       }
   }
 }

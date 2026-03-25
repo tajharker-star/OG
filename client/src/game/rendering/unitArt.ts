@@ -3,6 +3,7 @@ import Phaser from 'phaser';
 export type RenderableUnitType =
   | 'soldier'
   | 'destroyer'
+  | 'pirate_ship'
   | 'construction_ship'
   | 'sniper'
   | 'rocketeer'
@@ -17,6 +18,12 @@ export type RenderableUnitType =
   | 'aircraft_carrier'
   | 'mothership';
 
+export type UnitArtRenderMode = 'full' | 'lod';
+
+export interface CreateUnitArtOptions {
+  renderMode?: UnitArtRenderMode;
+}
+
 export const REDESIGNED_UNIT_TYPES: RenderableUnitType[] = [
   'soldier',
   'tank',
@@ -24,6 +31,7 @@ export const REDESIGNED_UNIT_TYPES: RenderableUnitType[] = [
   'oil_seeker',
   'missile_launcher',
   'destroyer',
+  'pirate_ship',
   'construction_ship',
   'sniper',
   'rocketeer',
@@ -36,6 +44,7 @@ export const REDESIGNED_UNIT_TYPES: RenderableUnitType[] = [
 export const UNIT_PREVIEW_LABELS: Record<RenderableUnitType, string> = {
   soldier: 'Soldier',
   destroyer: 'Destroyer',
+  pirate_ship: 'Pirate Ship',
   construction_ship: 'Construction Ship',
   sniper: 'Sniper',
   rocketeer: 'Rocketeer',
@@ -50,6 +59,13 @@ export const UNIT_PREVIEW_LABELS: Record<RenderableUnitType, string> = {
   aircraft_carrier: 'Aircraft Carrier',
   mothership: 'Mothership'
 };
+
+const CACHED_RENDER_TEXTURE_TYPES = new Set<RenderableUnitType>([
+  'soldier',
+  'sniper',
+  'rocketeer',
+  'builder'
+]);
 
 const OUTLINE = 0x09131b;
 const SHADOW = 0x000000;
@@ -95,7 +111,167 @@ function addShadow(
   return shadow;
 }
 
+function getCachedUnitTextureKey(
+  type: RenderableUnitType,
+  color: number,
+  isSelected: boolean,
+  renderMode: UnitArtRenderMode
+) {
+  return `unit-art:${type}:${color.toString(16)}:${isSelected ? 1 : 0}:${renderMode}`;
+}
+
+function createLodTexture(
+  scene: Phaser.Scene,
+  key: string,
+  type: RenderableUnitType,
+  color: number,
+  isSelected: boolean
+) {
+  const graphics = scene.make.graphics({ x: 0, y: 0 }, false);
+  const size = 36;
+  const centerX = size / 2;
+  const outlineColor = isSelected ? HIGHLIGHT : OUTLINE;
+  const accentDark = shade(color, 35);
+  const accentLight = tint(color, 35);
+
+  graphics.fillStyle(SHADOW, 0.18);
+  graphics.fillEllipse(centerX, 28, 18, 7);
+  graphics.lineStyle(isSelected ? 3 : 2, outlineColor, 1);
+
+  if (type === 'soldier' || type === 'sniper') {
+    graphics.fillStyle(type === 'sniper' ? 0x55614d : 0x56704f, 1);
+    graphics.fillRoundedRect(9, 10, 12, 12, 3);
+    graphics.strokeRoundedRect(9, 10, 12, 12, 3);
+    graphics.fillStyle(type === 'sniper' ? accentDark : 0xf2c49a, 1);
+    graphics.fillCircle(17, 8, 4);
+    graphics.strokeCircle(17, 8, 4);
+    graphics.fillStyle(type === 'sniper' ? 0x141a1f : 0x20282f, 1);
+    graphics.fillRoundedRect(18, 14, type === 'sniper' ? 10 : 9, 3, 1);
+    graphics.strokeRoundedRect(18, 14, type === 'sniper' ? 10 : 9, 3, 1);
+    if (type === 'sniper') {
+      graphics.fillStyle(accentLight, 1);
+      graphics.fillRoundedRect(20, 11, 6, 2, 1);
+      graphics.strokeRoundedRect(20, 11, 6, 2, 1);
+    } else {
+      graphics.fillStyle(accentLight, 1);
+      graphics.fillRect(28, 14, 3, 3);
+      graphics.strokeRect(28, 14, 3, 3);
+    }
+  } else if (type === 'rocketeer') {
+    graphics.fillStyle(0x6e7b84, 1);
+    graphics.fillRoundedRect(9, 10, 13, 12, 3);
+    graphics.strokeRoundedRect(9, 10, 13, 12, 3);
+    graphics.fillStyle(0x364047, 1);
+    graphics.fillRoundedRect(8, 6, 7, 12, 2);
+    graphics.strokeRoundedRect(8, 6, 7, 12, 2);
+    graphics.fillStyle(0x334d2d, 1);
+    graphics.fillRoundedRect(17, 9, 12, 5, 2);
+    graphics.strokeRoundedRect(17, 9, 12, 5, 2);
+    graphics.fillStyle(color, 1);
+    graphics.fillTriangle(29, 11.5, 33, 9, 33, 14);
+    graphics.strokeTriangle(29, 11.5, 33, 9, 33, 14);
+    graphics.fillStyle(0xf0c39f, 1);
+    graphics.fillCircle(17, 7, 4);
+    graphics.strokeCircle(17, 7, 4);
+  } else if (type === 'builder') {
+    graphics.fillStyle(0x2779c6, 1);
+    graphics.fillRoundedRect(10, 10, 12, 12, 3);
+    graphics.strokeRoundedRect(10, 10, 12, 12, 3);
+    graphics.fillStyle(0xf57c25, 1);
+    graphics.fillRect(11, 10, 3, 12);
+    graphics.fillRect(18, 10, 3, 12);
+    graphics.strokeRect(11, 10, 3, 12);
+    graphics.strokeRect(18, 10, 3, 12);
+    graphics.fillStyle(0xf1c39c, 1);
+    graphics.fillCircle(17, 7, 4);
+    graphics.strokeCircle(17, 7, 4);
+    graphics.fillStyle(accentLight, 1);
+    graphics.fillRoundedRect(22, 8, 3, 10, 1);
+    graphics.strokeRoundedRect(22, 8, 3, 10, 1);
+    graphics.fillStyle(0xe6eef3, 1);
+    graphics.fillRoundedRect(24, 5, 5, 3, 1);
+    graphics.strokeRoundedRect(24, 5, 5, 3, 1);
+  }
+
+  graphics.generateTexture(key, size, size);
+  graphics.destroy();
+}
+
+function createCachedFullTexture(
+  scene: Phaser.Scene,
+  key: string,
+  type: RenderableUnitType,
+  color: number,
+  isSelected: boolean
+) {
+  const tempContainer = createVectorUnitArt(scene, 0, 0, type, color, isSelected);
+  const bounds = tempContainer.getBounds();
+  const padding = 10;
+  const width = Math.max(32, Math.ceil(bounds.width + padding * 2));
+  const height = Math.max(32, Math.ceil(bounds.height + padding * 2));
+  const renderTexture = scene.make.renderTexture({ width, height }, false);
+  const drawX = width * 0.5 - bounds.centerX;
+  const drawY = height * 0.5 - bounds.centerY;
+
+  renderTexture.draw(tempContainer, drawX, drawY);
+  renderTexture.saveTexture(key);
+  renderTexture.destroy();
+  tempContainer.destroy();
+}
+
+function createCachedUnitArt(
+  scene: Phaser.Scene,
+  x: number,
+  y: number,
+  type: RenderableUnitType,
+  color: number,
+  isSelected: boolean,
+  renderMode: UnitArtRenderMode
+) {
+  const key = getCachedUnitTextureKey(type, color, isSelected, renderMode);
+  if (!scene.textures.exists(key)) {
+    if (renderMode === 'lod') {
+      createLodTexture(scene, key, type, color, isSelected);
+    } else {
+      createCachedFullTexture(scene, key, type, color, isSelected);
+    }
+  }
+
+  const container = scene.add.container(x, y);
+  const sprite = scene.add.image(0, 0, key);
+  sprite.setOrigin(0.5, 0.5);
+  container.add(sprite);
+  return container;
+}
+
 export function createUnitArt(
+  scene: Phaser.Scene,
+  x: number,
+  y: number,
+  type: RenderableUnitType | string,
+  color: number,
+  isSelected: boolean,
+  options: CreateUnitArtOptions = {}
+): Phaser.GameObjects.Container {
+  const renderMode = options.renderMode ?? 'full';
+  if (
+    CACHED_RENDER_TEXTURE_TYPES.has(type as RenderableUnitType)
+  ) {
+    return createCachedUnitArt(
+      scene,
+      x,
+      y,
+      type as RenderableUnitType,
+      color,
+      isSelected,
+      renderMode
+    );
+  }
+
+  return createVectorUnitArt(scene, x, y, type, color, isSelected);
+}
+
+function createVectorUnitArt(
   scene: Phaser.Scene,
   x: number,
   y: number,
@@ -404,6 +580,64 @@ export function createUnitArt(
       mastBraceRear,
       radarStem,
       radar
+    ]);
+  } else if (type === 'pirate_ship') {
+    addShadow(scene, container, -1, 12, 38, 11, 0.16);
+
+    const wake = scene.add.polygon(-14, 0, [0, 0, -8, -5, -14, 0, -8, 5], 0xe9f4fb, 0.5);
+    const hull = outline(scene.add.polygon(
+      0,
+      0,
+      [-17, -7, 10, -7, 18, -2, 20, 0, 18, 2, 10, 7, -17, 7],
+      0x5a3a2a,
+      1
+    ), isSelected);
+    const hullPlank = outline(scene.add.rectangle(1, 0, 28, 8, 0x754d35), isSelected);
+    const gunStripe = outline(scene.add.rectangle(2, 0, 24, 2.2, 0x2a1a12), isSelected);
+    const bowCap = outline(scene.add.triangle(19, 0, 0, -4, 0, 4, 5, 0, 0x8f6a45), isSelected);
+
+    const mast = outline(scene.add.rectangle(-2, -4, 2.8, 18, 0x2d2017), isSelected);
+    const spar = outline(scene.add.rectangle(-2, -10, 14, 2, 0x3a2a1d), isSelected);
+    const sail = outline(scene.add.polygon(
+      -1,
+      -6,
+      [-6, -8, 5, -6, 4, 8, -5, 7],
+      0xe6dec6,
+      1
+    ), isSelected);
+    const sailFold = outline(scene.add.line(-1, -5, -2, -8, 1, 8, 0xb4aa8f), isSelected);
+    const pennant = outline(scene.add.triangle(2, -13, 0, -2, 0, 2, 6, 0, accent), isSelected);
+
+    const deckHouse = outline(scene.add.rectangle(-10, -2, 8, 6, 0x8a6b49), isSelected);
+    const helm = outline(scene.add.circle(-12, -2, 2.4, 0xb88b4f), isSelected);
+    const cannonBase = outline(scene.add.rectangle(6, -1.5, 6, 4, 0x2a3138), isSelected);
+    const cannonBarrel = outline(scene.add.rectangle(11, -1.5, 8, 2.2, 0x161b20), isSelected);
+    const sternRail = outline(scene.add.rectangle(-14, 0, 3, 9, 0x3c2a1d), isSelected);
+
+    scene.tweens.add({
+      targets: pennant,
+      angle: { from: -18, to: 18 },
+      duration: 900,
+      yoyo: true,
+      repeat: -1
+    });
+
+    container.add([
+      wake,
+      hull,
+      hullPlank,
+      gunStripe,
+      bowCap,
+      sternRail,
+      mast,
+      spar,
+      sail,
+      sailFold,
+      pennant,
+      deckHouse,
+      helm,
+      cannonBase,
+      cannonBarrel
     ]);
   } else if (type === 'construction_ship') {
     addShadow(scene, container, -1, 12, 40, 10, 0.14);

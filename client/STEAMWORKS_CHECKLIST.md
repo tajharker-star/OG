@@ -8,9 +8,10 @@ It does not log into Steamworks for you. It gives you the exact repo-backed data
 
 - App ID: `4432220`
 - Demo build description: `Conquerors: Domination Demo Build`
-- Depot `4432222` -> Windows
-- Depot `4432223` -> macOS
+- Depot `4432222` -> macOS
+- Depot `4432223` -> Windows
 - Depot `4432224` -> Linux + SteamOS
+- No shared placeholder depot. The demo app should install only the current platform depot.
 - Install folder: `Conquerors Domination Demo`
 - Windows launch target: `ConquerorsDominationDemo.exe`
 - macOS launch target: `ConquerorsDominationDemo.app`
@@ -21,6 +22,10 @@ Validated on `2026-03-03`:
 - `npm run verify:steam-layout` -> passed
 - `npm run verify:release-binaries` -> passed
 - `npm run smoke:packaged` -> passed on macOS staged build
+
+Post-publish validation on a host machine:
+
+- `npm run verify:steam-install` -> confirms Steam mounted the expected depot for the current OS and that the launch target exists in `steamapps/common`
 
 ## Commands
 
@@ -112,6 +117,56 @@ Only check this if you want Windows, macOS, and Linux players sharing the same l
 
 - Steam Achievements
 Only check this if you also configure the Steamworks achievement API name `WIN_GAME`. The client code can trigger it, but the backend definition still has to exist in Steamworks.
+
+## Steam stats to create
+
+If you want the new lobby statistics screen to persist through Steam, create these integer stat API names in Steamworks for app `4432220`:
+
+- `STAT_LIFETIME_WINS`
+- `STAT_LIFETIME_LOSSES`
+- `STAT_LIFETIME_DRAWS`
+- `STAT_LIFETIME_BEST_WIN_STREAK`
+- `STAT_CAMPAIGN_WINS`
+- `STAT_CAMPAIGN_LOSSES`
+- `STAT_CUSTOM_WINS`
+- `STAT_CUSTOM_LOSSES`
+- `STAT_MULTIPLAYER_WINS`
+- `STAT_MULTIPLAYER_LOSSES`
+- `STAT_MULTIPLAYER_DRAWS`
+- `STAT_COOP_WINS`
+- `STAT_COOP_LOSSES`
+- `STAT_RANKED_WINS`
+- `STAT_RANKED_LOSSES`
+- `STAT_RANKED_BEST_WIN_STREAK`
+
+Notes:
+
+- The client will still save stats locally even if these Steam stat definitions do not exist yet.
+- Steam sync will only store the stat names that are configured on the Steamworks backend.
+- Once those stats exist, you can wire achievement unlock conditions against them inside Steamworks.
+
+If you want the new achievements screen to sync with Steam too, create these achievement API names:
+
+- `FIRST_DEPLOYMENT`
+- `FIELD_TESTED`
+- `WAR_MACHINE`
+- `FIRST_VICTORY`
+- `SEASONED_WINNER`
+- `DOMINATOR`
+- `STAYING_POWER`
+- `LEGENDARY_STREAK`
+- `CAMPAIGN_INITIATE`
+- `CAMPAIGN_CONQUEROR`
+- `CAMPAIGN_LEGEND`
+- `SKIRMISH_STARTER`
+- `SKIRMISH_SUPREME`
+- `NETWORK_INITIATE`
+- `ONLINE_WARLORD`
+- `ONLINE_LEGEND`
+- `COOP_WINGMAN`
+- `PVE_COMMANDER`
+- `RANKED_ROOKIE`
+- `RANKED_CONTENDER`
 
 Leave unchecked unless you add explicit support:
 

@@ -1,9 +1,9 @@
 "DepotBuild"
 {
-	"DepotID" "4432222"
+	"DepotID" "4432212"
 	"FileMapping"
 	{
-		"LocalPath" "dist_electron\mac\*"
+		"LocalPath" "releases/steam/macos/*"
 		"DepotPath" "."
 		"recursive" "1"
 	}

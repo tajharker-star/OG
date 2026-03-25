@@ -14,15 +14,16 @@ Steam launch mapping:
 - Linux + SteamOS uses `conquerors-domination-demo`
 
 SteamPipe upload sources:
-- Depot `4432222` -> `releases/steam/microsoft-windows/*`
-- Depot `4432223` -> `releases/steam/macos/*`
+- Depot `4432222` -> `releases/steam/macos/*`
+- Depot `4432223` -> `releases/steam/microsoft-windows/*`
 - Depot `4432224` -> `releases/steam/linux/*`
 
 Validation commands:
 - `npm run stage:steam`
 - `npm run verify:steam-layout`
-- `npm run verify:release-binaries`
+- `npm run verify:release-binaries` (also checks that each staged depot contains a full multi-file package, not a placeholder)
 - `npm run verify:steam-runtime`
+- `npm run verify:steam-install` (checks the local Steam install on the current host after download/update)
 - `npm run smoke:packaged-server`
 - `npm run smoke:packaged`
 - `npm run smoke:windows:wine` (optional, requires `wine`/`wine64` or `WINE_BIN`)
