@@ -1,6 +1,6 @@
 export interface Building {
     id: string;
-    type: 'barracks' | 'mine' | 'tower' | 'dock' | 'base' | 'oil_rig' | 'oil_well' | 'wall' | 'bridge_node' | 'wall_node' | 'farm' | 'tank_factory' | 'air_base';
+    type: 'barracks' | 'mine' | 'tower' | 'dock' | 'base' | 'oil_rig' | 'oil_well' | 'wall' | 'bridge_node' | 'wall_node' | 'farm' | 'tank_factory' | 'air_base' | 'hospital' | 'repair_dock' | 'naval_mine';
     level: number;
     health: number;
     maxHealth: number;
@@ -17,6 +17,7 @@ export interface Building {
     ownerId?: string; // Explicit ownership for shared islands
     hasTesla?: boolean;
     range?: number;
+    hiddenFromEnemies?: boolean;
 }
 
 export interface GoldDeposit {
@@ -51,8 +52,8 @@ export interface Bridge {
     type: 'bridge' | 'wall' | 'gate';
     nodeAId: string;
     nodeBId: string;
-    islandAId: string;
-    islandBId: string;
+    islandAId?: string;
+    islandBId?: string;
     ownerId: string;
     health: number;
     maxHealth: number;
@@ -64,6 +65,7 @@ export interface GameMap {
     islands: Island[];
     oilSpots: OilSpot[];
     bridges: Bridge[];
+    waterBuildings?: Building[];
     mapType?: string;
     serverRegion?: string;
     version?: string;

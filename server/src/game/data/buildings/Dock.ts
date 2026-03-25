@@ -5,6 +5,7 @@ export const DockStats: BuildingStats = {
     name: 'Naval Dock',
     health: 600,
     maxHealth: 600,
+    radius: 28,
     cost: { gold: 100, oil: 0 },
     constructionTime: 400,
     description: 'Constructs naval units.'

@@ -1,6 +1,6 @@
 export interface Building {
   id: string;
-  type: 'barracks' | 'mine' | 'tower' | 'dock' | 'base' | 'oil_rig' | 'oil_well' | 'wall' | 'bridge_node' | 'wall_node' | 'farm' | 'tank_factory' | 'air_base';
+  type: 'barracks' | 'mine' | 'tower' | 'dock' | 'base' | 'oil_rig' | 'oil_well' | 'wall' | 'bridge_node' | 'wall_node' | 'farm' | 'tank_factory' | 'air_base' | 'hospital' | 'repair_dock' | 'naval_mine';
   level: number;
   health: number;
   maxHealth: number;
@@ -16,6 +16,7 @@ export interface Building {
   ownerId?: string;
   hasTesla?: boolean;
   range?: number;
+  hiddenFromEnemies?: boolean;
 }
 
 export interface GoldDeposit {
@@ -50,8 +51,8 @@ export interface Bridge {
   type: 'bridge' | 'wall' | 'gate'; // Connectors
   nodeAId: string;
   nodeBId: string;
-  islandAId: string; // ID of island where node A is
-  islandBId: string; // ID of island where node B is
+  islandAId?: string; // ID of island where node A is, if the endpoint is on land
+  islandBId?: string; // ID of island where node B is, if the endpoint is on land
   ownerId: string;
   health: number;
   maxHealth: number;
@@ -63,6 +64,7 @@ export interface GameMap {
   islands: Island[];
   oilSpots: OilSpot[];
   bridges: Bridge[];
+  waterBuildings?: Building[];
   mapType?: string;
   serverRegion?: string;
   version?: string;
@@ -70,6 +72,7 @@ export interface GameMap {
       id: string;
       x: number;
       y: number;
+      radius: number;
       points: {x: number, y: number}[];
   }[];
 }
@@ -77,7 +80,7 @@ export interface GameMap {
 export interface Unit {
   id: string;
   ownerId: string;
-  type: 'soldier' | 'destroyer' | 'construction_ship' | 'sniper' | 'rocketeer' | 'builder' | 'ferry' | 'tank' | 'humvee' | 'missile_launcher' | 'oil_seeker' | 'light_plane' | 'heavy_plane' | 'aircraft_carrier' | 'mothership';
+  type: 'soldier' | 'destroyer' | 'pirate_ship' | 'construction_ship' | 'sniper' | 'rocketeer' | 'builder' | 'ferry' | 'tank' | 'humvee' | 'missile_launcher' | 'oil_seeker' | 'light_plane' | 'heavy_plane' | 'aircraft_carrier' | 'mothership';
   x: number;
   y: number;
   targetIslandId?: string;
@@ -102,6 +105,7 @@ export interface Unit {
   lastSteerTime?: number;
   vx?: number;
   vy?: number;
+  facingAngle?: number;
 }
 
 export interface Player {
@@ -114,4 +118,5 @@ export interface Player {
   };
   isBot?: boolean;
   status?: 'active' | 'eliminated';
+  hqSpawnedOnce?: boolean;
 }

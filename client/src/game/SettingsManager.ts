@@ -1,3 +1,10 @@
+import {
+    createDefaultSfxEffectLevels,
+    normalizeSfxEffectLevels,
+    type SfxEffectId,
+    type SfxEffectLevels,
+} from '../audio/sfxCatalog';
+
 type Listener = (settings: Settings) => void;
 
 class SimpleEventEmitter {
@@ -46,7 +53,10 @@ export interface AudioSettings {
     masterVolume: number;
     sfxVolume: number;
     musicVolume: number;
+    sfxEffectLevels: SfxEffectLevels;
 }
+
+type AudioScalarSetting = 'masterVolume' | 'sfxVolume' | 'musicVolume';
 
 export interface GraphicsSettings {
     showFps: boolean;
@@ -56,7 +66,7 @@ export interface GraphicsSettings {
     maxParticles: number;
     resolution: number; // 0.5 to 1.0
     targetFps: number; // 30, 60, 144, etc.
-    menuExplosionDensity: number; // 0.0 to 1.0 (Multiplier for background explosions)
+    menuExplosionDensity: number; // 0.0 to 2.0 (Multiplier for main menu background explosions)
     screenShakeIntensity: number; // 0.0 to 2.0 (Multiplier for audio shake)
     menuProjectileMultiplierPercent: number; // 0 to 10000 (Main menu projectile density percent)
 }
@@ -90,7 +100,8 @@ const DEFAULT_SETTINGS: Settings = {
     audio: {
         masterVolume: 0.5,
         sfxVolume: 0.5,
-        musicVolume: 0.5
+        musicVolume: 0.5,
+        sfxEffectLevels: createDefaultSfxEffectLevels()
     },
     graphics: {
         showFps: false,
@@ -120,9 +131,14 @@ class SettingsManager extends SimpleEventEmitter {
             if (stored) {
                 // Merge with default to ensure new keys exist
                 const parsed = JSON.parse(stored);
+                const parsedAudio = parsed.audio ?? {};
                 const merged: Settings = {
                     keybinds: { ...DEFAULT_SETTINGS.keybinds, ...parsed.keybinds },
-                    audio: { ...DEFAULT_SETTINGS.audio, ...parsed.audio },
+                    audio: {
+                        ...DEFAULT_SETTINGS.audio,
+                        ...parsedAudio,
+                        sfxEffectLevels: normalizeSfxEffectLevels(parsedAudio.sfxEffectLevels),
+                    },
                     graphics: { ...DEFAULT_SETTINGS.graphics, ...parsed.graphics }
                 };
                 // Migration: derive menuProjectileMultiplierPercent from legacy menuExplosionDensity if missing
@@ -159,8 +175,13 @@ class SettingsManager extends SimpleEventEmitter {
         this.saveSettings();
     }
 
-    public setAudio(setting: keyof AudioSettings, value: number) {
+    public setAudio(setting: AudioScalarSetting, value: number) {
         this.settings.audio[setting] = Math.max(0, Math.min(1, value));
+        this.saveSettings();
+    }
+
+    public setSfxEffectLevel(effectId: SfxEffectId, value: number) {
+        this.settings.audio.sfxEffectLevels[effectId] = Math.max(0, Math.min(1, value));
         this.saveSettings();
     }
 

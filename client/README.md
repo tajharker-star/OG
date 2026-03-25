@@ -1,3 +1,7 @@
+# Client Workspace
+
+Release packaging notes live in `RELEASES.md`. Steam-ready platform bundles are staged into `releases/steam/` with separate folders for Microsoft Windows, macOS, and Linux.
+
 # React + TypeScript + Vite
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.

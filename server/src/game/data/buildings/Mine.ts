@@ -5,6 +5,7 @@ export const MineStats: BuildingStats = {
     name: 'Gold Mine',
     health: 300,
     maxHealth: 300,
+    radius: 24,
     cost: { gold: 30, oil: 0 },
     constructionTime: 150,
     description: 'Extracts gold from gold spots.'

@@ -1,8 +1,12 @@
 import Phaser from 'phaser';
 import { socket } from '../../services/socket';
+import { soundEffectsManager } from '../../audio/soundEffects';
 import { settingsManager } from '../SettingsManager';
 import type { Settings } from '../SettingsManager';
-import type { GameMap, Island, Player, Unit } from '../../types/game';
+import type { Building, GameMap, Island, Player, Unit } from '../../types/game';
+import { createUnitArt } from '../rendering/unitArt';
+import type { UnitArtRenderMode } from '../rendering/unitArt';
+import { createBuildingArt } from '../rendering/buildingArt';
 
 interface MenuProjectile {
     x: number;
@@ -20,6 +24,68 @@ interface MenuProjectile {
     initialVy: number;
 }
 
+interface BuildingAudioSnapshot {
+    id: string;
+    type: Building['type'];
+    ownerId: string | null;
+    x: number;
+    y: number;
+}
+
+type PlacementValidation = {
+    valid: boolean;
+    reason: string;
+};
+
+const CLIENT_DEFINITE_PLACEMENT_FAILURE_REASONS = new Set([
+    'Map data still loading',
+    'Connection not ready',
+    'Player data still loading',
+    'HQ only spawns at match start'
+]);
+
+const SERVER_AUTHORITY_PLACEMENT_TYPES = new Set(['bridge_node', 'naval_mine']);
+
+const BUILDING_COSTS: Record<string, { gold: number; oil: number }> = {
+    barracks: { gold: 50, oil: 0 },
+    mine: { gold: 30, oil: 0 },
+    tower: { gold: 40, oil: 0 },
+    dock: { gold: 100, oil: 0 },
+    base: { gold: 9999, oil: 9999 },
+    oil_rig: { gold: 200, oil: 0 },
+    oil_well: { gold: 200, oil: 0 },
+    wall: { gold: 10, oil: 0 },
+    bridge_node: { gold: 50, oil: 0 },
+    wall_node: { gold: 20, oil: 0 },
+    farm: { gold: 50, oil: 0 },
+    tank_factory: { gold: 500, oil: 50 },
+    air_base: { gold: 400, oil: 100 },
+    hospital: { gold: 150, oil: 20 },
+    repair_dock: { gold: 220, oil: 40 },
+    naval_mine: { gold: 120, oil: 20 }
+};
+
+const BUILDING_FOOTPRINTS: Record<string, number> = {
+    base: 36,
+    barracks: 34,
+    mine: 24,
+    tower: 18,
+    dock: 28,
+    oil_rig: 24,
+    oil_well: 24,
+    wall: 10,
+    bridge_node: 10,
+    wall_node: 10,
+    farm: 24,
+    tank_factory: 42,
+    air_base: 40,
+    hospital: 30,
+    repair_dock: 32,
+    naval_mine: 12
+};
+
+const NON_BLOCKING_BUILDING_TYPES = new Set<string>(['mine', 'bridge_node', 'naval_mine']);
+
 export class MainScene extends Phaser.Scene {
   private islandsGroup!: Phaser.GameObjects.Group;
   private unitsGroup!: Phaser.GameObjects.Group;
@@ -30,7 +96,7 @@ export class MainScene extends Phaser.Scene {
   private menuProjectiles: MenuProjectile[] = [];
   private menuSpawnTimer: number = 0;
   private menuGraphics!: Phaser.GameObjects.Graphics;
-  private menuExplosions: {x: number, y: number, life: number, maxLife: number, color: number}[] = [];
+  private menuExplosions: {x: number, y: number, life: number, maxLife: number, color: number, radius: number}[] = [];
   private mainMenuMusic: Phaser.Sound.BaseSound | null = null;
   private ingameMusic: Phaser.Sound.BaseSound | null = null;
 
@@ -40,6 +106,8 @@ export class MainScene extends Phaser.Scene {
   private selectedBuildingIds: Set<string> = new Set();
   private selectedNodeIds: Set<string> = new Set();
   private currentUnits: Unit[] = [];
+  private infantryLodActive: boolean = false;
+  private attackFacingOverrides: Map<string, { angle: number; expiresAt: number }> = new Map();
   private selectionGraphics!: Phaser.GameObjects.Graphics;
   private isSelecting: boolean = false;
   private selectionStart: Phaser.Math.Vector2 = new Phaser.Math.Vector2();
@@ -47,6 +115,7 @@ export class MainScene extends Phaser.Scene {
   private placementMode: boolean = false;
   private placementType: string | null = null;
   private placementGhost: Phaser.GameObjects.Container | null = null;
+  private placementStatusText: Phaser.GameObjects.Text | null = null;
   private targetSelectionMode: boolean = false;
   private targetSelectionCallback: ((x: number, y: number) => void) | null = null;
   
@@ -54,6 +123,7 @@ export class MainScene extends Phaser.Scene {
     private tumbleweeds: { sprite: Phaser.GameObjects.Shape, dx: number, dy: number, life: number, maxLife: number, poly: Phaser.Geom.Polygon, bounds: Phaser.Geom.Rectangle }[] = [];
     private weatherParticles: { sprite: Phaser.GameObjects.Shape, dx: number, dy: number, type: string, life: number, maxLife: number, poly: Phaser.Geom.Polygon, bounds: Phaser.Geom.Rectangle }[] = [];
     private oilAnimations: { x: number, y: number, pulse: Phaser.GameObjects.Arc, timer: number, id: string }[] = [];
+    private goldSparkles: { sprite: Phaser.GameObjects.Star, timer: number, speed: number }[] = [];
     private oilSpotVisuals: Map<string, { main: Phaser.GameObjects.Shape, pulse: Phaser.GameObjects.Shape, ping?: Phaser.GameObjects.Rectangle }> = new Map();
     private revealedOilSpots: Set<string> = new Set();
     private unitUpdates: Map<string, { x: number, y: number, time: number }[]> = new Map();
@@ -65,8 +135,11 @@ export class MainScene extends Phaser.Scene {
     private dataArray: Uint8Array | null = null;
 
     private cameraInitialized: boolean = false;
-  private currentMap: GameMap | null = null;
+    private currentMap: GameMap | null = null;
   private currentMapVersion: string | null = null;
+  private currentMapStateSignature: string | null = null;
+  private knownBuildingAudioState: Map<string, BuildingAudioSnapshot> = new Map();
+  private buildingAudioPrimed: boolean = false;
   private rangeGraphics!: Phaser.GameObjects.Graphics;
   private pathGraphics!: Phaser.GameObjects.Graphics;
   private scannerOverlay!: Phaser.GameObjects.Graphics;
@@ -81,9 +154,15 @@ export class MainScene extends Phaser.Scene {
         if (data.ownerId === socket.id) {
             const isHQ = data.entityType === 'base';
             if (isHQ) {
-                this.sound.play('explosion', { volume: 0.4, rate: 1.5 });
+                const volume = soundEffectsManager.getEffectVolume('damageAlertHq', 0.4);
+                if (volume > 0) {
+                    this.sound.play('explosion', { volume, rate: 1.5 });
+                }
             } else {
-                this.sound.play('shoot', { volume: 0.1, rate: 3.0 });
+                const volume = soundEffectsManager.getEffectVolume('damageAlertBuilding', 0.1);
+                if (volume > 0) {
+                    this.sound.play('shoot', { volume, rate: 3.0 });
+                }
             }
         }
     };
@@ -94,6 +173,1183 @@ export class MainScene extends Phaser.Scene {
 
   constructor() {
     super('MainScene');
+  }
+
+  private registerAttackFacing(attackerId: string | undefined, x1: number, y1: number, x2: number, y2: number, duration = 240) {
+    if (!attackerId) return;
+    const angle = Math.atan2(y2 - y1, x2 - x1);
+    this.attackFacingOverrides.set(attackerId, {
+      angle,
+      expiresAt: Date.now() + duration
+    });
+  }
+
+  private getDesiredFacingAngle(unit: Unit): number | undefined {
+    const override = this.attackFacingOverrides.get(unit.id);
+    if (override) {
+      if (override.expiresAt > Date.now()) return override.angle;
+      this.attackFacingOverrides.delete(unit.id);
+    }
+
+    const prediction = this.predictedMoves.get(unit.id);
+    if (prediction && prediction.vx !== undefined && prediction.vy !== undefined) {
+      if (Math.hypot(prediction.vx, prediction.vy) > 5) {
+        return Math.atan2(prediction.vy, prediction.vx);
+      }
+    }
+
+    if (typeof unit.facingAngle === 'number') {
+      return unit.facingAngle;
+    }
+
+    const history = this.unitUpdates.get(unit.id);
+    if (history && history.length >= 2) {
+      const current = history[history.length - 1];
+      const previous = history[history.length - 2];
+      const dx = current.x - previous.x;
+      const dy = current.y - previous.y;
+      if (Math.hypot(dx, dy) > 1) {
+        return Math.atan2(dy, dx);
+      }
+    }
+
+    return undefined;
+  }
+
+  private rotateUnitArt(container: Phaser.GameObjects.Container, targetAngle: number | undefined, dtSec: number, snap = false) {
+    const art = container.getByName('art') as Phaser.GameObjects.Container | null;
+    if (!art || typeof targetAngle !== 'number' || Number.isNaN(targetAngle)) return;
+
+    if (snap) {
+      art.rotation = targetAngle;
+      return;
+    }
+
+    art.rotation = Phaser.Math.Angle.RotateTo(art.rotation, targetAngle, 8 * dtSec);
+  }
+
+  private isCrowdInfantryType(type: string) {
+    return type === 'soldier' || type === 'sniper' || type === 'rocketeer' || type === 'builder';
+  }
+
+  private shouldUseInfantryLod(units: Unit[] = this.currentUnits) {
+    const infantryCount = units.reduce(
+      (count, unit) => count + (this.isCrowdInfantryType(unit.type) ? 1 : 0),
+      0
+    );
+    const zoom = this.cameras.main?.zoom ?? 1;
+
+    if (this.infantryLodActive) {
+      return zoom <= 0.62 || infantryCount >= 72 || (infantryCount >= 44 && zoom <= 0.78);
+    }
+
+    return zoom <= 0.5 || infantryCount >= 96 || (infantryCount >= 56 && zoom <= 0.72);
+  }
+
+  private syncUnitDetailMode(units: Unit[] = this.currentUnits) {
+    const shouldUseLod = this.shouldUseInfantryLod(units);
+    if (shouldUseLod === this.infantryLodActive) return false;
+    this.infantryLodActive = shouldUseLod;
+    return true;
+  }
+
+  private getUnitRenderMode(unit: Unit, isSelected: boolean): UnitArtRenderMode {
+    if (!isSelected && this.infantryLodActive && this.isCrowdInfantryType(unit.type)) {
+      return 'lod';
+    }
+
+    return 'full';
+  }
+
+  private clearPlacementMode() {
+    this.placementMode = false;
+    this.placementType = null;
+
+    if (this.placementGhost) {
+      this.placementGhost.destroy();
+      this.placementGhost = null;
+    }
+
+    if (this.placementStatusText) {
+      this.placementStatusText.destroy();
+      this.placementStatusText = null;
+    }
+  }
+
+  private getPlacementSupportUnitTypes(type: string): string[] {
+    if (type === 'naval_mine' || type === 'oil_rig') return ['construction_ship'];
+    if (type === 'bridge_node') return ['builder', 'construction_ship'];
+    return ['builder'];
+  }
+
+  private getPlacementSupportRange(type: string): number {
+    if (type === 'oil_rig') return 150;
+    if (type === 'naval_mine') return 180;
+    if (type === 'bridge_node') return 220;
+    return 400;
+  }
+
+  private getPlacementSupportLabel(type: string): string {
+    const allowedTypes = this.getPlacementSupportUnitTypes(type);
+    if (allowedTypes.length === 2) return 'builder or construction ship';
+    return allowedTypes[0] === 'construction_ship' ? 'construction ship' : 'builder';
+  }
+
+  private getBuildingCost(type: string) {
+    return BUILDING_COSTS[type] ?? { gold: 0, oil: 0 };
+  }
+
+  private getBuildingFootprintRadius(type: string): number {
+    return BUILDING_FOOTPRINTS[type] ?? 30;
+  }
+
+  private isNonBlockingBuildingType(type: string): boolean {
+    return NON_BLOCKING_BUILDING_TYPES.has(type);
+  }
+
+  private getEffectivePlacementFootprintRadius(type: string): number {
+    if (this.isNonBlockingBuildingType(type)) return 0;
+
+    const baseRadius = this.getBuildingFootprintRadius(type);
+    const mapType = this.currentMap?.mapType;
+
+    if (type === 'air_base') {
+      if (mapType === 'islands') return Math.max(14, Math.round(baseRadius * 0.5));
+      return Math.max(22, Math.round(baseRadius * 0.7));
+    }
+
+    if (mapType === 'islands') {
+      if (['barracks', 'tank_factory', 'tower', 'farm', 'oil_well', 'dock', 'hospital', 'repair_dock'].includes(type)) {
+        return Math.max(9, Math.round(baseRadius * 0.68));
+      }
+      if (type === 'wall' || type === 'wall_node') {
+        return Math.max(5, Math.round(baseRadius * 0.7));
+      }
+    }
+
+    return baseRadius;
+  }
+
+  private getBuildingPlacementPadding(type: string): number {
+    if (this.isNonBlockingBuildingType(type)) return 0;
+
+    const mapType = this.currentMap?.mapType;
+    if (type === 'air_base') return mapType === 'islands' ? 0 : 2;
+    if (mapType === 'islands' && ['wall', 'wall_node'].includes(type)) return 1;
+    if (type === 'wall_node' || type === 'wall') return 2;
+    if (mapType === 'islands' && ['air_base', 'barracks', 'tank_factory', 'tower', 'farm', 'oil_well', 'dock', 'hospital', 'repair_dock'].includes(type)) {
+      return 0;
+    }
+
+    return 4;
+  }
+
+  private isPointOnLand(x: number, y: number) {
+    if (!this.currentMap) return false;
+
+    return this.currentMap.islands.some(island => {
+      return this.isPointOnIslandSurface(island, x, y);
+    });
+  }
+
+  private isPointOnIslandSurface(island: Island, x: number, y: number) {
+    if (island.points) {
+      return this.isPointInPolygon({ x, y }, island.points);
+    }
+    return Math.hypot(x - island.x, y - island.y) <= island.radius;
+  }
+
+  private getIslandShorelineProbe(
+    island: Island,
+    x: number,
+    y: number,
+    tolerance = 20
+  ): { edgeX: number; edgeY: number; outwardX: number; outwardY: number } | null {
+    if (island.points && island.points.length > 2) {
+      if (!this.isPointInPolygon({ x, y }, island.points)) {
+        return null;
+      }
+
+      const closest = this.getClosestPointOnPolygon({ x, y }, island.points);
+      if (Math.hypot(x - closest.x, y - closest.y) > tolerance) {
+        return null;
+      }
+
+      let outwardX = closest.x - island.x;
+      let outwardY = closest.y - island.y;
+      const outwardLength = Math.hypot(outwardX, outwardY);
+      if (outwardLength <= 0.001) {
+        outwardX = x - island.x;
+        outwardY = y - island.y;
+      }
+      const normalizedLength = Math.hypot(outwardX, outwardY) || 1;
+      return {
+        edgeX: closest.x,
+        edgeY: closest.y,
+        outwardX: outwardX / normalizedLength,
+        outwardY: outwardY / normalizedLength
+      };
+    }
+
+    const dx = x - island.x;
+    const dy = y - island.y;
+    const distance = Math.hypot(dx, dy);
+    const innerRadius = Math.max(0, island.radius - tolerance);
+    if (distance < innerRadius || distance > island.radius + 2) {
+      return null;
+    }
+
+    const length = distance || 1;
+    return {
+      edgeX: island.x + (dx / length) * island.radius,
+      edgeY: island.y + (dy / length) * island.radius,
+      outwardX: dx / length,
+      outwardY: dy / length
+    };
+  }
+
+  private isPointOnExposedIslandShoreline(island: Island, x: number, y: number, tolerance = 20) {
+    if (!this.currentMap) return false;
+
+    const probe = this.getIslandShorelineProbe(island, x, y, tolerance);
+    if (!probe) return false;
+
+    const probeDistances = [6, 12, 18];
+    return probeDistances.some(distance => {
+      const probeX = probe.edgeX + probe.outwardX * distance;
+      const probeY = probe.edgeY + probe.outwardY * distance;
+      return !this.isPointOnLand(probeX, probeY);
+    });
+  }
+
+  private getDockPlacementIslandCandidates(x: number, y: number) {
+    if (!this.currentMap) return [] as Island[];
+
+    return this.currentMap.islands
+      .filter(island => this.isPointOnExposedIslandShoreline(island, x, y))
+      .sort((left, right) => left.radius - right.radius);
+  }
+
+  private hasDockWaterSpawnSpace(x: number, y: number) {
+    const radii = [40, 60, 80, 100, 120, 150, 180, 200];
+    for (const radius of radii) {
+      for (let step = 0; step < 8; step += 1) {
+        const angle = (step / 8) * Math.PI * 2;
+        const testX = x + Math.cos(angle) * radius;
+        const testY = y + Math.sin(angle) * radius;
+        if (!this.isPointOnLand(testX, testY)) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  private getClosestOilSpot(x: number, y: number, maxDistance = 40) {
+    if (!this.currentMap) return null;
+
+    const nearby = this.currentMap.oilSpots
+      .map(spot => ({ spot, distance: Math.hypot(spot.x - x, spot.y - y) }))
+      .filter(entry => entry.distance <= maxDistance)
+      .sort((left, right) => left.distance - right.distance);
+
+    return nearby[0]?.spot ?? null;
+  }
+
+  private getHighGroundAtPoint(x: number, y: number) {
+    if (!this.currentMap?.highGrounds) return null;
+
+    return this.currentMap.highGrounds.find(highGround => {
+      if (
+        x < highGround.x - highGround.radius ||
+        x > highGround.x + highGround.radius ||
+        y < highGround.y - highGround.radius ||
+        y > highGround.y + highGround.radius
+      ) {
+        return false;
+      }
+
+      return this.isPointInPolygon({ x, y }, highGround.points);
+    }) ?? null;
+  }
+
+  private isPointInsideHighGround(x: number, y: number) {
+    return !!this.getHighGroundAtPoint(x, y);
+  }
+
+  private getPlacementIslandCandidates(x: number, y: number): Island[] {
+    if (!this.currentMap) return [];
+
+    return this.currentMap.islands
+      .filter(island => {
+        if (island.points) return this.isPointInPolygon({ x, y }, island.points);
+        return Math.hypot(x - island.x, y - island.y) < island.radius + 50;
+      })
+      .sort((left, right) => left.radius - right.radius);
+  }
+
+  private getPlacementSurfaceIslandCandidates(x: number, y: number): Island[] {
+    if (!this.currentMap) return [];
+
+    return this.currentMap.islands
+      .filter(island => {
+        if (island.points) return this.isPointInPolygon({ x, y }, island.points);
+        return Math.hypot(x - island.x, y - island.y) <= island.radius;
+      })
+      .sort((left, right) => left.radius - right.radius);
+  }
+
+  private getBuildSupportUnitsInRange(type: string, x: number, y: number): Unit[] {
+    const allowedTypes = new Set(this.getPlacementSupportUnitTypes(type));
+    const range = this.getPlacementSupportRange(type);
+
+    return this.currentUnits.filter(unit =>
+      unit.ownerId === socket.id &&
+      allowedTypes.has(unit.type) &&
+      Math.hypot(unit.x - x, unit.y - y) <= range
+    );
+  }
+
+  private getNodeView(nodeId: string): { building: any; x: number; y: number; island?: Island } | null {
+    if (!this.currentMap) return null;
+
+    for (const island of this.currentMap.islands) {
+      const building = island.buildings.find(candidate => candidate.id === nodeId);
+      if (!building) continue;
+      return {
+        building,
+        island,
+        x: island.x + (building.x || 0),
+        y: island.y + (building.y || 0)
+      };
+    }
+
+    for (const building of this.currentMap.waterBuildings || []) {
+      if (building.id !== nodeId) continue;
+      return {
+        building,
+        x: building.x || 0,
+        y: building.y || 0
+      };
+    }
+
+    return null;
+  }
+
+  private getBridgeEndpoints(bridge: GameMap['bridges'][number]): { ax: number; ay: number; bx: number; by: number } | null {
+    const nodeA = this.getNodeView(bridge.nodeAId);
+    const nodeB = this.getNodeView(bridge.nodeBId);
+    if (!nodeA || !nodeB) return null;
+
+    return {
+      ax: nodeA.x,
+      ay: nodeA.y,
+      bx: nodeB.x,
+      by: nodeB.y
+    };
+  }
+
+  private getBridgeChainPaths(bridges: GameMap['bridges']) {
+    const bridgeSegments = bridges.filter(bridge => bridge.type === 'bridge');
+    const adjacency = new Map<string, string[]>();
+    const visitedEdges = new Set<string>();
+    const chains: { points: { x: number; y: number }[]; ownerId: string }[] = [];
+
+    const edgeKey = (a: string, b: string) => [a, b].sort().join('::');
+
+    bridgeSegments.forEach(bridge => {
+      const nodeA = this.getNodeView(bridge.nodeAId);
+      const nodeB = this.getNodeView(bridge.nodeBId);
+      if (!nodeA || !nodeB) return;
+
+      adjacency.set(bridge.nodeAId, [...(adjacency.get(bridge.nodeAId) || []), bridge.nodeBId]);
+      adjacency.set(bridge.nodeBId, [...(adjacency.get(bridge.nodeBId) || []), bridge.nodeAId]);
+    });
+
+    const startNodeIds = [
+      ...Array.from(adjacency.entries())
+        .filter(([, neighbors]) => neighbors.length <= 1)
+        .map(([nodeId]) => nodeId),
+      ...Array.from(adjacency.keys())
+    ];
+
+    startNodeIds.forEach(startNodeId => {
+      const startNeighbors = adjacency.get(startNodeId) || [];
+      const hasUnvisitedEdge = startNeighbors.some(neighbor => !visitedEdges.has(edgeKey(startNodeId, neighbor)));
+      if (!hasUnvisitedEdge) return;
+
+      const firstNode = this.getNodeView(startNodeId);
+      if (!firstNode) return;
+
+      const points = [{ x: firstNode.x, y: firstNode.y }];
+      const firstBridge = bridgeSegments.find(bridge =>
+        bridge.nodeAId === startNodeId || bridge.nodeBId === startNodeId
+      );
+      let ownerId = firstBridge?.ownerId || '';
+      let previousNodeId: string | null = null;
+      let currentNodeId: string | null = startNodeId;
+
+      while (currentNodeId) {
+        const activeNodeId = currentNodeId;
+        const neighbors: string[] = (adjacency.get(activeNodeId) || []).filter(neighbor => {
+          if (neighbor === previousNodeId) return false;
+          return !visitedEdges.has(edgeKey(activeNodeId, neighbor));
+        });
+
+        if (neighbors.length === 0) break;
+
+        const nextNodeId: string = neighbors[0];
+        visitedEdges.add(edgeKey(activeNodeId, nextNodeId));
+
+        const bridge = bridgeSegments.find(candidate =>
+          (candidate.nodeAId === activeNodeId && candidate.nodeBId === nextNodeId) ||
+          (candidate.nodeAId === nextNodeId && candidate.nodeBId === activeNodeId)
+        );
+        if (bridge?.ownerId) ownerId = bridge.ownerId;
+
+        const nextNode = this.getNodeView(nextNodeId);
+        if (!nextNode) break;
+        points.push({ x: nextNode.x, y: nextNode.y });
+
+        previousNodeId = activeNodeId;
+        currentNodeId = nextNodeId;
+      }
+
+      if (points.length >= 2) {
+        chains.push({ points, ownerId });
+      }
+    });
+
+    return chains;
+  }
+
+  private isValidBridgeNodeWaterPlacement(x: number, y: number): boolean {
+    if (!this.currentMap) return false;
+
+    const footprint = this.getBuildingFootprintRadius('bridge_node');
+    const onLand = this.isPointOnLand(x, y);
+    if (onLand) return false;
+    if (x < footprint || x > this.currentMap.width - footprint || y < footprint || y > this.currentMap.height - footprint) return false;
+    if (this.isPointInsideHighGround(x, y)) return false;
+
+    const blockedOilSpot = this.currentMap.oilSpots.some(spot =>
+      Math.hypot(spot.x - x, spot.y - y) < spot.radius + 10
+    );
+    if (blockedOilSpot) return false;
+
+    const minSpacing = Math.max(18, footprint * 2);
+    return !(this.currentMap.waterBuildings || []).some(building =>
+      ['bridge_node', 'naval_mine', 'oil_rig'].includes(building.type) &&
+      Math.hypot((building.x || 0) - x, (building.y || 0) - y) < minSpacing
+    );
+  }
+
+  private isPlacementClearOnIsland(island: Island, buildingType: string, absX: number, absY: number): boolean {
+    const footprint = this.getEffectivePlacementFootprintRadius(buildingType);
+    const nonBlocking = this.isNonBlockingBuildingType(buildingType);
+
+    if (
+      absX < footprint ||
+      absX > this.currentMap!.width - footprint ||
+      absY < footprint ||
+      absY > this.currentMap!.height - footprint
+    ) {
+      return false;
+    }
+
+    if (this.currentMap?.highGrounds) {
+      for (const highGround of this.currentMap.highGrounds) {
+        if (
+          absX < highGround.x - highGround.radius - footprint ||
+          absX > highGround.x + highGround.radius + footprint ||
+          absY < highGround.y - highGround.radius - footprint ||
+          absY > highGround.y + highGround.radius + footprint
+        ) {
+          continue;
+        }
+
+        if (this.isPointInPolygon({ x: absX, y: absY }, highGround.points)) {
+          return false;
+        }
+
+        const closest = this.getClosestPointOnPolygon({ x: absX, y: absY }, highGround.points);
+        const highGroundEdgePadding = nonBlocking ? 0 : footprint + 4;
+        if (Math.hypot(absX - closest.x, absY - closest.y) < highGroundEdgePadding) {
+          return false;
+        }
+      }
+    }
+
+    if (buildingType !== 'dock' && buildingType !== 'oil_rig') {
+      const edgePadding = nonBlocking
+        ? 0
+        : this.currentMap?.mapType === 'islands'
+          ? ['air_base', 'barracks', 'tank_factory', 'tower', 'farm', 'oil_well', 'hospital', 'repair_dock'].includes(buildingType)
+            ? Math.max(1, Math.round(footprint * 0.15))
+            : Math.max(1, Math.round(footprint * 0.25))
+          : footprint + 4;
+
+      if (island.points) {
+        if (!this.isPointInPolygon({ x: absX, y: absY }, island.points)) {
+          return false;
+        }
+
+        const closest = this.getClosestPointOnPolygon({ x: absX, y: absY }, island.points);
+        if (Math.hypot(absX - closest.x, absY - closest.y) < edgePadding) {
+          return false;
+        }
+      } else if (Math.hypot(absX - island.x, absY - island.y) > Math.max(0, island.radius - footprint - edgePadding)) {
+        return false;
+      }
+    }
+
+    if (nonBlocking) return true;
+
+    return !island.buildings.some(existing => {
+      if (this.isNonBlockingBuildingType(existing.type)) return false;
+
+      const existingX = island.x + (existing.x || 0);
+      const existingY = island.y + (existing.y || 0);
+      const existingFootprint = this.getEffectivePlacementFootprintRadius(existing.type);
+      const requiredSeparation =
+        footprint +
+        existingFootprint +
+        Math.max(this.getBuildingPlacementPadding(buildingType), this.getBuildingPlacementPadding(existing.type));
+
+      if (requiredSeparation <= 0) return false;
+      return Math.hypot(absX - existingX, absY - existingY) < requiredSeparation;
+    });
+  }
+
+  private evaluatePlacement(type: string, x: number, y: number): PlacementValidation {
+    if (!this.currentMap) {
+      return { valid: false, reason: 'Map data still loading' };
+    }
+
+    if (!socket.id) {
+      return { valid: false, reason: 'Connection not ready' };
+    }
+
+    const player = this.players.get(socket.id);
+    if (!player) {
+      return { valid: false, reason: 'Player data still loading' };
+    }
+
+    if (type === 'base') {
+      return { valid: false, reason: 'HQ only spawns at match start' };
+    }
+
+    if (type !== 'naval_mine' && type !== 'oil_rig' && this.isPointInsideHighGround(x, y)) {
+      return { valid: false, reason: 'Cannot build on high ground' };
+    }
+
+    const cost = this.getBuildingCost(type);
+    if (player.resources.gold < cost.gold || player.resources.oil < cost.oil) {
+      const missingGold = Math.max(0, cost.gold - player.resources.gold);
+      const missingOil = Math.max(0, cost.oil - player.resources.oil);
+      const missingParts = [];
+      if (missingGold > 0) missingParts.push(`${missingGold}g`);
+      if (missingOil > 0) missingParts.push(`${missingOil}o`);
+      return {
+        valid: false,
+        reason: `Insufficient funds${missingParts.length > 0 ? ` (${missingParts.join(', ')})` : ''}`
+      };
+    }
+
+    if (type === 'naval_mine') {
+      if (!this.isValidNavalMinePlacement(x, y)) {
+        return { valid: false, reason: 'Naval mines need open water and spacing' };
+      }
+
+      if (this.getBuildSupportUnitsInRange(type, x, y).length === 0) {
+        return { valid: false, reason: 'Requires nearby construction ship' };
+      }
+
+      return { valid: true, reason: 'Ready to build' };
+    }
+
+    const oilSpot = this.getClosestOilSpot(x, y);
+    if (type === 'oil_rig') {
+      if (!oilSpot || oilSpot.occupiedBy || oilSpot.id.startsWith('hidden_oil_') || oilSpot.id.startsWith('oil_revealed_')) {
+        return { valid: false, reason: 'Oil rigs must be placed on a free water oil spot' };
+      }
+
+      const hasConstructionShip = this.currentUnits.some(unit =>
+        unit.ownerId === socket.id &&
+        unit.type === 'construction_ship' &&
+        Math.hypot(unit.x - oilSpot.x, unit.y - oilSpot.y) < 150
+      );
+      if (!hasConstructionShip) {
+        return { valid: false, reason: 'Requires nearby construction ship' };
+      }
+
+      const tooClose = this.currentMap.oilSpots.some(other =>
+        other.id !== oilSpot.id &&
+        other.occupiedBy &&
+        Math.hypot(other.x - oilSpot.x, other.y - oilSpot.y) < 80
+      );
+      if (tooClose) {
+        return { valid: false, reason: 'Too close to another oil rig' };
+      }
+
+      return { valid: true, reason: 'Ready to build' };
+    }
+
+    const island = type === 'bridge_node'
+      ? this.getPlacementSurfaceIslandCandidates(x, y)[0]
+      : type === 'dock'
+        ? this.getDockPlacementIslandCandidates(x, y)[0]
+        : this.getPlacementIslandCandidates(x, y)[0];
+    if (!island) {
+      if (type === 'bridge_node') {
+        if (!this.isValidBridgeNodeWaterPlacement(x, y)) {
+          return { valid: false, reason: 'Bridge nodes need open water and spacing' };
+        }
+        if (this.getBuildSupportUnitsInRange(type, x, y).length === 0) {
+          return { valid: false, reason: 'Requires nearby builder or construction ship' };
+        }
+        return { valid: true, reason: 'Ready to build' };
+      }
+      if (type === 'dock') {
+        return { valid: false, reason: 'Docks must be placed on a shoreline' };
+      }
+      return { valid: false, reason: 'Must be placed on land' };
+    }
+
+    const isSharedMap = this.currentMap.mapType === 'desert' || this.currentMap.mapType === 'grasslands';
+    const enemyOwnedIsland = !!island.ownerId && island.ownerId !== socket.id;
+    const allowNeutralBridgeNode = !island.ownerId && type === 'bridge_node';
+    const hasForwardBridgeFoothold =
+      !island.ownerId &&
+      island.buildings.some(building => building.ownerId === socket.id && building.type === 'bridge_node');
+    const neutralIslandAllowed = isSharedMap || allowNeutralBridgeNode || hasForwardBridgeFoothold;
+    if (!enemyOwnedIsland && island.ownerId !== socket.id && !neutralIslandAllowed) {
+      return {
+        valid: false,
+        reason: type === 'bridge_node'
+          ? 'Bridge nodes can claim neutral land'
+          : 'Need a bridge foothold on neutral land'
+      };
+    }
+
+    if (type === 'dock') {
+      if (!this.isValidDockPlacement(x, y)) {
+        return { valid: false, reason: 'Docks must be placed on a shoreline' };
+      }
+      if (!this.hasDockWaterSpawnSpace(x, y)) {
+        return { valid: false, reason: 'Dock needs open water for ship launch' };
+      }
+    }
+
+    if (type === 'mine') {
+      const freeSpot = island.goldSpots.find(spot =>
+        !spot.occupiedBy &&
+        Math.hypot(island.x + spot.x - x, island.y + spot.y - y) < 100
+      );
+      if (!freeSpot) {
+        return { valid: false, reason: 'Must be placed on an empty gold deposit' };
+      }
+    }
+
+    if (type === 'oil_well') {
+      if (!oilSpot || oilSpot.occupiedBy || oilSpot.radius < 30) {
+        return { valid: false, reason: 'Must be placed on a visible land oil spot' };
+      }
+    }
+
+    if (type === 'farm' && island.type !== 'forest' && island.type !== 'grasslands') {
+      return { valid: false, reason: 'Farms need forest or grasslands terrain' };
+    }
+
+    if (!this.isPlacementClearOnIsland(island, type, x, y)) {
+      return { valid: false, reason: 'Cannot place here' };
+    }
+
+    if (this.getBuildSupportUnitsInRange(type, x, y).length === 0) {
+      return {
+        valid: false,
+        reason: `Requires nearby ${this.getPlacementSupportLabel(type)}`
+      };
+    }
+
+    return { valid: true, reason: 'Ready to build' };
+  }
+
+  private updatePlacementPreview(x: number, y: number) {
+    if (!this.placementGhost || !this.placementType) return;
+
+    this.placementGhost.setPosition(x, y);
+    const validation = this.evaluatePlacement(this.placementType, x, y);
+    const deferToServer = this.shouldDeferPlacementValidationToServer(this.placementType, validation);
+
+    this.placementGhost.list.forEach((child: any) => {
+      if (child.setTint && child.clearTint) {
+        if (validation.valid) {
+          child.clearTint();
+        } else if (deferToServer) {
+          child.setTint(0xffc857);
+        } else {
+          child.setTint(0xff4d4d);
+        }
+      }
+    });
+
+    if (!this.placementStatusText) {
+      this.placementStatusText = this.add.text(x, y - 54, '', {
+        fontSize: '13px',
+        fontFamily: 'monospace',
+        color: '#7cffb2',
+        backgroundColor: 'rgba(0,0,0,0.72)',
+        padding: { left: 8, right: 8, top: 4, bottom: 4 }
+      });
+      this.placementStatusText.setOrigin(0.5, 1);
+      this.placementStatusText.setDepth(210);
+      this.placementStatusText.setStroke('#061015', 3);
+    }
+
+    this.placementStatusText.setPosition(x, y - 54);
+    this.placementStatusText.setText(
+      validation.valid
+        ? validation.reason
+        : deferToServer
+          ? `Server will verify: ${validation.reason}`
+          : `Invalid: ${validation.reason}`
+    );
+    this.placementStatusText.setColor(
+      validation.valid ? '#7cffb2' : deferToServer ? '#ffd27d' : '#ff7d7d'
+    );
+  }
+
+  private shouldDeferPlacementValidationToServer(type: string, validation: PlacementValidation): boolean {
+    if (validation.valid) return false;
+    if (!SERVER_AUTHORITY_PLACEMENT_TYPES.has(type)) return false;
+    if (CLIENT_DEFINITE_PLACEMENT_FAILURE_REASONS.has(validation.reason)) return false;
+    if (validation.reason.startsWith('Insufficient funds')) return false;
+    if (validation.reason.startsWith('Requires nearby')) return false;
+    return validation.reason === 'Cannot place here' ||
+      validation.reason === 'Bridge nodes need open water and spacing' ||
+      validation.reason === 'Naval mines need open water and spacing';
+  }
+
+  private tryPlaceCurrentBuilding(screenX: number, screenY: number, keepPlacementMode = false): boolean {
+    if (!this.placementMode || !this.placementGhost) return false;
+
+    const worldPoint = this.cameras.main.getWorldPoint(screenX, screenY);
+    const validation = this.placementType
+      ? this.evaluatePlacement(this.placementType, worldPoint.x, worldPoint.y)
+      : { valid: false, reason: 'Invalid placement' };
+    const deferToServer = this.placementType
+      ? this.shouldDeferPlacementValidationToServer(this.placementType, validation)
+      : false;
+
+    if (!validation.valid && !deferToServer) {
+      this.updatePlacementPreview(worldPoint.x, worldPoint.y);
+      return true;
+    }
+
+    socket.emit('build', {
+      x: worldPoint.x,
+      y: worldPoint.y,
+      type: this.placementType
+    });
+
+    if (!keepPlacementMode) {
+      this.clearPlacementMode();
+    }
+
+    return true;
+  }
+
+  private getMapStateSignature(mapData: GameMap) {
+    const buildingState = mapData.islands
+      .flatMap(island =>
+        island.buildings.map(building => {
+          const queue = building.recruitmentQueue?.[0];
+          const queueState = queue
+            ? `${queue.unitType}:${Math.round(queue.progress)}:${Math.round(queue.totalTime)}:${building.recruitmentQueue?.length || 0}`
+            : 'none';
+          return [
+            island.id,
+            building.id,
+            building.type,
+            building.ownerId ?? island.ownerId ?? '',
+            Math.round(building.health),
+            Math.round(building.maxHealth),
+            building.isConstructing ? 1 : 0,
+            Math.round(building.constructionProgress ?? 0),
+            building.hasTesla ? 1 : 0,
+            queueState
+          ].join(':');
+        })
+      )
+      .join('|');
+
+    const oilState = mapData.oilSpots
+      .map(spot => `${spot.id}:${spot.occupiedBy ?? ''}:${(spot as any).ownerId ?? ''}`)
+      .join('|');
+
+    const waterBuildingState = (mapData.waterBuildings || [])
+      .map(building => [
+        building.id,
+        building.type,
+        building.ownerId ?? '',
+        Math.round(building.x ?? 0),
+        Math.round(building.y ?? 0),
+        Math.round(building.health),
+        Math.round(building.maxHealth),
+        building.isConstructing ? 1 : 0,
+        Math.round(building.constructionProgress ?? 0)
+      ].join(':'))
+      .join('|');
+
+    return `${buildingState}#${oilState}#${waterBuildingState}`;
+  }
+
+  private getSpatialSoundLocation(x: number, y: number) {
+    const zoom = this.cameras.main.zoom || 1;
+    return {
+      x,
+      y,
+      listenerX: this.cameras.main.scrollX + this.cameras.main.width / (2 * zoom),
+      listenerY: this.cameras.main.scrollY + this.cameras.main.height / (2 * zoom),
+      viewportWidth: this.cameras.main.width,
+      viewportHeight: this.cameras.main.height,
+      zoom
+    };
+  }
+
+  private collectBuildingAudioSnapshots(mapData: GameMap) {
+    const next = new Map<string, BuildingAudioSnapshot>();
+
+    mapData.islands.forEach(island => {
+      island.buildings.forEach(building => {
+        next.set(building.id, {
+          id: building.id,
+          type: building.type,
+          ownerId: building.ownerId ?? island.ownerId ?? null,
+          x: island.x + (building.x ?? 0),
+          y: island.y + (building.y ?? 0)
+        });
+      });
+    });
+
+    mapData.oilSpots.forEach(spot => {
+      const oilBuilding = (spot as { building?: Building; ownerId?: string | null }).building;
+      if (!spot.occupiedBy || !oilBuilding) {
+        return;
+      }
+
+      next.set(oilBuilding.id, {
+        id: oilBuilding.id,
+        type: oilBuilding.type,
+        ownerId: oilBuilding.ownerId ?? (spot as { ownerId?: string | null }).ownerId ?? null,
+        x: spot.x,
+        y: spot.y
+      });
+    });
+
+    (mapData.waterBuildings || []).forEach(building => {
+      next.set(building.id, {
+        id: building.id,
+        type: building.type,
+        ownerId: building.ownerId ?? null,
+        x: building.x ?? 0,
+        y: building.y ?? 0
+      });
+    });
+
+    return next;
+  }
+
+  private syncBuildingPlacementAudio(mapData: GameMap) {
+    const nextSnapshot = this.collectBuildingAudioSnapshots(mapData);
+
+    if (!this.buildingAudioPrimed) {
+      this.knownBuildingAudioState = nextSnapshot;
+      this.buildingAudioPrimed = true;
+      return;
+    }
+
+    nextSnapshot.forEach(snapshot => {
+      if (this.knownBuildingAudioState.has(snapshot.id)) {
+        return;
+      }
+
+      const ownership = snapshot.ownerId === socket.id
+        ? 'self'
+        : snapshot.ownerId
+          ? 'enemy'
+          : 'neutral';
+
+      soundEffectsManager.playBuildingPlacement(
+        snapshot.type,
+        ownership,
+        this.getSpatialSoundLocation(snapshot.x, snapshot.y)
+      );
+    });
+
+    this.knownBuildingAudioState = nextSnapshot;
+  }
+
+  private resolveCombatSoundSource(data: {
+    attackerId?: string;
+    type: string;
+  }) {
+    if (data.type === 'tesla') {
+      return 'tesla' as const;
+    }
+
+    if (data.attackerId) {
+      const attacker = this.currentUnits.find(unit => unit.id === data.attackerId);
+      if (attacker) {
+        return attacker.type;
+      }
+    }
+
+    if (data.type === 'rocket_missile') {
+      return 'aircraft_carrier' as const;
+    }
+
+    if (data.type === 'rocketeer_rocket') {
+      return 'rocketeer' as const;
+    }
+
+    if (data.type === 'cannon_ball') {
+      return 'pirate_ship' as const;
+    }
+
+    if (data.type === 'bullet') {
+      return 'tower' as const;
+    }
+
+    return 'unknown' as const;
+  }
+
+  private handleProjectileEvent(data: {
+    attackerId?: string;
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+    type: string;
+    speed: number;
+    radius?: number;
+  }, playSound = true) {
+    if (data.type === 'naval_mine_blast') {
+      this.renderNavalMineBlast(data.x2, data.y2, data.radius ?? 180);
+      return;
+    }
+
+    this.registerAttackFacing(
+      data.attackerId,
+      data.x1,
+      data.y1,
+      data.x2,
+      data.y2,
+      data.type === 'rocket_missile'
+        ? 420
+        : data.type === 'rocketeer_rocket'
+          ? 320
+          : data.type === 'cannon_ball'
+            ? 320
+            : 220
+    );
+
+    if (playSound) {
+      soundEffectsManager.playUnitFire(
+        this.resolveCombatSoundSource(data),
+        this.getSpatialSoundLocation(data.x1, data.y1)
+      );
+    }
+
+    if (data.type === 'tesla') {
+      const graphics = this.add.graphics();
+      graphics.lineStyle(2, 0x00FFFF);
+      graphics.setDepth(100);
+
+      const points = [];
+      const segments = 8;
+      const dx = data.x2 - data.x1;
+      const dy = data.y2 - data.y1;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const normalX = -dy / dist;
+      const normalY = dx / dist;
+
+      points.push({ x: data.x1, y: data.y1 });
+      for (let i = 1; i < segments; i++) {
+        const t = i / segments;
+        const px = data.x1 + dx * t;
+        const py = data.y1 + dy * t;
+        const offset = (Math.random() - 0.5) * 20;
+        points.push({
+          x: px + normalX * offset,
+          y: py + normalY * offset
+        });
+      }
+      points.push({ x: data.x2, y: data.y2 });
+
+      graphics.strokePoints(points);
+
+      this.tweens.add({
+        targets: graphics,
+        alpha: 0,
+        duration: 150,
+        onComplete: () => graphics.destroy()
+      });
+
+      return;
+    }
+
+    if (data.type === 'rocket_missile' || data.type === 'rocketeer_rocket') {
+      const isRocketeerRocket = data.type === 'rocketeer_rocket';
+      const rocket = this.add.rectangle(
+        data.x1,
+        data.y1,
+        isRocketeerRocket ? 12 : 16,
+        isRocketeerRocket ? 4 : 6,
+        isRocketeerRocket ? 0x60707c : 0x444444
+      );
+      rocket.setStrokeStyle(1, 0x000000);
+      rocket.setDepth(100);
+
+      const angle = Math.atan2(data.y2 - data.y1, data.x2 - data.x1);
+      rocket.rotation = angle;
+
+      const dist = Math.hypot(data.x2 - data.x1, data.y2 - data.y1);
+      const duration = (dist / data.speed) * 1000;
+
+      this.tweens.add({
+        targets: rocket,
+        x: data.x2,
+        y: data.y2,
+        duration,
+        onComplete: () => {
+          const explosion = this.add.circle(data.x2, data.y2, isRocketeerRocket ? 14 : 20, 0xFF4500);
+          explosion.setDepth(101);
+
+          this.tweens.add({
+            targets: explosion,
+            scale: isRocketeerRocket ? 3.2 : 6,
+            alpha: 0,
+            duration: isRocketeerRocket ? 260 : 500,
+            onComplete: () => explosion.destroy()
+          });
+
+          const ring = this.add.circle(data.x2, data.y2, isRocketeerRocket ? 12 : 20, 0xFFFFFF);
+          ring.setStrokeStyle(4, 0xFFFF00);
+          ring.setFillStyle(0xFFFFFF, 0);
+          ring.setDepth(101);
+
+          this.tweens.add({
+            targets: ring,
+            scale: isRocketeerRocket ? 2.8 : 5,
+            alpha: 0,
+            duration: isRocketeerRocket ? 220 : 300,
+            onComplete: () => ring.destroy()
+          });
+
+          if (isRocketeerRocket) {
+            for (let i = 0; i < 4; i++) {
+              const spark = this.add.circle(data.x2, data.y2, 2, 0xffd27a);
+              spark.setDepth(101);
+              const sparkAngle = (Math.PI * 2 * i) / 4 + Math.random() * 0.4;
+              this.tweens.add({
+                targets: spark,
+                x: data.x2 + Math.cos(sparkAngle) * Phaser.Math.Between(12, 24),
+                y: data.y2 + Math.sin(sparkAngle) * Phaser.Math.Between(12, 24),
+                alpha: 0,
+                scale: 0.2,
+                duration: 180,
+                onComplete: () => spark.destroy()
+              });
+            }
+          }
+
+          rocket.destroy();
+        }
+      });
+
+      return;
+    }
+
+    if (data.type === 'cannon_ball') {
+      const cannonBall = this.add.circle(data.x1, data.y1, 4, 0x1f2730);
+      cannonBall.setStrokeStyle(1, 0x0a1016);
+      cannonBall.setDepth(100);
+
+      const dist = Math.hypot(data.x2 - data.x1, data.y2 - data.y1);
+      const duration = (dist / data.speed) * 1000;
+      const arcHeight = Math.min(85, Math.max(24, dist * 0.22));
+      const arc = new Phaser.Curves.QuadraticBezier(
+        new Phaser.Math.Vector2(data.x1, data.y1),
+        new Phaser.Math.Vector2((data.x1 + data.x2) / 2, (data.y1 + data.y2) / 2 - arcHeight),
+        new Phaser.Math.Vector2(data.x2, data.y2)
+      );
+      const arcState = { t: 0 };
+
+      this.tweens.add({
+        targets: arcState,
+        t: 1,
+        duration,
+        onUpdate: () => {
+          const point = arc.getPoint(arcState.t);
+          cannonBall.setPosition(point.x, point.y);
+        },
+        onComplete: () => {
+          const splash = this.add.circle(data.x2, data.y2, 9, 0xd7dde4, 0.8);
+          splash.setDepth(101);
+          splash.setStrokeStyle(2, 0xf2f7ff);
+          this.tweens.add({
+            targets: splash,
+            scale: 2.2,
+            alpha: 0,
+            duration: 220,
+            onComplete: () => splash.destroy()
+          });
+
+          const smoke = this.add.circle(data.x2, data.y2, 6, 0x353e46, 0.7);
+          smoke.setDepth(101);
+          this.tweens.add({
+            targets: smoke,
+            y: data.y2 - 8,
+            scale: 1.8,
+            alpha: 0,
+            duration: 260,
+            onComplete: () => smoke.destroy()
+          });
+
+          cannonBall.destroy();
+        }
+      });
+
+      return;
+    }
+
+    const bullet = this.add.circle(data.x1, data.y1, 3, 0xFFFF00);
+    bullet.setStrokeStyle(1, 0xFFAA00);
+    bullet.setDepth(100);
+
+    const dist = Math.hypot(data.x2 - data.x1, data.y2 - data.y1);
+    const duration = (dist / data.speed) * 1000;
+
+    this.tweens.add({
+      targets: bullet,
+      x: data.x2,
+      y: data.y2,
+      duration,
+      onComplete: () => {
+        const impact = this.add.circle(data.x2, data.y2, 5, 0xFFAA00);
+        this.tweens.add({
+          targets: impact,
+          scale: 0,
+          alpha: 0,
+          duration: 100,
+          onComplete: () => impact.destroy()
+        });
+        bullet.destroy();
+      }
+    });
   }
 
   preload() {
@@ -215,10 +1471,7 @@ export class MainScene extends Phaser.Scene {
 
         // Disable Placement
         if (this.placementMode) {
-            this.placementMode = false;
-            if (this.placementGhost) this.placementGhost.destroy();
-            this.placementGhost = null;
-            this.placementType = null;
+            this.clearPlacementMode();
         }
 
         // Disable Selection Box
@@ -362,10 +1615,7 @@ export class MainScene extends Phaser.Scene {
             });
         } else if (key === binds.cancel) {
             if (this.placementMode) {
-                this.placementMode = false;
-                if (this.placementGhost) this.placementGhost.destroy();
-                this.placementGhost = null;
-                this.placementType = null;
+                this.clearPlacementMode();
             }
             if (this.targetSelectionMode) {
                 this.targetSelectionMode = false;
@@ -390,14 +1640,20 @@ export class MainScene extends Phaser.Scene {
     const handleGameStartCleanup = () => {
         console.log('[MainScene] Clearing Game State for New Game');
         this.currentUnits = [];
+        this.clearPlacementMode();
         this.unitContainers.clear();
         this.unitUpdates.clear();
+        this.attackFacingOverrides.clear();
         this.unitsGroup.clear(true, true);
         this.selectedUnitIds.clear();
         this.selectedBuildingIds.clear();
         this.selectedNodeIds.clear();
         this.cameraInitialized = false; // Reset camera so it centers on new base
         this.currentMapVersion = null; // Force map re-render
+        this.currentMapStateSignature = null;
+        this.knownBuildingAudioState.clear();
+        this.buildingAudioPrimed = false;
+        this.goldSparkles = [];
         window.dispatchEvent(new CustomEvent('unit-selection-changed', { detail: { unitIds: [] } }));
         window.dispatchEvent(new CustomEvent('building-selection-changed', { detail: { buildingIds: [] } }));
         window.dispatchEvent(new CustomEvent('node-selection-changed', { detail: { nodes: [] } }));
@@ -413,20 +1669,38 @@ export class MainScene extends Phaser.Scene {
     socket.on('playersData', (players: Player[]) => {
       this.players.clear();
       players.forEach(p => this.players.set(p.id, p));
+      if (this.placementMode) {
+          const pointer = this.input.activePointer;
+          const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+          this.updatePlacementPreview(worldPoint.x, worldPoint.y);
+      }
     });
 
             socket.on('mapData', (mapData: GameMap) => {
-            // Version check to skip unnecessary re-renders
+            const mapStateSignature = this.getMapStateSignature(mapData);
             const mapVersion = mapData.version;
-            if (mapVersion && mapVersion === this.currentMapVersion) {
-                // console.log('[MainScene] Map version match, skipping rebuild.');
+            if (
+                mapVersion &&
+                mapVersion === this.currentMapVersion &&
+                mapStateSignature === this.currentMapStateSignature
+            ) {
                 return;
             }
             
+            if (!this.isMenuMode) {
+                this.syncBuildingPlacementAudio(mapData);
+            }
+
             this.currentMapVersion = mapVersion || null;
+            this.currentMapStateSignature = mapStateSignature;
             this.currentMap = mapData;
             if (this.isMenuMode) return;
             this.renderMap(mapData);
+            if (this.placementMode) {
+                const pointer = this.input.activePointer;
+                const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+                this.updatePlacementPreview(worldPoint.x, worldPoint.y);
+            }
 
             if (!this.cameraInitialized) {
                 if (this.centerCameraOnBase()) {
@@ -438,7 +1712,7 @@ export class MainScene extends Phaser.Scene {
                 if (this.isMenuMode) return;
                 if (!socket.id) return;
                 const me = this.players.get(socket.id);
-                if (me && (me as any).canBuildHQ === false) return;
+                if (me && ((me as any).canBuildHQ === false || me.status === 'eliminated' || (me as any).hqSpawnedOnce)) return;
 
                 const bases = this.currentMap?.islands.flatMap(i => i.buildings.filter(b => b.type === 'base'));
                 console.log(`[SpawnSanity] Checking for HQ. SocketID: ${socket.id}. Total Bases: ${bases?.length}`);
@@ -483,8 +1757,7 @@ export class MainScene extends Phaser.Scene {
       if (!this.isMenuMode) {
           const oldUnitIds = new Set(this.currentUnits.map(u => u.id));
           const newUnitIds = new Set(units.map(u => u.id));
-          const settings = settingsManager.getSettings();
-          const volume = settings.audio.masterVolume * settings.audio.sfxVolume;
+          const recruitVolume = soundEffectsManager.getEffectVolume('recruit', 0.4);
 
           // Check for Deaths (in old but not in new)
           this.currentUnits.forEach(u => {
@@ -500,9 +1773,9 @@ export class MainScene extends Phaser.Scene {
           units.forEach(u => {
               if (!oldUnitIds.has(u.id)) {
                   // New unit spawned
-                  if (u.ownerId === socket.id && volume > 0) {
+                  if (u.ownerId === socket.id && recruitVolume > 0) {
                       try {
-                          this.sound.play('recruit', { volume: volume * 0.4 });
+                          this.sound.play('recruit', { volume: recruitVolume });
                       } catch (e) {}
                   }
               }
@@ -527,137 +1800,17 @@ export class MainScene extends Phaser.Scene {
       this.renderUnits(units);
     });
 
+    socket.on('projectile', (data: { attackerId?: string, x1: number, y1: number, x2: number, y2: number, type: string, speed: number, radius?: number }) => {
+        this.handleProjectileEvent(data);
+    });
 
-
-    socket.on('projectile', (data: { x1: number, y1: number, x2: number, y2: number, type: string, speed: number }) => {
-        // Play Shoot Sound
-        const settings = settingsManager.getSettings();
-        const volume = settings.audio.masterVolume * settings.audio.sfxVolume;
-        if (volume > 0) {
-            try {
-                this.sound.play('shoot', { 
-                    volume: volume * 0.2, 
-                    detune: Phaser.Math.Between(-200, 200)
-                });
-            } catch (e) {}
-        }
-
-        if (data.type === 'tesla') {
-            // Tesla Lightning Effect
-            const graphics = this.add.graphics();
-            graphics.lineStyle(2, 0x00FFFF);
-            graphics.setDepth(100);
-            
-            const points = [];
-            const segments = 8;
-            const dx = data.x2 - data.x1;
-            const dy = data.y2 - data.y1;
-            const dist = Math.sqrt(dx * dx + dy * dy);
-            const normalX = -dy / dist;
-            const normalY = dx / dist;
-
-            points.push({ x: data.x1, y: data.y1 });
-            for(let i=1; i<segments; i++) {
-                const t = i / segments;
-                const px = data.x1 + dx * t;
-                const py = data.y1 + dy * t;
-                const offset = (Math.random() - 0.5) * 20;
-                points.push({ 
-                    x: px + normalX * offset, 
-                    y: py + normalY * offset 
-                });
-            }
-            points.push({ x: data.x2, y: data.y2 });
-
-            graphics.strokePoints(points);
-
-            // Flash effect
-            this.tweens.add({
-                targets: graphics,
-                alpha: 0,
-                duration: 150,
-                onComplete: () => graphics.destroy()
-            });
-
-        } else if (data.type === 'rocket_missile') {
-            // Rocket Missile Visuals
-            const rocket = this.add.rectangle(data.x1, data.y1, 16, 6, 0x444444);
-            rocket.setStrokeStyle(1, 0x000000);
-            rocket.setDepth(100);
-            
-            const angle = Math.atan2(data.y2 - data.y1, data.x2 - data.x1);
-            rocket.rotation = angle;
-
-            const dist = Math.hypot(data.x2 - data.x1, data.y2 - data.y1);
-            const duration = (dist / data.speed) * 1000;
-            
-            this.tweens.add({
-                targets: rocket,
-                x: data.x2,
-                y: data.y2,
-                duration: duration,
-                onComplete: () => {
-                    // Explosion Effect
-                    const explosion = this.add.circle(data.x2, data.y2, 20, 0xFF4500); // Orange Red
-                    explosion.setDepth(101);
-                    
-                    this.tweens.add({
-                        targets: explosion,
-                        scale: 6, // Expands to ~120px radius
-                        alpha: 0,
-                        duration: 500,
-                        onComplete: () => explosion.destroy()
-                    });
-
-                    // Shockwave ring
-                    const ring = this.add.circle(data.x2, data.y2, 20, 0xFFFFFF);
-                    ring.setStrokeStyle(4, 0xFFFF00);
-                    ring.setFillStyle(0xFFFFFF, 0); // Transparent fill
-                    ring.setDepth(101);
-                    
-                    this.tweens.add({
-                        targets: ring,
-                        scale: 5,
-                        alpha: 0,
-                        duration: 300,
-                        onComplete: () => ring.destroy()
-                    });
-
-                    rocket.destroy();
-                }
-            });
-
-        } else {
-            // Standard Bullet
-            const bullet = this.add.circle(data.x1, data.y1, 3, 0xFFFF00);
-            bullet.setStrokeStyle(1, 0xFFAA00);
-            bullet.setDepth(100);
-            
-            const dist = Math.hypot(data.x2 - data.x1, data.y2 - data.y1);
-            const duration = (dist / data.speed) * 1000;
-            
-            this.tweens.add({
-                targets: bullet,
-                x: data.x2,
-                y: data.y2,
-                duration: duration,
-                onComplete: () => {
-                    // Small impact effect
-                    const impact = this.add.circle(data.x2, data.y2, 5, 0xFFAA00);
-                    this.tweens.add({
-                        targets: impact,
-                        scale: 0,
-                        alpha: 0,
-                        duration: 100,
-                        onComplete: () => impact.destroy()
-                    });
-                    bullet.destroy();
-                }
-            });
-        }
+    socket.on('projectilesBatch', (projectiles: { attackerId?: string, x1: number, y1: number, x2: number, y2: number, type: string, speed: number, radius?: number }[]) => {
+        projectiles.forEach(projectile => this.handleProjectileEvent(projectile));
     });
 
     socket.on('laserBeam', (data: { attackerId: string, targetId: string, x1: number, y1: number, x2: number, y2: number, duration: number, color: number }) => {
+        this.registerAttackFacing(data.attackerId, data.x1, data.y1, data.x2, data.y2, data.duration);
+        soundEffectsManager.playUnitFire('mothership', this.getSpatialSoundLocation(data.x1, data.y1));
         const beam = this.add.graphics();
         beam.setDepth(9999);
         
@@ -811,9 +1964,9 @@ export class MainScene extends Phaser.Scene {
 
     // Placement Event
     window.addEventListener('enter-placement-mode', (e: any) => {
+        this.clearPlacementMode();
         this.placementMode = true;
         this.placementType = e.detail.type;
-        if (this.placementGhost) this.placementGhost.destroy();
         this.placementGhost = this.drawDetailedBuilding(0, 0, this.placementType!, 0xAAFFAA);
         this.placementGhost.setAlpha(0.6);
         this.placementGhost.setDepth(200);
@@ -830,6 +1983,10 @@ export class MainScene extends Phaser.Scene {
             hitbox.setStrokeStyle(2, 0x00FF00, 0.8);
             this.placementGhost.add(hitbox);
         }
+
+        const pointer = this.input.activePointer;
+        const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+        this.updatePlacementPreview(worldPoint.x, worldPoint.y);
     });
 
     // Ferry Events
@@ -894,24 +2051,7 @@ export class MainScene extends Phaser.Scene {
         const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
         
         if (this.placementMode && this.placementGhost) {
-            this.placementGhost.setPosition(worldPoint.x, worldPoint.y);
-
-            // Validation Visuals
-            let isValid = true;
-            if (this.placementType === 'dock') {
-                isValid = this.isValidDockPlacement(worldPoint.x, worldPoint.y);
-            }
-            
-            // Tint children based on validity
-            this.placementGhost.list.forEach((child: any) => {
-                if (child.setTint && child.clearTint) {
-                     if (isValid) {
-                         child.clearTint();
-                     } else {
-                         child.setTint(0xff0000);
-                     }
-                }
-            });
+            this.updatePlacementPreview(worldPoint.x, worldPoint.y);
         }
 
         if (this.isSelecting) {
@@ -939,24 +2079,9 @@ export class MainScene extends Phaser.Scene {
 
         if (this.placementMode && this.placementGhost) {
             if (pointer.leftButtonDown()) {
-                const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
-                socket.emit('build', { 
-                    x: worldPoint.x, 
-                    y: worldPoint.y, 
-                    type: this.placementType 
-                });
-                
-                if (!pointer.event.shiftKey) {
-                    this.placementMode = false;
-                    this.placementGhost.destroy();
-                    this.placementGhost = null;
-                    this.placementType = null;
-                }
+                this.tryPlaceCurrentBuilding(pointer.x, pointer.y, !!pointer.event?.shiftKey);
             } else if (pointer.rightButtonDown()) {
-                this.placementMode = false;
-                if (this.placementGhost) this.placementGhost.destroy();
-                this.placementGhost = null;
-                this.placementType = null;
+                this.clearPlacementMode();
             }
             return;
         }
@@ -1090,6 +2215,19 @@ export class MainScene extends Phaser.Scene {
                                 }
                             });
                         });
+
+                        (this.currentMap.waterBuildings || []).forEach(b => {
+                            if (b.ownerId !== socket.id) return;
+                            const bx = b.x || 0;
+                            const by = b.y || 0;
+                            const bRect = new Phaser.Geom.Rectangle(bx - 12, by - 12, 24, 24);
+                            if (!Phaser.Geom.Intersects.RectangleToRectangle(selectionRect, bRect)) return;
+                            if (b.type === 'bridge_node' || b.type === 'wall_node') {
+                                this.selectedNodeIds.add(b.id);
+                            } else {
+                                this.selectedBuildingIds.add(b.id);
+                            }
+                        });
                         
                         window.dispatchEvent(new CustomEvent('building-selection-changed', { 
                             detail: { buildingIds: Array.from(this.selectedBuildingIds) } 
@@ -1122,6 +2260,9 @@ export class MainScene extends Phaser.Scene {
 
         const newZoom = this.cameras.main.zoom - deltaY * 0.001;
         this.cameras.main.setZoom(Phaser.Math.Clamp(newZoom, minZoom, 2));
+        if (this.currentUnits.length > 0 && this.syncUnitDetailMode(this.currentUnits)) {
+            this.renderUnits(this.currentUnits);
+        }
     });
 
     // Steering Update Loop (20Hz)
@@ -1170,7 +2311,6 @@ export class MainScene extends Phaser.Scene {
             }
 
             if (inRange) {
-                console.log(`[MainScene] Hidden Spot REVEALED: ${spot.id} at (${spot.x}, ${spot.y})`);
                 currentlyVisible.add(spot.id);
             }
         });
@@ -1411,16 +2551,6 @@ export class MainScene extends Phaser.Scene {
       this.updateOilScanner();
       this.renderRangeRings();
 
-      // Pulse Animations (moved from update to ensure they run)
-      this.oilAnimations.forEach(anim => {
-          anim.timer += delta;
-          const scale = 1 + Math.sin(anim.timer * 0.005) * 0.2;
-          anim.pulse.setScale(scale);
-          anim.pulse.setAlpha(0.5 - Math.sin(anim.timer * 0.005) * 0.2);
-      });
-
-
-
     // Unit Interpolation
       const renderTime = Date.now() - 100; // 100ms interpolation delay
       
@@ -1546,6 +2676,12 @@ export class MainScene extends Phaser.Scene {
           }
       });
 
+      this.currentUnits.forEach(unit => {
+          const container = this.unitContainers.get(unit.id);
+          if (!container) return;
+          this.rotateUnitArt(container, this.getDesiredFacingAngle(unit), dtSec);
+      });
+
       // Tumbleweeds
       this.tumbleweeds.forEach(t => {
           t.sprite.x += t.dx * dt;
@@ -1646,6 +2782,12 @@ export class MainScene extends Phaser.Scene {
           }
       });
 
+      this.goldSparkles.forEach(sparkle => {
+          sparkle.timer += delta * sparkle.speed;
+          sparkle.sprite.setAlpha(0.35 + Math.sin(sparkle.timer * 0.004) * 0.35);
+          sparkle.sprite.setScale(0.7 + Math.sin(sparkle.timer * 0.005) * 0.18);
+      });
+
       // Camera Movement
       // Spectators get faster movement
       const baseSpeed = this.isSpectating ? 40 : 20;
@@ -1719,9 +2861,7 @@ export class MainScene extends Phaser.Scene {
       this.lastCommandTime = now;
 
         // Play Move Sound
-        const settings = settingsManager.getSettings();
-        const volume = settings.audio.masterVolume * settings.audio.sfxVolume;
-        if (volume > 0 && this.selectedUnitIds.size > 0) {
+        if (this.selectedUnitIds.size > 0) {
             // Determine dominant unit type in selection
             let landCount = 0;
             let waterCount = 0;
@@ -1730,7 +2870,7 @@ export class MainScene extends Phaser.Scene {
             this.currentUnits.forEach(u => {
                 if (this.selectedUnitIds.has(u.id)) {
                     const type = u.type;
-                    if (['ship', 'destroyer', 'carrier', 'construction_ship', 'oil_tanker'].includes(type)) {
+                    if (['ship', 'destroyer', 'pirate_ship', 'carrier', 'construction_ship', 'ferry', 'oil_tanker'].includes(type)) {
                         waterCount++;
                     } else if (['light_plane', 'heavy_plane', 'aircraft_carrier', 'mothership'].includes(type)) {
                         airCount++;
@@ -1741,12 +2881,19 @@ export class MainScene extends Phaser.Scene {
             });
 
             let soundKey = 'move_land';
+            let effectId: 'moveLand' | 'moveWater' | 'moveAir' = 'moveLand';
             if (waterCount > landCount && waterCount > airCount) soundKey = 'move_water';
             if (airCount > landCount && airCount > waterCount) soundKey = 'move_air';
+            if (soundKey === 'move_water') effectId = 'moveWater';
+            if (soundKey === 'move_air') effectId = 'moveAir';
 
-            try {
-                this.sound.play(soundKey, { volume: volume * 0.4 });
-            } catch (e) {}
+            const volume = soundEffectsManager.getEffectVolume(effectId, 0.4);
+
+            if (volume > 0) {
+                try {
+                    this.sound.play(soundKey, { volume });
+                } catch (e) {}
+            }
         }
 
         console.log('Issuing move command to:', x, y);
@@ -1756,12 +2903,13 @@ export class MainScene extends Phaser.Scene {
             const unit = this.currentUnits.find(u => u.id === id);
             if (unit) {
                 const intentId = `intent_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+                const adjustedTarget = this.getAdjustedTarget(unit.type, x, y);
                 
                 // Client-Side Prediction: Start moving immediately
                 // Optimistic direct line (Navmesh will be handled by server/steering)
                 this.predictedMoves.set(id, {
-                    targetX: x,
-                    targetY: y,
+                    targetX: adjustedTarget.x,
+                    targetY: adjustedTarget.y,
                     speed: unit.speed || 150, // Default speed if missing
                     type: unit.type,
                     intentId: intentId
@@ -1771,8 +2919,8 @@ export class MainScene extends Phaser.Scene {
                 socket.emit('moveIntent', {
                     unitId: id,
                     intentId: intentId,
-                    destX: x,
-                    destY: y,
+                    destX: adjustedTarget.x,
+                    destY: adjustedTarget.y,
                     clientTime: Date.now()
                 });
             }
@@ -1822,6 +2970,14 @@ export class MainScene extends Phaser.Scene {
         // Air units ignore terrain constraints
         const isAirUnit = ['mothership', 'light_plane', 'heavy_plane', 'alien_scout', 'heavy_alien'].includes(unitType);
         if (isAirUnit) return { x: targetX, y: targetY };
+
+        const highGround = this.getHighGroundAtPoint(targetX, targetY);
+        if (highGround) {
+            const closest = this.getClosestPointOnPolygon({ x: targetX, y: targetY }, highGround.points);
+            const angle = Math.atan2(closest.y - highGround.y, closest.x - highGround.x);
+            targetX = closest.x + Math.cos(angle) * 10;
+            targetY = closest.y + Math.sin(angle) * 10;
+        }
 
         // Land units (cannot move on water)
         const isLandUnit = ['soldier', 'sniper', 'rocketeer', 'builder', 'tank', 'humvee', 'oil_seeker', 'missile_launcher'].includes(unitType);
@@ -1919,30 +3075,26 @@ export class MainScene extends Phaser.Scene {
 
     private isValidDockPlacement(x: number, y: number): boolean {
         if (!this.currentMap) return false;
-        
-        // Find closest island
-        let closestIsland: Island | null = null;
-        let minDist = Infinity;
-        
-        for (const island of this.currentMap.islands) {
-            const dist = Math.hypot(x - island.x, y - island.y);
-            // Quick bounding box check
-            if (dist < island.radius + 100) { 
-                if (dist < minDist) {
-                    minDist = dist;
-                    closestIsland = island;
-                }
+
+        return this.currentMap.islands.some(island => this.isPointOnExposedIslandShoreline(island, x, y));
+    }
+
+    private isValidNavalMinePlacement(x: number, y: number): boolean {
+        if (!this.currentMap) return false;
+
+        const onLand = this.currentMap.islands.some(island => {
+            if (island.points) {
+                return this.isPointInPolygon({ x, y }, island.points);
             }
-        }
-        
-        if (!closestIsland || !closestIsland.points) return false;
-        
-        // Check distance to polygon edge
-        // Points in Island are absolute
-        const closestPoint = this.getClosestPointOnPolygon({x, y}, closestIsland.points);
-        const distToEdge = Math.hypot(x - closestPoint.x, y - closestPoint.y);
-        
-        return distToEdge <= 20; // 20px tolerance matches server
+            return Math.hypot(x - island.x, y - island.y) <= island.radius;
+        });
+        if (onLand) return false;
+
+        const minSpacing = 110;
+        return !(this.currentMap.waterBuildings || []).some(building =>
+            building.type === 'naval_mine' &&
+            Math.hypot((building.x || 0) - x, (building.y || 0) - y) < minSpacing
+        );
     }
 
     private getClosestPointOnPolygon(p: {x: number, y: number}, points: {x: number, y: number}[]): {x: number, y: number} {
@@ -1972,1153 +3124,34 @@ export class MainScene extends Phaser.Scene {
     }
 
   drawDetailedBuilding(x: number, y: number, type: string, color: number, data?: any): Phaser.GameObjects.Container {
-      const container = this.add.container(x, y);
-      
-      // Base Shape
-      const base = this.add.rectangle(0, 0, 24, 24, color);
-      base.setStrokeStyle(2, 0x000000);
-      container.add(base);
-
-      // Detail
-      if (type === 'mine') {
-          const gold = this.add.circle(0, 0, 6, 0xFFD700);
-          gold.setStrokeStyle(1, 0xDAA520);
-          const track = this.add.rectangle(0, 8, 20, 4, 0x5C4033); // Rails
-          const cart = this.add.rectangle(0, 8, 8, 6, 0x333333); // Cart
-          const pick = this.add.text(-4, -6, '⛏️', { fontSize: '10px' });
-          container.add(gold);
-          container.add(track);
-          container.add(cart);
-          container.add(pick);
-      } else if (type === 'tower') {
-          const baseRect = this.add.rectangle(0, 5, 18, 12, 0x555555);
-          const mid = this.add.rectangle(0, -2, 14, 14, 0x666666);
-          const top = this.add.rectangle(0, -10, 18, 6, 0x777777);
-          // Battlements
-          const b1 = this.add.rectangle(-6, -14, 4, 4, 0x777777);
-          const b2 = this.add.rectangle(0, -14, 4, 4, 0x777777);
-          const b3 = this.add.rectangle(6, -14, 4, 4, 0x777777);
-          
-          const turret = this.add.circle(0, -4, 4, 0x222222);
-          const cannon = this.add.line(0, -4, 0, 0, 10, 0, 0x000000);
-          
-          container.add(baseRect);
-          container.add(mid);
-          container.add(top);
-          container.add(b1);
-          container.add(b2);
-          container.add(b3);
-          container.add(turret);
-          container.add(cannon);
-      } else if (type === 'barracks') {
-          const main = this.add.rectangle(0, 4, 22, 14, 0x8B4513);
-          const roof = this.add.triangle(0, -8, -14, 4, 14, 4, 0, -10, 0xA0522D);
-          const door = this.add.rectangle(0, 8, 8, 8, 0x000000);
-          const window1 = this.add.rectangle(-6, 2, 4, 4, 0x87CEEB);
-          const window2 = this.add.rectangle(6, 2, 4, 4, 0x87CEEB);
-          const flag = this.add.rectangle(8, -8, 6, 4, 0xFF0000);
-          const pole = this.add.line(8, -4, 0, 0, 0, -8, 0x000000);
-          
-          container.add(main);
-          container.add(roof);
-          container.add(door);
-          container.add(window1);
-          container.add(window2);
-          container.add(pole);
-          container.add(flag);
-      } else if (type === 'dock') {
-          base.setVisible(false); // Custom base for dock
-          const plank = this.add.rectangle(0, 0, 28, 16, 0xDEB887);
-          plank.setStrokeStyle(1, 0x8B4513);
-          const post1 = this.add.circle(-12, -6, 3, 0x8B4513);
-          const post2 = this.add.circle(12, -6, 3, 0x8B4513);
-          const post3 = this.add.circle(-12, 6, 3, 0x8B4513);
-          const post4 = this.add.circle(12, 6, 3, 0x8B4513);
-          const craneBase = this.add.rectangle(-8, -4, 6, 6, 0x555555);
-          const craneArm = this.add.line(-8, -4, 0, 0, 10, 10, 0x333333);
-          
-          container.add(plank);
-          container.add(post1);
-          container.add(post2);
-          container.add(post3);
-          container.add(post4);
-          container.add(craneBase);
-          container.add(craneArm);
-      } else if (type === 'base') {
-          // Improved Command Center Visual
-          const main = this.add.rectangle(0, 0, 32, 24, 0x4B0082); // Wider base
-          main.setStrokeStyle(2, 0x000000);
-          
-          const mid = this.add.rectangle(0, -6, 20, 16, 0x6A5ACD); // Mid tier
-          mid.setStrokeStyle(1, 0x000000);
-          
-          // Radar Dish
-          const dish = this.add.arc(8, -14, 6, 0, 180, false, 0xCCCCCC);
-          dish.setStrokeStyle(1, 0x000000);
-          
-          // Flag
-          const flagPole = this.add.line(-8, -14, 0, 0, 0, -12, 0xFFFFFF);
-          const flag = this.add.rectangle(-4, -22, 8, 5, 0xFF0000);
-
-          // Star Icon
-          const star = this.add.text(-4, -4, '⭐', { fontSize: '12px', align: 'center' });
-          star.setOrigin(0.5, 0.5);
-
-          container.add(main);
-          container.add(mid);
-          container.add(dish);
-          container.add(flagPole);
-          container.add(flag);
-          container.add(star);
-
-          // Tesla Upgrade Visual
-          if (data && data.hasTesla) {
-              const coilBase = this.add.rectangle(0, -14, 10, 4, 0x444444);
-              
-              // Tesla Coil Shape (Blue glowing rings)
-              const t1 = this.add.ellipse(0, -18, 12, 4, 0x00FFFF, 0.5);
-              const t2 = this.add.ellipse(0, -22, 10, 4, 0x00FFFF, 0.5);
-              const t3 = this.add.ellipse(0, -26, 8, 4, 0x00FFFF, 0.5);
-              const topBall = this.add.circle(0, -30, 4, 0xFFFFFF);
-              
-              // Pulse animation
-              this.tweens.add({
-                  targets: [t1, t2, t3, topBall],
-                  alpha: 0.2,
-                  duration: 500,
-                  yoyo: true,
-                  repeat: -1
-              });
-
-              container.add(coilBase);
-              container.add(t1);
-              container.add(t2);
-              container.add(t3);
-              container.add(topBall);
-          }
-      } else if (type === 'oil_rig') {
-          const platform = this.add.rectangle(0, 0, 24, 24, 0x333333);
-          const drill = this.add.triangle(0, -8, -8, 8, 8, 8, 0, -10, 0x111111);
-          const pipe = this.add.rectangle(0, 0, 4, 20, 0x000000);
-          const flame = this.add.circle(0, -12, 3, 0xFF4500); // Burning gas
-          
-          this.tweens.add({
-              targets: flame,
-              scale: 1.5,
-              alpha: 0.5,
-              yoyo: true,
-              repeat: -1,
-              duration: 500
-          });
-
-          container.add(platform);
-          container.add(pipe);
-          container.add(drill);
-          container.add(flame);
-      } else if (type === 'oil_well') {
-          // Detailed Oil Well Visual
-          const base = this.add.rectangle(0, 0, 28, 24, 0x2F4F4F); // Dark Slate Grey Base
-          base.setStrokeStyle(2, 0x000000);
-          
-          // Concrete Foundation
-          const foundation = this.add.rectangle(0, 8, 32, 8, 0x555555);
-          
-          // Derrick Tower (Steel Lattice)
-          const towerL = this.add.line(-6, 0, 0, 10, 6, -14, 0x333333);
-          const towerR = this.add.line(6, 0, 0, 10, -6, -14, 0x333333);
-          const cross1 = this.add.line(0, -4, -4, 0, 4, 0, 0x333333);
-          const cross2 = this.add.line(0, 2, -5, 0, 5, 0, 0x333333);
-          
-          // Pump Jack Mechanism
-          const pivot = this.add.circle(0, -6, 2, 0x111111);
-          
-          // Walking Beam (Animated)
-          const beam = this.add.rectangle(0, -10, 20, 4, 0x8B0000); // Dark Red Beam
-          const horseHead = this.add.arc(10, -10, 4, 0, 180, false, 0x8B0000);
-          
-          // Counterweight (Rear)
-          const counterWeight = this.add.rectangle(-8, -6, 6, 8, 0x222222);
-          
-          // Oil Tank (Storage)
-          const tank = this.add.circle(10, 6, 6, 0x4682B4); // Steel Blue Tank
-          tank.setStrokeStyle(1, 0x000000);
-          const pipe = this.add.line(0, 0, 4, 6, 10, 6, 0x555555); // Connecting pipe
-
-          // Animation: Pump Jack Rocking
-          this.tweens.add({
-              targets: [beam, horseHead],
-              angle: { from: -15, to: 15 },
-              y: { from: -10, to: -8 }, // Slight bobbing
-              yoyo: true,
-              repeat: -1,
-              duration: 1500,
-              ease: 'Sine.easeInOut'
-          });
-          
-          // Counterweight moves opposite
-          this.tweens.add({
-              targets: counterWeight,
-              y: { from: -6, to: -2 },
-              yoyo: true,
-              repeat: -1,
-              duration: 1500,
-              ease: 'Sine.easeInOut'
-          });
-
-          container.add(base);
-          container.add(foundation);
-          container.add(towerL);
-          container.add(towerR);
-          container.add(cross1);
-          container.add(cross2);
-          container.add(tank);
-          container.add(pipe);
-          container.add(counterWeight);
-          container.add(pivot);
-          container.add(beam);
-          container.add(horseHead);
-      } else if (type === 'farm') {
-          // Farm Visual - High Detail
-          const base = this.add.rectangle(0, 0, 24, 24, 0x8FBC8F); // DarkSeaGreen base
-          base.setStrokeStyle(1, 0x006400);
-          
-          // Field rows
-          const row1 = this.add.rectangle(-6, 0, 2, 20, 0x3E2723);
-          const row2 = this.add.rectangle(6, 0, 2, 20, 0x3E2723);
-
-          // Crops (Wheat) with sway animation
-          const crops: Phaser.GameObjects.Rectangle[] = [];
-          for(let i=-8; i<=8; i+=4) {
-             const c1 = this.add.rectangle(-6, i, 4, 4, 0xFFD700);
-             const c2 = this.add.rectangle(6, i, 4, 4, 0xFFD700);
-             crops.push(c1, c2);
-          }
-          
-          this.tweens.add({
-              targets: crops,
-              angle: { from: -10, to: 10 },
-              yoyo: true,
-              duration: 2000,
-              repeat: -1,
-              ease: 'Sine.easeInOut'
-          });
-
-          // Barn/Silo (Detailed)
-          const barn = this.add.rectangle(0, -2, 12, 12, 0xA52A2A); // Red Barn
-          const door = this.add.rectangle(0, 0, 6, 8, 0x333333);
-          const roof = this.add.triangle(0, -10, -8, 0, 8, 0, 0, -8, 0x8B0000); // Dark Red Roof
-          
-          // Silo
-          const silo = this.add.rectangle(10, -2, 6, 14, 0xC0C0C0);
-          const siloRoof = this.add.arc(10, -9, 3, 180, 360, false, 0xAAAAAA);
-          
-          container.add(base);
-          container.add(row1);
-          container.add(row2);
-          crops.forEach(c => container.add(c));
-          container.add(barn);
-          container.add(door);
-          container.add(roof);
-          container.add(silo);
-          container.add(siloRoof);
-
-      } else if (type === 'wall') {
-          // Wall Visual - Stone/Fortified
-          const w = this.add.rectangle(0, 0, 24, 8, 0x708090); // Slate Grey
-          w.setStrokeStyle(1, 0x2F4F4F);
-          
-          // Bricks/Stones pattern
-          const b1 = this.add.rectangle(-8, -2, 6, 3, 0x808080);
-          const b2 = this.add.rectangle(0, 2, 6, 3, 0x808080);
-          const b3 = this.add.rectangle(8, -2, 6, 3, 0x808080);
-          
-          // Battle Damage (Random Cracks)
-          const crack = this.add.line(0, 0, -2, -2, 2, 2, 0x000000);
-          crack.setAlpha(0.5);
-
-          container.add(w);
-          container.add(b1);
-          container.add(b2);
-          container.add(b3);
-          container.add(crack);
-      } else if (type === 'bridge_node') {
-          const w = this.add.circle(0, 0, 8, 0x8B4513);
-          w.setStrokeStyle(2, 0x000000);
-          const inner = this.add.circle(0, 0, 4, 0xDEB887);
-          container.add(w);
-          container.add(inner);
-      } else if (type === 'wall_node') {
-          const w = this.add.rectangle(0, 0, 16, 16, 0x555555);
-          w.setStrokeStyle(2, 0x000000);
-          const inner = this.add.rectangle(0, 0, 8, 8, 0x888888);
-          container.add(w);
-          container.add(inner);
-      } else if (type === 'tank_factory') {
-          // Advanced Tank Factory Visual
-          // Main Base (Concrete/Industrial)
-          const main = this.add.rectangle(0, 0, 36, 28, 0x333333); // Dark Grey Concrete
-          main.setStrokeStyle(2, 0x111111);
-          
-          // Factory Floor Markings
-          const stripe = this.add.rectangle(0, 0, 32, 24, 0x444444);
-          const hazardStripes = this.add.graphics();
-          hazardStripes.fillStyle(0xFFFF00, 0.5);
-          for(let i=-14; i<14; i+=6) {
-             hazardStripes.fillRect(i, -12, 2, 24);
-          }
-
-          // Large Assembly Bay Roof
-          const roof = this.add.rectangle(0, -6, 30, 18, 0x556B2F); // Military Green
-          roof.setStrokeStyle(1, 0x222222);
-          
-          // Skylights/Vents
-          const vent1 = this.add.rectangle(-8, -8, 6, 4, 0x88CCFF);
-          const vent2 = this.add.rectangle(0, -8, 6, 4, 0x88CCFF);
-          const vent3 = this.add.rectangle(8, -8, 6, 4, 0x88CCFF);
-
-          // Smokestacks (Industrial Pollution)
-          const s1 = this.add.rectangle(-12, -16, 4, 10, 0x222222);
-          const s2 = this.add.rectangle(-6, -16, 4, 10, 0x222222);
-          
-          // Smoke Particles
-          const smoke1 = this.add.circle(-12, -22, 3, 0x555555, 0.6);
-          const smoke2 = this.add.circle(-6, -24, 4, 0x555555, 0.6);
-          
-          this.tweens.add({
-              targets: [smoke1, smoke2],
-              y: '-=15',
-              alpha: 0,
-              scale: 2,
-              duration: 1500,
-              repeat: -1
-          });
-
-          // Large Roll-up Door (for tanks to exit)
-          const doorFrame = this.add.rectangle(10, 8, 14, 12, 0x222222);
-          const door = this.add.rectangle(10, 8, 12, 10, 0x333333);
-          // Door slats
-          const slats = this.add.graphics();
-          slats.lineStyle(1, 0x111111);
-          for(let i=4; i<12; i+=2) {
-              slats.moveTo(4, i);
-              slats.lineTo(16, i);
-          }
-          slats.strokePath();
-
-          // Crane/Gantry
-          const craneBase = this.add.rectangle(-14, 10, 4, 12, 0xFFFF00); // Safety Yellow
-          const craneArm = this.add.rectangle(-10, 4, 12, 2, 0xFFFF00);
-
-          container.add(main);
-          container.add(stripe);
-          container.add(hazardStripes);
-          container.add(roof);
-          container.add(vent1);
-          container.add(vent2);
-          container.add(vent3);
-          container.add(s1);
-          container.add(s2);
-          container.add(smoke1);
-          container.add(smoke2);
-          container.add(doorFrame);
-          container.add(door);
-          container.add(slats);
-          container.add(craneBase);
-          container.add(craneArm);
-      } else if (type === 'air_base') {
-          // Air Base Visual
-          // Concrete Tarmac
-          const tarmac = this.add.rectangle(0, 0, 40, 30, 0x555555);
-          tarmac.setStrokeStyle(2, 0x222222);
-          
-          // Runway Markings
-          const runway = this.add.rectangle(0, 5, 36, 10, 0x333333);
-          const line = this.add.rectangle(0, 5, 28, 1, 0xFFFFFF); // Center line
-          
-          // Hangar
-          const hangar = this.add.rectangle(-10, -8, 18, 12, 0x4682B4); // Steel Blue Hangar
-          hangar.setStrokeStyle(1, 0x000000);
-          const roof = this.add.arc(-10, -14, 9, 180, 360, false, 0x87CEEB); // Rounded Roof
-          (roof as Phaser.GameObjects.Arc).setClosePath(true);
-          
-          // Control Tower
-          const towerBase = this.add.rectangle(12, -8, 8, 14, 0xAAAAAA);
-          const towerTop = this.add.rectangle(12, -16, 10, 6, 0x222222); // Windows
-          const towerRoof = this.add.rectangle(12, -20, 10, 2, 0x555555);
-          
-          // Radar Dish on Tower
-          const dish = this.add.arc(12, -24, 4, 180, 360, false, 0xCCCCCC);
-          this.tweens.add({
-              targets: dish,
-              angle: { from: -20, to: 20 },
-              yoyo: true,
-              duration: 1500,
-              repeat: -1
-          });
-          
-          // Windsock
-          const pole = this.add.line(-16, -16, 0, 0, 0, 10, 0x000000);
-          const sock = this.add.triangle(-14, -20, -16, -18, -16, -22, -8, -20, 0xFF4500); // Orange Windsock
-          
-          container.add(tarmac);
-          container.add(runway);
-          container.add(line);
-          container.add(hangar);
-          container.add(roof);
-          container.add(towerBase);
-          container.add(towerTop);
-          container.add(towerRoof);
-          container.add(dish);
-          container.add(pole);
-          container.add(sock);
-      }
-
-      return container;
+      return createBuildingArt(this, x, y, type as any, color, data);
   }
 
-  drawDetailedUnit(x: number, y: number, type: string, color: number, isSelected: boolean): Phaser.GameObjects.Container {
-      const container = this.add.container(x, y);
-
-      if (type === 'soldier') {
-          // Detailed Soldier
-          // Legs (Dark Green)
-          const leftLeg = this.add.rectangle(-4, 8, 6, 6, 0x006400);
-          leftLeg.setStrokeStyle(1, 0x000000);
-          const rightLeg = this.add.rectangle(4, 8, 6, 6, 0x006400);
-          rightLeg.setStrokeStyle(1, 0x000000);
-
-          // Body (Green Uniform)
-          const body = this.add.rectangle(0, 0, 16, 10, 0x228B22);
-          body.setStrokeStyle(1, 0x000000);
-          if (isSelected) body.setStrokeStyle(2, 0xFFFF00);
-
-          // Backpack (Tan)
-          const backpack = this.add.rectangle(-6, 0, 4, 8, 0xD2B48C);
-          backpack.setStrokeStyle(1, 0x000000);
-
-          // Head (Skin)
-          const head = this.add.circle(0, -8, 5, 0xFFD1AA);
-          head.setStrokeStyle(1, 0x000000);
-
-          // Helmet (Dark Green)
-          const helmet = this.add.arc(0, -9, 6, 180, 360, false, 0x006400);
-          (helmet as Phaser.GameObjects.Arc).setClosePath(true);
-          helmet.setStrokeStyle(1, 0x000000);
-          
-          // Arms
-          const leftArm = this.add.circle(-9, 0, 3, 0xFFD1AA);
-          const rightArm = this.add.circle(9, 0, 3, 0xFFD1AA);
-
-          // Rifle (Detailed)
-          const rifleStock = this.add.rectangle(4, 2, 6, 3, 0x333333); 
-          const rifleBarrel = this.add.rectangle(10, 2, 8, 2, 0x111111);
-          
-          container.add(leftLeg);
-          container.add(rightLeg);
-          container.add(backpack);
-          container.add(body);
-          container.add(leftArm);
-          container.add(rightArm);
-          container.add(rifleStock);
-          container.add(rifleBarrel);
-          container.add(head);
-          container.add(helmet);
-      } else if (type === 'tank') {
-          // Detailed Tank Body (Green Camo Base)
-          const body = this.add.rectangle(0, 0, 20, 14, 0x006400);
-          body.setStrokeStyle(1, 0x000000);
-          if (isSelected) body.setStrokeStyle(2, 0xFFFF00);
-
-          // Camo Pattern
-          const camo1 = this.add.circle(-5, -3, 3, 0x556B2F);
-          const camo2 = this.add.circle(6, 4, 2, 0x556B2F);
-          const camo3 = this.add.rectangle(-6, 4, 4, 3, 0x556B2F);
-
-          // Detailed Treads
-          const leftTread = this.add.rectangle(0, -8, 22, 5, 0x111111);
-          const rightTread = this.add.rectangle(0, 8, 22, 5, 0x111111);
-          
-          // Tread Wheels (Silver dots)
-          const lw1 = this.add.circle(-8, -8, 1.5, 0x555555);
-          const lw2 = this.add.circle(0, -8, 1.5, 0x555555);
-          const lw3 = this.add.circle(8, -8, 1.5, 0x555555);
-          const rw1 = this.add.circle(-8, 8, 1.5, 0x555555);
-          const rw2 = this.add.circle(0, 8, 1.5, 0x555555);
-          const rw3 = this.add.circle(8, 8, 1.5, 0x555555);
-
-          // Turret
-          const turret = this.add.rectangle(0, 0, 12, 10, 0x004400);
-          turret.setStrokeStyle(1, 0x000000);
-
-          // Hatch
-          const hatch = this.add.circle(-2, -2, 2.5, 0x003300);
-
-          // Barrel (with muzzle)
-          const barrel = this.add.rectangle(10, 0, 14, 3, 0x004400);
-          barrel.setStrokeStyle(1, 0x000000);
-          const muzzle = this.add.rectangle(17, 0, 2, 4, 0x000000);
-
-          // Exhaust
-          const exhaust = this.add.rectangle(-10, 3, 4, 2, 0x333333);
-
-          container.add(leftTread);
-          container.add(rightTread);
-          container.add(lw1); container.add(lw2); container.add(lw3);
-          container.add(rw1); container.add(rw2); container.add(rw3);
-          container.add(body);
-          container.add(camo1); container.add(camo2); container.add(camo3);
-          container.add(exhaust);
-          container.add(barrel);
-          container.add(muzzle);
-          container.add(turret);
-          container.add(hatch);
-
-      } else if (type === 'humvee') {
-          // Detailed Humvee Body (Tan)
-          const body = this.add.rectangle(0, 0, 20, 11, 0xD2B48C);
-          body.setStrokeStyle(1, 0x000000);
-          if (isSelected) body.setStrokeStyle(2, 0xFFFF00);
-
-          // Hood details
-          const hoodVent = this.add.rectangle(6, 0, 4, 6, 0x8B4513);
-          hoodVent.setAlpha(0.5);
-
-          // Wheels (with tread detail)
-          const w1 = this.add.rectangle(-7, -7, 5, 3, 0x111111);
-          const w2 = this.add.rectangle(7, -7, 5, 3, 0x111111);
-          const w3 = this.add.rectangle(-7, 7, 5, 3, 0x111111);
-          const w4 = this.add.rectangle(7, 7, 5, 3, 0x111111);
-
-          // Windshield & Windows
-          const windshield = this.add.rectangle(2, 0, 3, 8, 0x87CEEB);
-          const rearWindow = this.add.rectangle(-8, 0, 2, 6, 0x87CEEB);
-
-          // Roof Gun Mount
-          const mount = this.add.circle(-2, 0, 3, 0x555555);
-          const gun = this.add.rectangle(0, 0, 8, 1.5, 0x111111);
-
-          // Lights
-          const headlight1 = this.add.circle(9, -3, 1.5, 0xFFFFE0); // Yellowish
-          const headlight2 = this.add.circle(9, 3, 1.5, 0xFFFFE0);
-          const taillight1 = this.add.rectangle(-9, -3, 1, 2, 0xFF0000);
-          const taillight2 = this.add.rectangle(-9, 3, 1, 2, 0xFF0000);
-          
-          container.add(w1);
-          container.add(w2);
-          container.add(w3);
-          container.add(w4);
-          container.add(body);
-          container.add(hoodVent);
-          container.add(windshield);
-          container.add(rearWindow);
-          container.add(mount);
-          container.add(gun);
-          container.add(headlight1);
-          container.add(headlight2);
-          container.add(taillight1);
-          container.add(taillight2);
-
-      } else if (type === 'oil_seeker') {
-          // Scout Buggy
-          // Body
-          const body = this.add.rectangle(0, 0, 14, 8, 0xDAA520); // Golden Rod
-          body.setStrokeStyle(1, 0x000000);
-          if (isSelected) body.setStrokeStyle(2, 0xFFFF00);
-
-          // Wheels
-          const w1 = this.add.circle(-6, -5, 3, 0x111111);
-          const w2 = this.add.circle(6, -5, 3, 0x111111);
-          const w3 = this.add.circle(-6, 5, 3, 0x111111);
-          const w4 = this.add.circle(6, 5, 3, 0x111111);
-
-          // Radar Dish
-          const dishBase = this.add.circle(0, 0, 3, 0x555555);
-          const dish = this.add.arc(0, 0, 5, 180, 360, false, 0xCCCCCC);
-          
-          // Rotation animation for dish
-          this.tweens.add({
-              targets: dish,
-              angle: 360,
-              duration: 2000,
-              repeat: -1
-          });
-
-          container.add(w1);
-          container.add(w2);
-          container.add(w3);
-          container.add(w4);
-          container.add(body);
-          container.add(dishBase);
-          container.add(dish);
-
-      } else if (type === 'missile_launcher') {
-          // Long Truck Body (Camo Green)
-          const body = this.add.rectangle(0, 0, 24, 10, 0x556B2F);
-          body.setStrokeStyle(1, 0x000000);
-          if (isSelected) body.setStrokeStyle(2, 0xFFFF00);
-
-          // Cab (Armored)
-          const cab = this.add.rectangle(10, 0, 6, 10, 0x445522);
-          const windshield = this.add.rectangle(11, 0, 2, 8, 0x87CEEB);
-          
-          // Wheels (6 wheels) - Rugged
-          const w1 = this.add.rectangle(-8, -6, 5, 3, 0x111111);
-          const w2 = this.add.rectangle(0, -6, 5, 3, 0x111111);
-          const w3 = this.add.rectangle(8, -6, 5, 3, 0x111111);
-          const w4 = this.add.rectangle(-8, 6, 5, 3, 0x111111);
-          const w5 = this.add.rectangle(0, 6, 5, 3, 0x111111);
-          const w6 = this.add.rectangle(8, 6, 5, 3, 0x111111);
-
-          // Hydraulic Lift System
-          const lift = this.add.rectangle(-4, 0, 10, 4, 0x333333);
-
-          // Missile Rack (angled up)
-          const rack = this.add.rectangle(-2, 0, 16, 8, 0x2F4F4F);
-          rack.setStrokeStyle(1, 0x000000);
-          
-          // Missiles (4-pack)
-          const m1 = this.add.circle(4, -2, 1.5, 0xFF0000);
-          const m2 = this.add.circle(4, 2, 1.5, 0xFF0000);
-          const m3 = this.add.circle(0, -2, 1.5, 0xFF0000);
-          const m4 = this.add.circle(0, 2, 1.5, 0xFF0000);
-
-          // Targeting Radar
-          const radarBox = this.add.rectangle(8, -4, 4, 4, 0x555555);
-          const dish = this.add.arc(8, -4, 3, 180, 360, false, 0xCCCCCC);
-          this.tweens.add({
-              targets: dish,
-              angle: { from: -30, to: 30 },
-              yoyo: true,
-              duration: 2000,
-              repeat: -1
-          });
-
-          container.add(w1); container.add(w2); container.add(w3);
-          container.add(w4); container.add(w5); container.add(w6);
-          container.add(body);
-          container.add(cab);
-          container.add(windshield);
-          container.add(lift);
-          container.add(rack);
-          container.add(m1); container.add(m2);
-          container.add(m3); container.add(m4);
-          container.add(radarBox);
-          container.add(dish);
-      } else if (type === 'destroyer') {
-          // Improved Destroyer
-          const hull = this.add.ellipse(0, 0, 32, 10, color);
-          hull.setStrokeStyle(1, 0x000000);
-          if (isSelected) hull.setStrokeStyle(2, 0xFFFF00);
-          
-          const deck = this.add.rectangle(0, 0, 20, 6, 0x555555);
-          
-          // Bridge
-          const bridge = this.add.rectangle(0, -4, 8, 6, 0xDDDDDD);
-          const windows = this.add.rectangle(0, -4, 6, 2, 0x87CEEB);
-          
-          // Guns
-          const gunFront = this.add.circle(-10, 0, 3, 0x222222);
-          const barrelFront = this.add.rectangle(-14, 0, 8, 2, 0x111111);
-          const gunBack = this.add.circle(10, 0, 3, 0x222222);
-          const barrelBack = this.add.rectangle(14, 0, 8, 2, 0x111111);
-          
-          // Radar
-          const radar = this.add.circle(0, -8, 2, 0x00FF00);
-          this.tweens.add({
-              targets: radar,
-              alpha: 0.2,
-              duration: 1000,
-              yoyo: true,
-              repeat: -1
-          });
-
-          // Wake (Static)
-          const wake = this.add.triangle(20, 0, 30, -5, 30, 5, 20, 0, 0xFFFFFF);
-          wake.setAlpha(0.5);
-
-          container.add(wake);
-          container.add(hull);
-          container.add(deck);
-          container.add(bridge);
-          container.add(windows);
-          container.add(barrelFront);
-          container.add(gunFront);
-          container.add(barrelBack);
-          container.add(gunBack);
-          container.add(radar);
-
-      } else if (type === 'construction_ship') {
-          // Improved Construction Ship (Industrial)
-          const hull = this.add.rectangle(0, 0, 36, 14, color); // Longer hull
-          hull.setStrokeStyle(1, 0x000000);
-          if (isSelected) hull.setStrokeStyle(2, 0xFFFF00);
-          
-          // Deck (Grey)
-          const deck = this.add.rectangle(0, 0, 32, 10, 0x777777);
-
-          // Cabin (Rear)
-          const cabin = this.add.rectangle(-10, -4, 10, 8, 0xEEEEEE);
-          const window = this.add.rectangle(-10, -4, 8, 4, 0x87CEEB);
-          
-          // Crane Base (Front)
-          const craneBase = this.add.circle(8, 0, 5, 0x333333);
-          const cranePivot = this.add.circle(8, 0, 2, 0x111111);
-          
-          // Crane Arm (Yellow/Black stripes)
-          const craneArm = this.add.rectangle(16, 0, 16, 3, 0xFFA500); // Orange/Yellow
-          craneArm.setRotation(-0.5);
-          
-          // Crane Cable & Hook
-          const cable = this.add.line(0, 0, 22, -8, 22, 2, 0x000000); // Visual approximation
-          
-          // Cargo Area
-          const crate1 = this.add.rectangle(-2, 4, 5, 5, 0x8B4513);
-          const crate2 = this.add.rectangle(2, 4, 5, 5, 0xCD853F);
-          
-          // Hazard Stripes on Deck
-          const h1 = this.add.rectangle(-14, 0, 2, 10, 0xFFA500);
-          const h2 = this.add.rectangle(14, 0, 2, 10, 0xFFA500);
-
-          container.add(hull);
-          container.add(deck);
-          container.add(h1); container.add(h2);
-          container.add(cabin);
-          container.add(window);
-          container.add(craneBase);
-          container.add(craneArm);
-          container.add(cranePivot);
-          container.add(cable);
-          container.add(crate1);
-          container.add(crate2);
-      } else if (type === 'sniper') {
-          // Detailed Sniper (Ghillie Suit)
-          
-          // Legs (Camo)
-          const leftLeg = this.add.rectangle(-4, 8, 6, 6, 0x556B2F);
-          leftLeg.setStrokeStyle(1, 0x000000);
-          const rightLeg = this.add.rectangle(4, 8, 6, 6, 0x556B2F);
-          rightLeg.setStrokeStyle(1, 0x000000);
-
-          // Body (Camo)
-          const body = this.add.rectangle(0, 0, 16, 10, 0x6B8E23);
-          body.setStrokeStyle(1, 0x000000);
-          if (isSelected) body.setStrokeStyle(2, 0xFFFF00);
-
-          // Ghillie Suit details (Leaves/Rags)
-          const g1 = this.add.circle(-5, -3, 3, 0x556B2F);
-          const g2 = this.add.circle(6, 4, 3, 0x556B2F);
-          const g3 = this.add.rectangle(0, -5, 18, 4, 0x556B2F); // Shoulder cover
-
-          // Head (Skin)
-          const head = this.add.circle(0, -8, 5, 0xFFD1AA);
-          head.setStrokeStyle(1, 0x000000);
-
-          // Cap with netting
-          const cap = this.add.rectangle(0, -10, 10, 4, 0x556B2F);
-          const visor = this.add.rectangle(6, -9, 4, 2, 0x556B2F);
-
-          // Arms
-          const leftArm = this.add.circle(-9, 0, 3, 0xFFD1AA);
-          const rightArm = this.add.circle(9, 0, 3, 0xFFD1AA);
-
-          // Long Sniper Rifle
-          const rifleStock = this.add.rectangle(4, 1, 10, 3, 0x3E2723);
-          const rifleBarrel = this.add.rectangle(16, 1, 14, 1.5, 0x111111);
-          const scope = this.add.rectangle(6, -2, 8, 2, 0x000000);
-          const bipod = this.add.rectangle(14, 4, 1, 4, 0x333333);
-
-          container.add(leftLeg);
-          container.add(rightLeg);
-          container.add(body);
-          container.add(g1); container.add(g2); container.add(g3);
-          container.add(leftArm);
-          container.add(rightArm);
-          container.add(rifleStock);
-          container.add(rifleBarrel);
-          container.add(scope);
-          container.add(bipod);
-          container.add(head);
-          container.add(cap);
-          container.add(visor);
-
-      } else if (type === 'rocketeer') {
-          // Detailed Rocketeer (Heavy Armor)
-
-          // Legs (Grey Armored)
-          const leftLeg = this.add.rectangle(-4, 8, 7, 6, 0x2F4F4F);
-          leftLeg.setStrokeStyle(1, 0x000000);
-          const rightLeg = this.add.rectangle(4, 8, 7, 6, 0x2F4F4F);
-          rightLeg.setStrokeStyle(1, 0x000000);
-
-          // Body (Bulky Armor with Plates)
-          const body = this.add.rectangle(0, 0, 18, 12, 0x708090);
-          body.setStrokeStyle(1, 0x000000);
-          if (isSelected) body.setStrokeStyle(2, 0xFFFF00);
-          
-          const plate = this.add.rectangle(0, 0, 10, 8, 0x555555); // Chest plate
-
-          // Head (Skin)
-          const head = this.add.circle(0, -9, 5, 0xFFD1AA);
-          head.setStrokeStyle(1, 0x000000);
-
-          // Heavy Helmet with Visor
-          const helmet = this.add.rectangle(0, -10, 12, 6, 0x2F4F4F);
-          const visor = this.add.rectangle(0, -9, 8, 2, 0x00FFFF);
-
-          // Arms
-          const leftArm = this.add.circle(-10, 0, 3, 0xFFD1AA);
-          const rightArm = this.add.circle(10, 0, 3, 0xFFD1AA);
-
-          // Detailed Bazooka (Shoulder mounted)
-          const tube = this.add.rectangle(4, -4, 18, 6, 0x003300); // Green tube
-          tube.setStrokeStyle(1, 0x000000);
-          const grip = this.add.rectangle(0, -1, 2, 4, 0x111111);
-          const sight = this.add.rectangle(6, -8, 4, 2, 0x111111);
-          const rocketTip = this.add.triangle(15, -4, 0, -3, 0, 3, 5, 0, 0xFF0000);
-
-          container.add(leftLeg);
-          container.add(rightLeg);
-          container.add(body);
-          container.add(plate);
-          container.add(leftArm);
-          container.add(rightArm);
-          container.add(tube);
-          container.add(grip);
-          container.add(sight);
-          container.add(rocketTip);
-          container.add(head);
-          container.add(helmet);
-          container.add(visor);
-      } else if (type === 'ferry') {
-          // High-detail Ferry (Vehicle Transport)
-          const hull = this.add.rectangle(0, 0, 32, 18, color);
-          hull.setStrokeStyle(1, 0x000000);
-          if (isSelected) hull.setStrokeStyle(2, 0xFFFF00);
-          
-          // Bridge at the back (offset)
-          const bridge = this.add.rectangle(-12, 0, 8, 14, 0xEEEEEE);
-          bridge.setStrokeStyle(1, 0x000000);
-          const bridgeWindow = this.add.rectangle(-12, 0, 6, 10, 0x87CEEB);
-          
-          // Cargo Deck (Dark Grey)
-          const deck = this.add.rectangle(4, 0, 24, 14, 0x555555);
-          
-          // Loading Ramp (Front)
-          const ramp = this.add.rectangle(16, 0, 4, 14, 0x333333);
-          
-          // Vehicles on deck (Visual only)
-          const v1 = this.add.rectangle(0, -4, 8, 5, 0x2E8B57); // Green Truck
-          v1.setStrokeStyle(1, 0x000000);
-          const v2 = this.add.rectangle(8, 4, 6, 4, 0xDAA520); // Tan Car
-          v2.setStrokeStyle(1, 0x000000);
-          
-          // Lifebuoys
-          const lb1 = this.add.circle(-8, -8, 2, 0xFF0000); lb1.setStrokeStyle(1, 0xFFFFFF);
-          const lb2 = this.add.circle(8, -8, 2, 0xFF0000); lb2.setStrokeStyle(1, 0xFFFFFF);
-          const lb3 = this.add.circle(-8, 8, 2, 0xFF0000); lb3.setStrokeStyle(1, 0xFFFFFF);
-          const lb4 = this.add.circle(8, 8, 2, 0xFF0000); lb4.setStrokeStyle(1, 0xFFFFFF);
-
-          container.add(hull);
-          container.add(deck);
-          container.add(ramp);
-          container.add(bridge);
-          container.add(bridgeWindow);
-          container.add(v1);
-          container.add(v2);
-          container.add(lb1); container.add(lb2); container.add(lb3); container.add(lb4);
-      } else if (type === 'builder') {
-          // "Bob" Style Builder Character
-          
-          // Feet/Legs (Dark Blue)
-          const leftLeg = this.add.rectangle(-4, 8, 6, 6, 0x00008B);
-          leftLeg.setStrokeStyle(1, 0x000000);
-          const rightLeg = this.add.rectangle(4, 8, 6, 6, 0x00008B);
-          rightLeg.setStrokeStyle(1, 0x000000);
-
-          // Body (Blue Shirt)
-          const body = this.add.rectangle(0, 0, 16, 10, 0x1E90FF);
-          body.setStrokeStyle(1, 0x000000);
-          if (isSelected) body.setStrokeStyle(2, 0xFFFF00);
-
-          // Safety Vest (Orange stripes) - Improved
-          const vestLeft = this.add.rectangle(-4, 0, 4, 10, 0xFF4500);
-          const vestRight = this.add.rectangle(4, 0, 4, 10, 0xFF4500);
-          const vestH = this.add.rectangle(0, 2, 12, 2, 0xFF4500); // Horizontal strap
-
-          // Tool Belt
-          const belt = this.add.rectangle(0, 5, 16, 3, 0x8B4513);
-
-          // Head (Skin)
-          const head = this.add.circle(0, -8, 5, 0xFFD1AA);
-          head.setStrokeStyle(1, 0x000000);
-
-          // Hard Hat (Yellow Dome) with ridge
-          const helmet = this.add.arc(0, -9, 6, 180, 360, false, 0xFFFF00);
-          (helmet as Phaser.GameObjects.Arc).setClosePath(true);
-          helmet.setStrokeStyle(1, 0x000000);
-          const ridge = this.add.rectangle(0, -13, 2, 4, 0xFFFF00);
-          
-          // Arms/Hands
-          const leftArm = this.add.circle(-9, 0, 3, 0xFFD1AA);
-          const rightArm = this.add.circle(9, 0, 3, 0xFFD1AA);
-
-          // Wrench (Silver) in right hand
-          const wHandle = this.add.rectangle(11, -4, 3, 10, 0xCCCCCC);
-          wHandle.setRotation(-0.5);
-          wHandle.setStrokeStyle(1, 0x000000);
-          const wHead = this.add.rectangle(13, -8, 6, 4, 0xEEEEEE);
-          wHead.setRotation(-0.5);
-          wHead.setStrokeStyle(1, 0x000000);
-
-          // Toolbox (Red) in left hand
-          const toolbox = this.add.rectangle(-12, 4, 8, 6, 0xFF0000);
-          toolbox.setStrokeStyle(1, 0x000000);
-          const tbHandle = this.add.rectangle(-12, 0, 4, 2, 0x333333);
-
-          container.add(leftLeg);
-          container.add(rightLeg);
-          container.add(body);
-          container.add(vestLeft);
-          container.add(vestRight);
-          container.add(vestH);
-          container.add(belt);
-          container.add(leftArm);
-          container.add(rightArm);
-          container.add(wHandle);
-          container.add(wHead);
-          container.add(toolbox);
-          container.add(tbHandle);
-          container.add(head);
-          container.add(helmet);
-          container.add(ridge);
-      } else if (type === 'light_plane') {
-          // Delta Wing Fighter - Improved
-          const wings = this.add.triangle(0, 0, -8, -12, 8, 0, -8, 12, 0xDDDDDD);
-          wings.setStrokeStyle(1, 0x000000);
-          
-          const fuselage = this.add.rectangle(0, 0, 20, 5, 0xFFFFFF);
-          fuselage.setStrokeStyle(1, 0x000000);
-          if (isSelected) fuselage.setStrokeStyle(2, 0xFFFF00);
-
-          // Cockpit (Bubble)
-          const cockpit = this.add.ellipse(2, 0, 6, 4, 0x87CEEB);
-          
-          // Tail Fin
-          const tail = this.add.triangle(-9, 0, -4, 0, -12, -6, -12, 6, 0xCCCCCC);
-
-          // Propeller (Visual)
-          const prop = this.add.rectangle(11, 0, 2, 14, 0x333333);
-          this.tweens.add({
-              targets: prop,
-              angle: 360,
-              duration: 80,
-              repeat: -1
-          });
-
-          container.add(wings);
-          container.add(tail);
-          container.add(fuselage);
-          container.add(cockpit);
-          container.add(prop);
-
-      } else if (type === 'heavy_plane') {
-          // Heavy Bomber (B-52 Style)
-          // Main Wing
-          const wings = this.add.rectangle(2, 0, 12, 44, 0x555555);
-          wings.setStrokeStyle(1, 0x000000);
-
-          // Fuselage (Rounded)
-          const fuselage = this.add.ellipse(0, 0, 30, 12, 0x444444);
-          fuselage.setStrokeStyle(1, 0x000000);
-          if (isSelected) fuselage.setStrokeStyle(2, 0xFFFF00);
-
-          // Cockpit
-          const cockpit = this.add.rectangle(10, 0, 6, 8, 0x222222);
-          const windows = this.add.rectangle(11, 0, 2, 6, 0x87CEEB);
-
-          // 4 Engines
-          const e1 = this.add.rectangle(4, -12, 6, 4, 0x222222);
-          const e2 = this.add.rectangle(4, -18, 6, 4, 0x222222);
-          const e3 = this.add.rectangle(4, 12, 6, 4, 0x222222);
-          const e4 = this.add.rectangle(4, 18, 6, 4, 0x222222);
-          
-          // Propellers for engines
-          [e1, e2, e3, e4].forEach(e => {
-              const p = this.add.rectangle(e.x + 4, e.y, 2, 8, 0x111111);
-              this.tweens.add({
-                  targets: p,
-                  angle: 360,
-                  duration: 100,
-                  repeat: -1
-              });
-              container.add(p);
-          });
-
-          // Tail
-          const tail = this.add.triangle(-14, 0, -8, 0, -18, -10, -18, 10, 0x555555);
-
-          // Bomb Bay
-          const bombBay = this.add.rectangle(0, 0, 10, 4, 0x222222);
-
-          container.add(wings);
-          container.add(tail);
-          container.add(fuselage);
-          container.add(cockpit);
-          container.add(windows);
-          container.add(bombBay);
-          container.add(e1); container.add(e2); container.add(e3); container.add(e4);
-
-      } else if (type === 'aircraft_carrier') {
-          // Massive Flying Aircraft Carrier
-          // Main Hull - Lower Deck
-          const hull = this.add.rectangle(0, 0, 180, 70, 0x2F4F4F); // Dark Slate Gray
-          hull.setStrokeStyle(2, 0x000000);
-          if (isSelected) hull.setStrokeStyle(3, 0xFFFF00);
-
-          // Flight Deck (Top)
-          const deck = this.add.rectangle(0, 0, 170, 60, 0x4682B4); // Steel Blue
-          deck.setStrokeStyle(1, 0x111111);
-
-          // Runways (Two parallel strips)
-          const runway1 = this.add.rectangle(0, -15, 160, 10, 0x222222); // Asphalt
-          const line1 = this.add.rectangle(0, -15, 150, 2, 0xFFFFFF); // Center line
-          
-          const runway2 = this.add.rectangle(0, 15, 160, 10, 0x222222); // Asphalt
-          const line2 = this.add.rectangle(0, 15, 150, 2, 0xFFFFFF); // Center line
-
-          // Landing Pad markings
-          const padH = this.add.circle(-70, 0, 10, 0x222222);
-          const padHText = this.add.text(-75, -5, 'H', { fontSize: '10px', color: '#FFFF00', fontFamily: 'Arial' });
-          padHText.setOrigin(0, 0);
-
-          // Control Tower (Superstructure) - Side mounted
-          const towerBase = this.add.rectangle(40, -40, 30, 15, 0x2F4F4F);
-          towerBase.setStrokeStyle(1, 0x000000);
-          const towerTop = this.add.rectangle(40, -40, 20, 10, 0x555555);
-          const windows = this.add.rectangle(40, -40, 18, 6, 0x87CEEB); // Glass
-
-          // Rotating Radars
-          const radar1 = this.add.rectangle(35, -50, 8, 2, 0xCCCCCC);
-          const radar2 = this.add.rectangle(45, -50, 10, 3, 0xCCCCCC);
-          
-          this.tweens.add({ targets: radar1, angle: 360, duration: 2000, repeat: -1 });
-          this.tweens.add({ targets: radar2, angle: -360, duration: 3000, repeat: -1 });
-
-          // Massive Thrusters (6 turbines)
-          const thrusters = [
-              { x: -80, y: -30 }, { x: -80, y: 30 },
-              { x: 0, y: -40 }, { x: 0, y: 40 },
-              { x: 80, y: -30 }, { x: 80, y: 30 }
-          ];
-
-          container.add(hull);
-          container.add(deck);
-          container.add(runway1); container.add(line1);
-          container.add(runway2); container.add(line2);
-          container.add(padH); container.add(padHText);
-
-          thrusters.forEach(pos => {
-              const t = this.add.circle(pos.x, pos.y, 8, 0xFFA500); // Orange Glow
-              t.setStrokeStyle(1, 0x555555);
-              this.tweens.add({
-                  targets: t,
-                  scaleX: 1.2,
-                  scaleY: 1.2,
-                  alpha: 0.8,
-                  yoyo: true,
-                  duration: 200 + Math.random() * 200,
-                  repeat: -1
-              });
-              container.add(t);
-          });
-
-          container.add(towerBase);
-          container.add(towerTop);
-          container.add(windows);
-          container.add(radar1);
-          container.add(radar2);
-
-          // Tiny Planes on Deck
-          const planes = [
-              { x: -50, y: -15 }, { x: -30, y: -15 }, 
-              { x: 50, y: 15 }, { x: 70, y: 15 }
-          ];
-          
-          planes.forEach(p => {
-              const plane = this.add.triangle(p.x, p.y, 0, -4, -4, 4, 4, 4, 0xCCCCCC);
-              plane.angle = 90; // Facing right
-              container.add(plane);
-          });
-
-      } else if (type === 'mothership') {
-          // Gigantic Sci-Fi Mothership - Saucer Style
-          
-          // Container for spinning parts (so HP bar doesn't spin)
-          const shipBody = this.add.container(0, 0);
-
-          // 1. Main Hull (Giant Saucer)
-          const hullRadius = 80;
-          const hull = this.add.circle(0, 0, hullRadius, 0x222222);
-          hull.setStrokeStyle(3, 0x00FFFF); // Cyan neon rim
-          if (isSelected) hull.setStrokeStyle(4, 0xFFFF00); // Yellow selection
-          shipBody.add(hull);
-
-          // 2. Line Designs (Geometric patterns)
-          const graphics = this.add.graphics();
-          graphics.lineStyle(2, 0x00AAAA, 0.8);
-          
-          // Concentric rings
-          graphics.strokeCircle(0, 0, 60);
-          graphics.strokeCircle(0, 0, 40);
-          
-          // Radial lines
-          for (let i = 0; i < 8; i++) {
-              const angle = Phaser.Math.DegToRad(i * 45);
-              const startX = Math.cos(angle) * 20;
-              const startY = Math.sin(angle) * 20;
-              const endX = Math.cos(angle) * 75;
-              const endY = Math.sin(angle) * 75;
-              graphics.moveTo(startX, startY);
-              graphics.lineTo(endX, endY);
-          }
-          graphics.strokePath();
-          shipBody.add(graphics);
-
-          // 3. Central Light Orb
-          const orb = this.add.circle(0, 0, 15, 0x00FFFF); // Cyan glow
-          this.tweens.add({
-              targets: orb,
-              alpha: { from: 1, to: 0.6 },
-              scale: { from: 1, to: 1.3 },
-              duration: 1200,
-              yoyo: true,
-              repeat: -1
-          });
-          shipBody.add(orb);
-
-          // 4. Continuous Spinning Animation
-          this.tweens.add({
-              targets: shipBody,
-              angle: 360,
-              duration: 12000, // Slow majestic spin
-              repeat: -1,
-              ease: 'Linear'
-          });
-
-          container.add(shipBody);
-      }
-
-      return container;
+  drawDetailedUnit(
+      x: number,
+      y: number,
+      type: string,
+      color: number,
+      isSelected: boolean,
+      renderMode: UnitArtRenderMode = 'full'
+  ): Phaser.GameObjects.Container {
+      return createUnitArt(this, x, y, type, color, isSelected, { renderMode });
   }
 
   createUnitContainer(unit: Unit, isMine: boolean, isSelected: boolean) {
       const player = this.players.get(unit.ownerId);
       const color = player ? parseInt(player.color.replace('#', '0x')) : (isMine ? 0xAAAAFF : 0xFFAAAA);
+      const renderMode = this.getUnitRenderMode(unit, isSelected);
       
-      const uContainer = this.drawDetailedUnit(0, 0, unit.type, color, isSelected);
+      const uContainer = this.add.container(unit.x, unit.y);
+      const art = this.drawDetailedUnit(0, 0, unit.type, color, isSelected, renderMode);
+      art.setName('art');
+      uContainer.add(art);
       uContainer.setPosition(unit.x, unit.y);
       uContainer.setDepth(20); // Ensure units are above everything else
       uContainer.setData('isSelected', isSelected);
+      uContainer.setData('renderMode', renderMode);
+      uContainer.setData('unitType', unit.type);
       
       // Add Health Bar to container
       if (unit.maxHealth > 0) {
@@ -3136,6 +3169,7 @@ export class MainScene extends Phaser.Scene {
              case 'aircraft_carrier': hpBarWidth = 140; hpBarY = -50; break;
              case 'heavy_plane': hpBarWidth = 40; hpBarY = -25; break;
              case 'destroyer': hpBarWidth = 32; hpBarY = -15; break;
+             case 'pirate_ship': hpBarWidth = 34; hpBarY = -15; break;
              case 'construction_ship': hpBarWidth = 36; hpBarY = -15; break;
              case 'ferry': hpBarWidth = 32; hpBarY = -15; break;
              case 'missile_launcher': hpBarWidth = 24; hpBarY = -15; break;
@@ -3157,6 +3191,7 @@ export class MainScene extends Phaser.Scene {
           case 'aircraft_carrier': width = 180; height = 80; break;
           case 'heavy_plane': width = 50; height = 50; break;
           case 'destroyer': width = 40; height = 20; break;
+          case 'pirate_ship': width = 42; height = 24; break;
           case 'construction_ship': width = 45; height = 25; break;
           case 'ferry': width = 40; height = 25; break;
           case 'tank':
@@ -3170,6 +3205,11 @@ export class MainScene extends Phaser.Scene {
       uContainer.setInteractive(hitArea, Phaser.Geom.Rectangle.Contains);
 
       uContainer.on('pointerdown', (pointer: any) => {
+        if (this.placementMode) {
+             if (pointer.event) pointer.event.stopPropagation();
+             this.tryPlaceCurrentBuilding(pointer.x, pointer.y, !!pointer.event?.shiftKey);
+             return;
+        }
         if (pointer.rightButtonDown()) {
              // Right Click: Select Unit (Fix for user request)
              pointer.event.stopPropagation(); 
@@ -3232,12 +3272,14 @@ export class MainScene extends Phaser.Scene {
           window.dispatchEvent(new CustomEvent('game-hover', { detail: null }));
       });
 
+      this.rotateUnitArt(uContainer, this.getDesiredFacingAngle(unit), 1 / 60, true);
       this.unitsGroup.add(uContainer);
       this.unitContainers.set(unit.id, uContainer);
   }
 
   renderUnits(units: Unit[]) {
     this.currentUnits = units;
+    this.syncUnitDetailMode(units);
     this.rangeGraphics.clear();
     
     // Track active unit IDs to remove dead ones later
@@ -3248,6 +3290,7 @@ export class MainScene extends Phaser.Scene {
       
       const isMine = unit.ownerId === socket.id;
       const isSelected = this.selectedUnitIds.has(unit.id);
+      const renderMode = this.getUnitRenderMode(unit, isSelected);
       
       // Check if unit already exists
       if (this.unitContainers.has(unit.id)) {
@@ -3258,9 +3301,10 @@ export class MainScene extends Phaser.Scene {
           
           // Check selection change
           const wasSelected = container.getData('isSelected');
+          const previousRenderMode = container.getData('renderMode');
           
-          if (wasSelected !== isSelected) {
-              // Recreate if selection changed
+          if (wasSelected !== isSelected || previousRenderMode !== renderMode) {
+              // Recreate if selection or detail mode changed
               container.destroy();
               this.createUnitContainer(unit, isMine, isSelected);
           } else {
@@ -3292,6 +3336,7 @@ export class MainScene extends Phaser.Scene {
               container.destroy();
               this.unitContainers.delete(id);
               this.unitUpdates.delete(id);
+              this.attackFacingOverrides.delete(id);
           }
       });
     }
@@ -3480,12 +3525,9 @@ export class MainScene extends Phaser.Scene {
         this.tumbleweeds = [];
         this.weatherParticles = [];
         this.oilAnimations = [];
+        this.goldSparkles = [];
         this.oilSpotVisuals.clear();
         // this.revealedOilSpots.clear(); // Persistence Fix: Do not clear revealed spots on re-render
-
-        // DEBUG: Count Hidden Spots
-        const hiddenCount = mapData.oilSpots ? mapData.oilSpots.filter(s => s.id.startsWith('hidden_oil_')).length : 0;
-        console.log(`[MainScene] Rendering Map. Total Oil Spots: ${mapData.oilSpots?.length || 0}, Hidden: ${hiddenCount}`);
 
         // Render Oil Spots
         if (mapData.oilSpots) {
@@ -3511,16 +3553,6 @@ export class MainScene extends Phaser.Scene {
                      ping.setDepth(11); // Above the black spot
                      ping.setVisible(isRevealed); // Only visible if revealed
                      this.islandsGroup.add(ping);
-                     
-                     // Animation for the ping
-                     this.tweens.add({
-                         targets: ping,
-                         scale: 1.5,
-                         alpha: 0.5,
-                         yoyo: true,
-                         repeat: -1,
-                         duration: 800
-                     });
                 }
                 
                 // Pulse Animation (Red waves if hidden/revealed)
@@ -3578,46 +3610,140 @@ export class MainScene extends Phaser.Scene {
             });
         }
 
+        (mapData.waterBuildings || []).forEach(building => {
+            const bx = building.x || 0;
+            const by = building.y || 0;
+            const owner = building.ownerId ? this.players.get(building.ownerId) : undefined;
+            const color = owner ? parseInt(owner.color.replace('#', '0x')) : 0x555555;
+            const isMine = building.ownerId === socket.id;
+
+            const bContainer = this.drawDetailedBuilding(bx, by, building.type, color, building);
+            bContainer.setDepth(3);
+            this.islandsGroup.add(bContainer);
+            bContainer.setSize(24, 24);
+            bContainer.setInteractive();
+
+            const isSelected = this.selectedNodeIds.has(building.id) || this.selectedBuildingIds.has(building.id);
+            if (isSelected) {
+                const ring = this.add.circle(0, 0, 18);
+                ring.setStrokeStyle(2, 0x00FF00);
+                bContainer.add(ring);
+            }
+
+            if (building.isConstructing) {
+                const p = building.constructionProgress || 0;
+                const blueBar = this.add.rectangle(bx, by - 15, 16 * (p / 100), 3, 0x0000FF);
+                this.islandsGroup.add(blueBar);
+            } else {
+                const hpPercent = Math.max(0, building.health / building.maxHealth);
+                const hpBar = this.add.rectangle(bx, by - 15, 16 * hpPercent, 3, isMine ? 0x00FF00 : 0xFF0000);
+                this.islandsGroup.add(hpBar);
+            }
+
+            bContainer.on('pointerover', () => {
+                window.dispatchEvent(new CustomEvent('game-hover', {
+                    detail: {
+                        title: building.type.charAt(0).toUpperCase() + building.type.slice(1).replace('_', ' '),
+                        owner: building.ownerId,
+                        type: 'Building',
+                        health: building.health,
+                        maxHealth: building.maxHealth,
+                        id: building.id
+                    }
+                }));
+            });
+            bContainer.on('pointerout', () => window.dispatchEvent(new CustomEvent('game-hover', { detail: null })));
+            bContainer.on('pointerdown', (pointer: any) => {
+                if (this.placementMode) {
+                    if (pointer.event) pointer.event.stopPropagation();
+                    this.tryPlaceCurrentBuilding(pointer.x, pointer.y, !!pointer.event?.shiftKey);
+                    return;
+                }
+                if (pointer.event) pointer.event.stopPropagation();
+
+                if (building.type === 'bridge_node' || building.type === 'wall_node') {
+                    if (building.ownerId !== socket.id) return;
+                    if (this.selectedNodeIds.has(building.id)) {
+                        this.selectedNodeIds.delete(building.id);
+                    } else {
+                        this.selectedNodeIds.add(building.id);
+                    }
+                    window.dispatchEvent(new CustomEvent('node-selection-changed', {
+                        detail: { nodes: Array.from(this.selectedNodeIds) }
+                    }));
+                    this.renderMap(this.currentMap!);
+                    return;
+                }
+
+                this.selectedBuildingIds.clear();
+                this.selectedUnitIds.clear();
+                this.selectedNodeIds.clear();
+                this.selectedBuildingIds.add(building.id);
+                window.dispatchEvent(new CustomEvent('building-selection-changed', {
+                    detail: { buildingIds: Array.from(this.selectedBuildingIds) }
+                }));
+                window.dispatchEvent(new CustomEvent('node-selection-changed', { detail: { nodes: [] } }));
+                this.renderMap(this.currentMap!);
+            });
+        });
+
     // Render Bridges
     if (mapData.bridges) {
-        mapData.bridges.forEach(bridge => {
-            const islandA = mapData.islands.find(i => i.id === bridge.islandAId);
-            const islandB = mapData.islands.find(i => i.id === bridge.islandBId);
-            if (islandA && islandB) {
-                const nodeA = islandA.buildings.find(b => b.id === bridge.nodeAId);
-                const nodeB = islandB.buildings.find(b => b.id === bridge.nodeBId);
-                if (nodeA && nodeB) {
-                    const ax = islandA.x + (nodeA.x || 0);
-                    const ay = islandA.y + (nodeA.y || 0);
-                    const bx = islandB.x + (nodeB.x || 0);
-                    const by = islandB.y + (nodeB.y || 0);
+        this.getBridgeChainPaths(mapData.bridges).forEach(chain => {
+            const graphics = this.add.graphics();
+            graphics.setDepth(2);
+            this.islandsGroup.add(graphics);
+
+            graphics.lineStyle(20, 0x8B4513);
+            graphics.beginPath();
+            graphics.moveTo(chain.points[0].x, chain.points[0].y);
+            for (let i = 1; i < chain.points.length; i += 1) {
+                graphics.lineTo(chain.points[i].x, chain.points[i].y);
+            }
+            graphics.strokePath();
+
+            graphics.lineStyle(16, 0xDEB887);
+            graphics.beginPath();
+            graphics.moveTo(chain.points[0].x, chain.points[0].y);
+            for (let i = 1; i < chain.points.length; i += 1) {
+                graphics.lineTo(chain.points[i].x, chain.points[i].y);
+            }
+            graphics.strokePath();
+
+            graphics.lineStyle(1, 0x5C4033);
+            for (let i = 0; i < chain.points.length - 1; i += 1) {
+                const ax = chain.points[i].x;
+                const ay = chain.points[i].y;
+                const bx = chain.points[i + 1].x;
+                const by = chain.points[i + 1].y;
+                const dist = Math.hypot(bx - ax, by - ay);
+                const angle = Math.atan2(by - ay, bx - ax);
+                const steps = dist / 10;
+
+                for (let step = 0; step < steps; step += 1) {
+                    const px = ax + Math.cos(angle) * step * 10;
+                    const py = ay + Math.sin(angle) * step * 10;
+                    const p1x = px + Math.cos(angle + Math.PI / 2) * 8;
+                    const p1y = py + Math.sin(angle + Math.PI / 2) * 8;
+                    const p2x = px + Math.cos(angle - Math.PI / 2) * 8;
+                    const p2y = py + Math.sin(angle - Math.PI / 2) * 8;
+                    graphics.lineBetween(p1x, p1y, p2x, p2y);
+                }
+            }
+        });
+
+        mapData.bridges
+            .filter(bridge => bridge.type !== 'bridge')
+            .forEach(bridge => {
+                const endpoints = this.getBridgeEndpoints(bridge);
+                if (endpoints) {
+                    const { ax, ay, bx, by } = endpoints;
 
                     const graphics = this.add.graphics();
                     graphics.setDepth(2);
                     this.islandsGroup.add(graphics);
 
-                    if (bridge.type === 'bridge') {
-                        // Wood bridge
-                        graphics.lineStyle(20, 0x8B4513);
-                        graphics.lineBetween(ax, ay, bx, by);
-                        graphics.lineStyle(16, 0xDEB887);
-                        graphics.lineBetween(ax, ay, bx, by);
-                        
-                        // Planks
-                        const dist = Math.hypot(bx - ax, by - ay);
-                        const angle = Math.atan2(by - ay, bx - ax);
-                        const steps = dist / 10;
-                        graphics.lineStyle(1, 0x5C4033);
-                        for(let i=0; i<steps; i++) {
-                            const px = ax + Math.cos(angle) * i * 10;
-                            const py = ay + Math.sin(angle) * i * 10;
-                            const p1x = px + Math.cos(angle + Math.PI/2) * 8;
-                            const p1y = py + Math.sin(angle + Math.PI/2) * 8;
-                            const p2x = px + Math.cos(angle - Math.PI/2) * 8;
-                            const p2y = py + Math.sin(angle - Math.PI/2) * 8;
-                            graphics.lineBetween(p1x, p1y, p2x, p2y);
-                        }
-                    } else if (bridge.type === 'gate') {
+                    if (bridge.type === 'gate') {
                         // Gate Rendering
                         // Darker, wider base
                         graphics.lineStyle(16, 0x222222);
@@ -3651,8 +3777,7 @@ export class MainScene extends Phaser.Scene {
                         graphics.lineBetween(ax, ay, bx, by);
                     }
                 }
-            }
-        });
+            });
     }
 
     // Render High Grounds
@@ -3747,13 +3872,10 @@ export class MainScene extends Phaser.Scene {
              
              // Sparkle
              const sparkle = this.add.star(0, -8, 4, 2, 4, 0xFFFFFF);
-             this.tweens.add({
-                 targets: sparkle,
-                 alpha: 0,
-                 scale: 0.5,
-                 duration: 1000 + Math.random() * 500,
-                 yoyo: true,
-                 repeat: -1
+             this.goldSparkles.push({
+                 sprite: sparkle,
+                 timer: Math.random() * 1000,
+                 speed: 0.8 + Math.random() * 0.6
              });
              
              container.add([n1, n2, n3, sparkle]);
@@ -3870,6 +3992,11 @@ export class MainScene extends Phaser.Scene {
 
 
         bContainer.on('pointerdown', (pointer: any) => {
+          if (this.placementMode) {
+              if (pointer.event) pointer.event.stopPropagation();
+              this.tryPlaceCurrentBuilding(pointer.x, pointer.y, !!pointer.event?.shiftKey);
+              return;
+          }
           // Allow selection of any building (for info display)
           // Stop propagation to avoid map click clearing selection
           if (pointer.event) pointer.event.stopPropagation();
@@ -3924,7 +4051,12 @@ export class MainScene extends Phaser.Scene {
       });
 
       // Interaction
-      fillPoly.on('pointerdown', () => {
+      fillPoly.on('pointerdown', (pointer: any) => {
+        if (this.placementMode) {
+            if (pointer.event) pointer.event.stopPropagation();
+            this.tryPlaceCurrentBuilding(pointer.x, pointer.y, !!pointer.event?.shiftKey);
+            return;
+        }
         // Select island
         const event = new CustomEvent('game-selection', { detail: { islandId: island.id } });
         window.dispatchEvent(event);
@@ -3938,13 +4070,23 @@ export class MainScene extends Phaser.Scene {
   }
 
   createExplosion(x: number, y: number, color: number) {
+      const menuExplosionDensity = this.isMenuMode
+          ? Math.max(0, Math.min(2, settingsManager.getSettings().graphics.menuExplosionDensity ?? 1))
+          : 1;
+
+      if (this.isMenuMode && menuExplosionDensity <= 0) {
+          return;
+      }
+
       // Play explosion sound
-      const settings = settingsManager.getSettings();
-      const volume = settings.audio.masterVolume * settings.audio.sfxVolume;
+      const volume = soundEffectsManager.getEffectVolume(
+          'explosion',
+          0.5 * (this.isMenuMode ? menuExplosionDensity : 1)
+      );
       if (volume > 0) {
           try {
               this.sound.play('explosion', { 
-                  volume: volume * 0.5,
+                  volume,
                   detune: Phaser.Math.Between(-200, 200)
               });
           } catch (e) {
@@ -3953,17 +4095,103 @@ export class MainScene extends Phaser.Scene {
       }
       
       // Screen shake
-      this.cameras.main.shake(100, 0.005);
+      this.cameras.main.shake(100, 0.005 * (this.isMenuMode ? menuExplosionDensity : 1));
 
-      this.menuExplosions.push({x, y, life: 0.5, maxLife: 0.5, color});
-      for(let i=0; i<8; i++) {
+      const baseRadius = this.isMenuMode ? 14 + menuExplosionDensity * 16 : 30;
+      const baseLife = this.isMenuMode ? 0.22 + menuExplosionDensity * 0.18 : 0.5;
+      this.menuExplosions.push({x, y, life: baseLife, maxLife: baseLife, color, radius: baseRadius});
+
+      const particleCount = this.isMenuMode ? Math.round(8 * menuExplosionDensity) : 8;
+      const scatterRange = this.isMenuMode ? 12 + menuExplosionDensity * 18 : 30;
+      for(let i=0; i<particleCount; i++) {
+           const sparkLife = this.isMenuMode
+               ? 0.12 + Math.random() * (0.14 + menuExplosionDensity * 0.12)
+               : 0.2 + Math.random() * 0.3;
+           const sparkRadius = this.isMenuMode
+               ? Phaser.Math.FloatBetween(8, 14 + menuExplosionDensity * 8)
+               : Phaser.Math.FloatBetween(12, 24);
            this.menuExplosions.push({
-               x: x + Phaser.Math.Between(-30, 30),
-               y: y + Phaser.Math.Between(-30, 30),
-               life: 0.2 + Math.random() * 0.3,
-               maxLife: 0.5,
-               color: color
+               x: x + Phaser.Math.Between(-scatterRange, scatterRange),
+               y: y + Phaser.Math.Between(-scatterRange, scatterRange),
+               life: sparkLife,
+               maxLife: sparkLife,
+               color,
+               radius: sparkRadius
            });
+      }
+  }
+
+  private renderNavalMineBlast(x: number, y: number, radius: number) {
+      const volume = soundEffectsManager.getEffectVolume('explosion', 0.55);
+      if (volume > 0) {
+          try {
+              this.sound.play('explosion', {
+                  volume,
+                  detune: Phaser.Math.Between(-100, 100)
+              });
+          } catch (e) {}
+      }
+
+      this.cameras.main.shake(140, 0.007);
+
+      const flash = this.add.circle(x, y, 24, 0xffc76b, 0.95);
+      flash.setDepth(101);
+      this.tweens.add({
+          targets: flash,
+          scale: 4,
+          alpha: 0,
+          duration: 220,
+          onComplete: () => flash.destroy()
+      });
+
+      const innerFire = this.add.circle(x, y, 42, 0xff6a2a, 0.7);
+      innerFire.setDepth(101);
+      innerFire.setScale(0.2);
+      this.tweens.add({
+          targets: innerFire,
+          scale: 1.6,
+          alpha: 0,
+          duration: 320,
+          onComplete: () => innerFire.destroy()
+      });
+
+      const shockwave = this.add.circle(x, y, radius, 0xffffff, 0);
+      shockwave.setDepth(101);
+      shockwave.setStrokeStyle(7, 0xbfefff, 0.95);
+      shockwave.setScale(0.12);
+      this.tweens.add({
+          targets: shockwave,
+          scale: 1,
+          alpha: 0,
+          duration: 360,
+          onComplete: () => shockwave.destroy()
+      });
+
+      const outerWave = this.add.circle(x, y, radius * 0.78, 0x5dc6ff, 0);
+      outerWave.setDepth(100);
+      outerWave.setStrokeStyle(4, 0x82d8ff, 0.8);
+      outerWave.setScale(0.25);
+      this.tweens.add({
+          targets: outerWave,
+          scale: 1.2,
+          alpha: 0,
+          duration: 420,
+          onComplete: () => outerWave.destroy()
+      });
+
+      for (let i = 0; i < 10; i += 1) {
+          const angle = (Math.PI * 2 * i) / 10 + Math.random() * 0.18;
+          const ember = this.add.circle(x, y, Phaser.Math.Between(3, 6), i % 2 === 0 ? 0xffb347 : 0xffe2a8, 0.95);
+          ember.setDepth(101);
+          this.tweens.add({
+              targets: ember,
+              x: x + Math.cos(angle) * Phaser.Math.Between(38, 92),
+              y: y + Math.sin(angle) * Phaser.Math.Between(38, 92),
+              alpha: 0,
+              scale: 0.25,
+              duration: Phaser.Math.Between(180, 260),
+              onComplete: () => ember.destroy()
+          });
       }
   }
 
@@ -3983,6 +4211,7 @@ export class MainScene extends Phaser.Scene {
           this.tumbleweeds = [];
         this.weatherParticles = [];
         this.oilAnimations = [];
+        this.goldSparkles = [];
         this.oilSpotVisuals.clear();
         this.revealedOilSpots.clear();
         
@@ -4069,11 +4298,11 @@ export class MainScene extends Phaser.Scene {
               const y = Phaser.Math.Between(50, height - 50);
               
               // Play shoot sound (Limit to first spawn of the frame to prevent audio death)
-              const sfxVol = settings.audio.sfxVolume;
-              if (sfxVol > 0 && spawnedCount === 1) {
+              const menuProjectileVolume = soundEffectsManager.getEffectVolume('menuProjectile', 0.3);
+              if (menuProjectileVolume > 0 && spawnedCount === 1) {
                   try {
                       this.sound.play('shoot', {
-                          volume: sfxVol * 0.3, 
+                          volume: menuProjectileVolume, 
                           detune: Phaser.Math.Between(-100, 100)
                       });
                   } catch (e) {
@@ -4258,7 +4487,7 @@ export class MainScene extends Phaser.Scene {
           }
           
           this.menuGraphics.fillStyle(e.color, e.life / e.maxLife);
-          this.menuGraphics.fillCircle(e.x, e.y, (1 - e.life / e.maxLife) * 30);
+          this.menuGraphics.fillCircle(e.x, e.y, (1 - e.life / e.maxLife) * e.radius);
       }
   }
 }

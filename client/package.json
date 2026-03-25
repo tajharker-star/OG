@@ -2,6 +2,8 @@
   "name": "conquerors-domination-demo",
   "private": true,
   "version": "0.0.0",
+  "author": "Thecoadstar",
+  "description": "Conquerors Domination Demo by Thecoadstar.",
   "type": "module",
   "main": "electron/main.cjs",
   "repository": {
@@ -14,14 +16,31 @@
     "electron:dev": "concurrently -k \"npm run dev\" \"wait-on tcp:5173 && unset ELECTRON_RUN_AS_NODE && NODE_ENV=development electron electron/main.cjs\"",
     "build": "tsc -b && vite build",
     "dist": "npm run build && npm run build-server && electron-builder",
+    "dist:steam": "npm run build && npm run build-server && node scripts/build-steam-artifacts.mjs && npm run stage:steam && npm run verify:steam-layout && npm run verify:release-binaries && npm run verify:steam-runtime && npm run smoke:packaged-server && npm run smoke:packaged && npm run smoke:windows:wine",
+    "build:steam-store-assets": "node scripts/build-steam-store-assets.mjs",
+    "steam:upload:demo": "node scripts/steam-deploy.mjs demo",
+    "steam:upload:main": "node scripts/steam-deploy.mjs main",
+    "steam:set-live": "node scripts/steam-set-live.mjs",
     "test:smoke": "playwright test",
     "build-server": "cd ../server && npm run build && cd ../client && mkdir -p server && cp -r ../server/dist server/",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "stage:steam": "node scripts/stage-steam-releases.mjs",
+    "smoke:packaged": "node scripts/smoke-test-packaged.mjs",
+    "smoke:packaged-server": "node scripts/smoke-test-packaged-server.mjs",
+    "smoke:windows:wine": "node scripts/smoke-test-windows-wine.mjs",
+    "verify:steam-install": "node scripts/verify-steam-install.mjs",
+    "verify:steam-layout": "node scripts/verify-steam-layout.mjs",
+    "verify:release-binaries": "node scripts/verify-release-binaries.mjs",
+    "verify:steam-runtime": "node scripts/verify-steam-runtime.mjs"
   },
   "build": {
     "appId": "com.conquerors.domination.demo",
     "productName": "ConquerorsDominationDemo",
+    "executableName": "ConquerorsDominationDemo",
+    "copyright": "Copyright © 2026 Thecoadstar",
+    "icon": "electron/icons/app-icon.png",
+    "afterSign": "scripts/notarize.mjs",
     "directories": {
       "output": "dist_electron"
     },
@@ -32,6 +51,10 @@
       "steam_appid.txt"
     ],
     "extraResources": [
+      {
+        "from": "dist",
+        "to": "dist"
+      },
       {
         "from": "server",
         "to": "server",
@@ -44,15 +67,25 @@
     ],
     "mac": {
       "target": "dir",
+      "icon": "electron/icons/app-icon.icns",
       "category": "public.app-category.strategy-games",
-      "hardenedRuntime": false,
-      "gatekeeperAssess": false
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "electron/entitlements.mac.plist",
+      "entitlementsInherit": "electron/entitlements.mac.inherit.plist",
+      "extendInfo": {
+        "NSHumanReadableCopyright": "Copyright © 2026 Thecoadstar"
+      }
     },
     "win": {
-      "target": "dir"
+      "target": "dir",
+      "icon": "electron/icons/app-icon.ico",
+      "executableName": "ConquerorsDominationDemo"
     },
     "linux": {
-      "target": "dir"
+      "target": "dir",
+      "icon": "electron/icons/app-icon.png",
+      "executableName": "conquerors-domination-demo"
     }
   },
   "dependencies": {
@@ -68,6 +101,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
+    "@electron/notarize": "^2.5.0",
     "@playwright/test": "^1.49.1",
     "@types/node": "^24.10.1",
     "@types/react": "^19.2.5",
