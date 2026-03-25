@@ -895,6 +895,13 @@ async function createWindow() {
     console.log('[Steam] Initialization failed or not running.');
     win.webContents.on('did-finish-load', () => {
       win.webContents.send('steam:init-error', 'Steam is not running or AppID is missing.');
+      if (isSmokeTest) {
+        setTimeout(() => {
+          if (!win.isDestroyed()) {
+            win.webContents.send('steam:bypass-error');
+          }
+        }, 150);
+      }
     });
   }
 
