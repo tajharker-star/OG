@@ -315,6 +315,19 @@ jobs:
           depot3Path: releases/steam/linux
           releaseBranch: public
 
+      - name: Verify Steam Deploy Demo (TOTP)
+        id: verify-steam-deploy-demo-totp
+        if: steps.steam-auth.outputs.mode == 'totp' && !cancelled()
+        continue-on-error: true
+        shell: bash
+        run: |
+          sudo test -f BuildOutput/app_build_4432220.log
+          if sudo grep -q "ERROR! Failed to commit build" BuildOutput/app_build_4432220.log; then
+            sudo cat BuildOutput/app_build_4432220.log
+            exit 1
+          fi
+          sudo grep -q "Successfully finished AppID 4432220 build" BuildOutput/app_build_4432220.log
+
       - name: Reset Steam BuildOutput after Demo (TOTP)
         if: steps.steam-auth.outputs.mode == 'totp' && !cancelled()
         shell: bash
@@ -338,6 +351,19 @@ jobs:
           depot3Path: releases/steam/linux
           releaseBranch: public
 
+      - name: Verify Steam Deploy Main (TOTP)
+        id: verify-steam-deploy-main-totp
+        if: steps.steam-auth.outputs.mode == 'totp' && !cancelled()
+        continue-on-error: true
+        shell: bash
+        run: |
+          sudo test -f BuildOutput/app_build_4432210.log
+          if sudo grep -q "ERROR! Failed to commit build" BuildOutput/app_build_4432210.log; then
+            sudo cat BuildOutput/app_build_4432210.log
+            exit 1
+          fi
+          sudo grep -q "Successfully finished AppID 4432210 build" BuildOutput/app_build_4432210.log
+
       - name: Steam Deploy Demo (config.vdf)
         id: steam-deploy-demo-config
         if: steps.steam-auth.outputs.mode == 'config'
@@ -354,6 +380,19 @@ jobs:
           depot2Path: releases/steam/microsoft-windows
           depot3Path: releases/steam/linux
           releaseBranch: public
+
+      - name: Verify Steam Deploy Demo (config.vdf)
+        id: verify-steam-deploy-demo-config
+        if: steps.steam-auth.outputs.mode == 'config' && !cancelled()
+        continue-on-error: true
+        shell: bash
+        run: |
+          sudo test -f BuildOutput/app_build_4432220.log
+          if sudo grep -q "ERROR! Failed to commit build" BuildOutput/app_build_4432220.log; then
+            sudo cat BuildOutput/app_build_4432220.log
+            exit 1
+          fi
+          sudo grep -q "Successfully finished AppID 4432220 build" BuildOutput/app_build_4432220.log
 
       - name: Reset Steam BuildOutput after Demo (config.vdf)
         if: steps.steam-auth.outputs.mode == 'config' && !cancelled()
@@ -377,25 +416,38 @@ jobs:
           depot3Path: releases/steam/linux
           releaseBranch: public
 
+      - name: Verify Steam Deploy Main (config.vdf)
+        id: verify-steam-deploy-main-config
+        if: steps.steam-auth.outputs.mode == 'config' && !cancelled()
+        continue-on-error: true
+        shell: bash
+        run: |
+          sudo test -f BuildOutput/app_build_4432210.log
+          if sudo grep -q "ERROR! Failed to commit build" BuildOutput/app_build_4432210.log; then
+            sudo cat BuildOutput/app_build_4432210.log
+            exit 1
+          fi
+          sudo grep -q "Successfully finished AppID 4432210 build" BuildOutput/app_build_4432210.log
+
       - name: Summarize Steam deploy outcomes
         if: always()
         shell: bash
         run: |
           echo "Steam deploy outcomes" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Demo (TOTP):   ${{ steps['steam-deploy-demo-totp'].outcome || 'skipped' }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Main (TOTP):   ${{ steps['steam-deploy-main-totp'].outcome || 'skipped' }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Demo (config): ${{ steps['steam-deploy-demo-config'].outcome || 'skipped' }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Main (config): ${{ steps['steam-deploy-main-config'].outcome || 'skipped' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Demo (TOTP):   ${{ steps['verify-steam-deploy-demo-totp'].outcome || steps['steam-deploy-demo-totp'].outcome || 'skipped' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Main (TOTP):   ${{ steps['verify-steam-deploy-main-totp'].outcome || steps['steam-deploy-main-totp'].outcome || 'skipped' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Demo (config): ${{ steps['verify-steam-deploy-demo-config'].outcome || steps['steam-deploy-demo-config'].outcome || 'skipped' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Main (config): ${{ steps['verify-steam-deploy-main-config'].outcome || steps['steam-deploy-main-config'].outcome || 'skipped' }}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Fail if any Steam deploy failed
         if: always()
         shell: bash
         run: |
           outcomes=(
-            "${{ steps['steam-deploy-demo-totp'].outcome || 'skipped' }}"
-            "${{ steps['steam-deploy-main-totp'].outcome || 'skipped' }}"
-            "${{ steps['steam-deploy-demo-config'].outcome || 'skipped' }}"
-            "${{ steps['steam-deploy-main-config'].outcome || 'skipped' }}"
+            "${{ steps['verify-steam-deploy-demo-totp'].outcome || steps['steam-deploy-demo-totp'].outcome || 'skipped' }}"
+            "${{ steps['verify-steam-deploy-main-totp'].outcome || steps['steam-deploy-main-totp'].outcome || 'skipped' }}"
+            "${{ steps['verify-steam-deploy-demo-config'].outcome || steps['steam-deploy-demo-config'].outcome || 'skipped' }}"
+            "${{ steps['verify-steam-deploy-main-config'].outcome || steps['steam-deploy-main-config'].outcome || 'skipped' }}"
           )
 
           for outcome in "${outcomes[@]}"; do
