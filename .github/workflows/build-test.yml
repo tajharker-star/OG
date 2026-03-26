@@ -382,20 +382,20 @@ jobs:
         shell: bash
         run: |
           echo "Steam deploy outcomes" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Demo (TOTP):   ${{ steps.steam-deploy-demo-totp.outcome || 'skipped' }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Main (TOTP):   ${{ steps.steam-deploy-main-totp.outcome || 'skipped' }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Demo (config): ${{ steps.steam-deploy-demo-config.outcome || 'skipped' }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Main (config): ${{ steps.steam-deploy-main-config.outcome || 'skipped' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Demo (TOTP):   ${{ steps['steam-deploy-demo-totp'].outcome || 'skipped' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Main (TOTP):   ${{ steps['steam-deploy-main-totp'].outcome || 'skipped' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Demo (config): ${{ steps['steam-deploy-demo-config'].outcome || 'skipped' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Main (config): ${{ steps['steam-deploy-main-config'].outcome || 'skipped' }}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Fail if any Steam deploy failed
         if: always()
         shell: bash
         run: |
           outcomes=(
-            "${{ steps.steam-deploy-demo-totp.outcome || 'skipped' }}"
-            "${{ steps.steam-deploy-main-totp.outcome || 'skipped' }}"
-            "${{ steps.steam-deploy-demo-config.outcome || 'skipped' }}"
-            "${{ steps.steam-deploy-main-config.outcome || 'skipped' }}"
+            "${{ steps['steam-deploy-demo-totp'].outcome || 'skipped' }}"
+            "${{ steps['steam-deploy-main-totp'].outcome || 'skipped' }}"
+            "${{ steps['steam-deploy-demo-config'].outcome || 'skipped' }}"
+            "${{ steps['steam-deploy-main-config'].outcome || 'skipped' }}"
           )
 
           for outcome in "${outcomes[@]}"; do
