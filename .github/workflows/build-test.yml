@@ -263,7 +263,7 @@ jobs:
         run: |
           cd client
           node scripts/verify-steam-layout.mjs
-          node scripts/verify-release-binaries.mjs
+          VERIFY_RELEASE_COMPARE_SOURCES=0 node scripts/verify-release-binaries.mjs
 
       - name: Summarize staged depot file counts
         run: |

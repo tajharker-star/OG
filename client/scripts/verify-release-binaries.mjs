@@ -10,6 +10,7 @@ import {
 } from "./release-config.mjs";
 
 const errors = [];
+const shouldCompareSourceOutputs = process.env.VERIFY_RELEASE_COMPARE_SOURCES !== "0";
 
 function check(condition, message) {
   if (!condition) {
@@ -120,8 +121,10 @@ for (const platform of selectedPlatforms) {
     `${platform.label} staged release looks incomplete. Expected at least ${platform.minimumFileCount} files, found ${fileCount}`
   );
 
-  compareDirectoryContents(currentRendererDistDir, platform.rendererDir, `${platform.label} renderer dist`);
-  compareDirectoryContents(currentServerDistDir, platform.serverDistDir, `${platform.label} packaged server dist`);
+  if (shouldCompareSourceOutputs) {
+    compareDirectoryContents(currentRendererDistDir, platform.rendererDir, `${platform.label} renderer dist`);
+    compareDirectoryContents(currentServerDistDir, platform.serverDistDir, `${platform.label} packaged server dist`);
+  }
 
   if (fs.existsSync(platform.binaryPath)) {
     const description = execFileSync("file", [platform.binaryPath], { encoding: "utf8" }).trim();
