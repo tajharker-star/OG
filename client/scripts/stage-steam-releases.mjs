@@ -26,6 +26,22 @@ function ensureSourceExists(platform) {
   }
 }
 
+function syncLaunchExecutableMode(platform) {
+  if (!platform.requiresExecutableBit) {
+    return;
+  }
+
+  const sourceExecutablePath = path.join(platform.sourceDir, platform.launchExecutable);
+  const stagedExecutablePath = path.join(platform.stageDir, platform.launchExecutable);
+
+  if (!fs.existsSync(sourceExecutablePath) || !fs.existsSync(stagedExecutablePath)) {
+    return;
+  }
+
+  const sourceMode = fs.statSync(sourceExecutablePath).mode & 0o777;
+  fs.chmodSync(stagedExecutablePath, sourceMode || 0o755);
+}
+
 const selectedPlatforms = getSelectedPlatforms();
 const selectedLaunchOptions = getSelectedLaunchOptions();
 
@@ -35,6 +51,7 @@ fs.mkdirSync(releaseRoot, { recursive: true });
 for (const platform of selectedPlatforms) {
   ensureSourceExists(platform);
   copyDirectoryContents(platform.sourceDir, platform.stageDir);
+  syncLaunchExecutableMode(platform);
 }
 
 const manifest = {
