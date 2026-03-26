@@ -102,6 +102,7 @@ export interface Unit {
   lastSteerTime?: number;
   vx?: number;
   vy?: number;
+  facingAngle?: number;
 }
 
 export interface Player {
@@ -114,4 +115,5 @@ export interface Player {
   };
   isBot?: boolean;
   status?: 'active' | 'eliminated';
+  hqSpawnedOnce?: boolean;
 }

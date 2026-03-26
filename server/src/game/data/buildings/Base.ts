@@ -5,6 +5,7 @@ export const BaseStats: BuildingStats = {
     name: 'Base',
     health: 1000,
     maxHealth: 1000,
+    radius: 36,
     cost: { gold: 9999, oil: 9999 },
     constructionTime: 0,
     range: 300,

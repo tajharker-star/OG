@@ -5,6 +5,7 @@ export const BridgeNodeStats: BuildingStats = {
     name: 'Bridge Node',
     health: 200,
     maxHealth: 200,
+    radius: 10,
     cost: { gold: 50, oil: 0 },
     constructionTime: 50,
     description: 'Connection point for bridges.'

@@ -54,6 +54,7 @@ export class AttackManager {
 
     public update(gameState: GameState, myUnits: Unit[]) {
         const allCombatUnits = myUnits.filter(u => this.isCombatUnit(u));
+        const requiredArmySize = gameState.mapType === 'desert' ? Math.min(this.minArmySize, 6) : this.minArmySize;
         
         // Update Roster (add new units)
         allCombatUnits.forEach(u => {
@@ -93,7 +94,7 @@ export class AttackManager {
              let blockReason = 'NONE';
              if (this.state === 'BUILD_ARMY') {
                 if (elapsedGameTime < this.attackStartTimeSec) blockReason = 'WAITING_ATTACK_START_TIME';
-                else if (armySize < this.minArmySize) blockReason = 'INSUFFICIENT_ARMY';
+                else if (armySize < requiredArmySize) blockReason = 'INSUFFICIENT_ARMY';
                 else if (!this.currentTargetBase) blockReason = 'NO_TARGET';
              } else if (this.state === 'RALLY') {
                  if (rallyPct < 0.55 && (now - this.stateStartTime) < 8000) blockReason = 'RALLY_IN_PROGRESS';
@@ -118,7 +119,7 @@ export class AttackManager {
 
              console.log(
                  `[MOBILISE_DIAG] botId=${this.bot.playerId} lvl=${this.bot.difficulty} state=${this.state}` +
-                 ` groupCombat=${armySize} req=${this.minArmySize}` +
+                 ` groupCombat=${armySize} req=${requiredArmySize}` +
                  ` elapsed=${elapsedGameTime.toFixed(1)} atkStart=${this.attackStartTimeSec}` +
                  ` rallyPct=${rallyPctStr} rallySec=${rallySec}` +
                  ` targetHQ=${targetId} targetDist=${targetDist}` +
@@ -145,7 +146,7 @@ export class AttackManager {
                 const timeInBuild = Date.now() - this.stateStartTime;
                 const isFailsafe = timeInBuild > this.maxWaitTime && armySize > 0;
 
-                if ((elapsedGameTime >= this.attackStartTimeSec && armySize >= this.minArmySize) || isFailsafe) {
+                if ((elapsedGameTime >= this.attackStartTimeSec && armySize >= requiredArmySize) || isFailsafe) {
                      if (isFailsafe) console.log(`[AttackManager] Bot ${this.bot.playerId} Failsafe Triggered: Moving to RALLY with ${armySize} units (Wait: ${Math.floor(timeInBuild/1000)}s)`);
 
                      const target = this.pickEnemyHQTarget(gameState);
@@ -181,7 +182,7 @@ export class AttackManager {
         }
 
         // Debug Overlay Data Update
-        this.updateDebugState(armySize, Date.now() - this.lastAttackTime);
+        this.updateDebugState(armySize, requiredArmySize, Date.now() - this.lastAttackTime);
     }
 
     private transitionTo(newState: AttackState) {
@@ -259,7 +260,8 @@ export class AttackManager {
         const now = Date.now();
         if (now - this.lastOrderTime > 4000) { 
             units.forEach(u => {
-                this.issueOrder(gameState, u, target.x, target.y, 'ASSAULT');
+                const assaultPoint = this.getAssaultPoint(gameState, u, target);
+                this.issueOrder(gameState, u, assaultPoint.x, assaultPoint.y, 'ASSAULT');
             });
             this.lastOrderTime = now;
             this.lastAssaultIssued = now;
@@ -275,12 +277,13 @@ export class AttackManager {
             
             const idleThreshold = units.length * 0.4;
             if (idleCount > idleThreshold) {
-                 this.lastOrderBlocked = true;
-                 this.lastPathOk = false;
-                 console.log(`[AttackManager] Anti-Idle Triggered: ${idleCount} units idle. Re-issuing orders.`);
-                 const nowForce = Date.now();
-                 units.forEach(u => {
-                    this.issueOrder(gameState, u, target.x, target.y, 'ASSAULT_FORCED');
+                this.lastOrderBlocked = true;
+                this.lastPathOk = false;
+                console.log(`[AttackManager] Anti-Idle Triggered: ${idleCount} units idle. Re-issuing orders.`);
+                const nowForce = Date.now();
+                units.forEach(u => {
+                    const assaultPoint = this.getAssaultPoint(gameState, u, target);
+                    this.issueOrder(gameState, u, assaultPoint.x, assaultPoint.y, 'ASSAULT_FORCED');
                 });
                 this.lastOrderTime = nowForce;
                 this.lastAssaultIssued = nowForce;
@@ -466,12 +469,43 @@ export class AttackManager {
         this.bot.requestMovePriority(gameState, unit.id, x, y);
     }
 
-    private updateDebugState(armySize: number, timeSinceLastAttack: number) {
+    private getAssaultPoint(gameState: GameState, unit: Unit, target: { x: number; y: number }): { x: number; y: number } {
+        const dx = target.x - unit.x;
+        const dy = target.y - unit.y;
+        const dist = Math.hypot(dx, dy) || 1;
+        const desiredOffset = Math.max(45, Math.min(unit.range * 0.75, 140));
+
+        const primary = {
+            x: target.x - (dx / dist) * desiredOffset,
+            y: target.y - (dy / dist) * desiredOffset
+        };
+        if (gameState.isValidPosition(primary.x, primary.y, unit.type)) {
+            return primary;
+        }
+
+        const radii = [desiredOffset, desiredOffset + 30, desiredOffset + 60, desiredOffset + 90];
+        for (const radius of radii) {
+            for (let i = 0; i < 16; i++) {
+                const angle = (i / 16) * Math.PI * 2;
+                const candidate = {
+                    x: target.x + Math.cos(angle) * radius,
+                    y: target.y + Math.sin(angle) * radius
+                };
+                if (gameState.isValidPosition(candidate.x, candidate.y, unit.type)) {
+                    return candidate;
+                }
+            }
+        }
+
+        return gameState.adjustTarget(unit.type, target.x, target.y);
+    }
+
+    private updateDebugState(armySize: number, requiredArmySize: number, timeSinceLastAttack: number) {
         // 7) Debug Overlay
         this.bot.debugState.attackManager = {
             state: this.state,
             armySize: armySize,
-            requiredSize: this.minArmySize,
+            requiredSize: requiredArmySize,
             timeSinceAttack: Math.floor(timeSinceLastAttack / 1000),
             targetId: this.currentTargetBase?.id || 'None',
             targetType: this.currentTargetBase?.type || 'None',
