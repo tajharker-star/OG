@@ -29,7 +29,7 @@ export const steamTargets = {
   },
 };
 
-function syncSteamAppIdFiles(target) {
+export function syncSteamAppIdFiles(target) {
   const stageRoot = path.join(clientDir, "releases", "steam");
   const macBundlePath = path.join(stageRoot, "macos", "ConquerorsDominationDemo.app");
   const fileTargets = [

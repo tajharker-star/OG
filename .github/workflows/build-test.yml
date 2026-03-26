@@ -5,6 +5,7 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -191,7 +192,7 @@ jobs:
   deploy-steam:
     needs: build
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     steps:
       - uses: actions/checkout@v4
 
@@ -288,6 +289,11 @@ jobs:
             exit 1
           fi
 
+      - name: Sync staged Steam App IDs for Demo
+        run: |
+          cd client
+          node scripts/sync-steam-appids.mjs demo
+
       - name: Generate Steam TOTP
         id: steam-totp
         if: steps.steam-auth.outputs.mode == 'totp'
@@ -295,7 +301,7 @@ jobs:
         with:
           shared_secret: ${{ secrets.STEAM_SHARED_SECRET }}
 
-      - name: Steam Deploy (TOTP)
+      - name: Steam Deploy Demo (TOTP)
         if: steps.steam-auth.outputs.mode == 'totp'
         uses: game-ci/steam-deploy@v3
         with:
@@ -304,14 +310,35 @@ jobs:
           totp: ${{ steps.steam-totp.outputs.code }}
           appId: 4432220
           firstDepotIdOverride: 4432222
-          buildDescription: "v${{ github.run_number }}"
+          buildDescription: "demo-v${{ github.run_number }}"
           rootPath: client
           depot1Path: releases/steam/macos
           depot2Path: releases/steam/microsoft-windows
           depot3Path: releases/steam/linux
           releaseBranch: public
 
-      - name: Steam Deploy (config.vdf)
+      - name: Sync staged Steam App IDs for Main Game
+        run: |
+          cd client
+          node scripts/sync-steam-appids.mjs main
+
+      - name: Steam Deploy Main (TOTP)
+        if: steps.steam-auth.outputs.mode == 'totp'
+        uses: game-ci/steam-deploy@v3
+        with:
+          username: ${{ secrets.STEAM_USERNAME }}
+          password: ${{ secrets.STEAM_PASSWORD }}
+          totp: ${{ steps.steam-totp.outputs.code }}
+          appId: 4432210
+          firstDepotIdOverride: 4432211
+          buildDescription: "main-v${{ github.run_number }}"
+          rootPath: client
+          depot1Path: releases/steam/macos
+          depot2Path: releases/steam/microsoft-windows
+          depot3Path: releases/steam/linux
+          releaseBranch: public
+
+      - name: Steam Deploy Demo (config.vdf)
         if: steps.steam-auth.outputs.mode == 'config'
         uses: game-ci/steam-deploy@v3
         with:
@@ -319,7 +346,22 @@ jobs:
           configVdf: ${{ secrets.STEAM_CONFIG_VDF }}
           appId: 4432220
           firstDepotIdOverride: 4432222
-          buildDescription: "v${{ github.run_number }}"
+          buildDescription: "demo-v${{ github.run_number }}"
+          rootPath: client
+          depot1Path: releases/steam/macos
+          depot2Path: releases/steam/microsoft-windows
+          depot3Path: releases/steam/linux
+          releaseBranch: public
+
+      - name: Steam Deploy Main (config.vdf)
+        if: steps.steam-auth.outputs.mode == 'config'
+        uses: game-ci/steam-deploy@v3
+        with:
+          username: ${{ secrets.STEAM_USERNAME }}
+          configVdf: ${{ secrets.STEAM_CONFIG_VDF }}
+          appId: 4432210
+          firstDepotIdOverride: 4432211
+          buildDescription: "main-v${{ github.run_number }}"
           rootPath: client
           depot1Path: releases/steam/macos
           depot2Path: releases/steam/microsoft-windows
@@ -332,4 +374,4 @@ jobs:
           echo "Steam deploy failed." >> "$GITHUB_STEP_SUMMARY"
           echo "- If using TOTP: confirm STEAM_SHARED_SECRET and STEAM_PASSWORD are current." >> "$GITHUB_STEP_SUMMARY"
           echo "- If using config.vdf: refresh via steamcmd login, base64 encode config.vdf, update STEAM_CONFIG_VDF." >> "$GITHUB_STEP_SUMMARY"
-          echo "- Ensure this account has Steamworks build permissions for app 4432220." >> "$GITHUB_STEP_SUMMARY"
+          echo "- Ensure this account has Steamworks build permissions for apps 4432220 and 4432210." >> "$GITHUB_STEP_SUMMARY"
