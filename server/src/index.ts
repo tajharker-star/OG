@@ -2,6 +2,7 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
+import fs from 'fs';
 import path from 'path';
 import https from 'https';
 import { randomUUID } from 'crypto';
@@ -17,20 +18,28 @@ app.use(cors());
 // Serve static files from client build
 // In production, the client dist is often at the same level as the server executable
 // or in a 'client/dist' folder relative to the root.
-let clientBuildPath;
-if (process.env.NODE_ENV === 'production' || process.mainModule?.filename.includes('app.asar')) {
-    // If packaged, try common locations
+const packagedResourcesPath = typeof (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath === 'string'
+    ? (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath
+    : '';
+
+function resolveClientBuildPath() {
     const locations = [
+        process.env.CLIENT_DIST_DIR,
+        packagedResourcesPath ? path.join(packagedResourcesPath, 'dist') : '',
+        packagedResourcesPath ? path.join(packagedResourcesPath, 'app', 'dist') : '',
+        packagedResourcesPath ? path.join(packagedResourcesPath, 'app.asar', 'dist') : '',
         path.join(process.cwd(), 'client', 'dist'),
         path.join(process.cwd(), '..', 'client', 'dist'),
+        path.join(process.cwd(), '..', '..', 'client', 'dist'),
+        path.join(__dirname, '..', '..', 'client', 'dist'),
         path.join(__dirname, '..', 'client', 'dist'),
         path.join(__dirname, 'client', 'dist')
-    ];
-    const fs = require('fs');
-    clientBuildPath = locations.find(loc => fs.existsSync(loc)) || locations[0];
-} else {
-    clientBuildPath = path.join(process.cwd(), '..', 'client', 'dist');
+    ].filter((value): value is string => Boolean(value));
+
+    return locations.find(loc => fs.existsSync(path.join(loc, 'index.html'))) || locations[0];
 }
+
+const clientBuildPath = resolveClientBuildPath();
 console.log('[Server] Serving client build from:', clientBuildPath);
 
 app.use(express.static(clientBuildPath));

@@ -70,6 +70,10 @@ function resolvePackagedTarget(platform) {
   };
 }
 
+function isUsingStagedBinary(packagedTarget) {
+  return path.resolve(packagedTarget.binaryPath) === path.resolve(target.binaryPath);
+}
+
 function inspectOutput(chunk, state) {
   for (const pattern of rendererReadyPatterns) {
     if (chunk.includes(pattern)) {
@@ -336,6 +340,18 @@ async function runDirectSmokeTest(packagedTarget) {
 }
 
 const packagedTarget = resolvePackagedTarget(target);
+const usingStagedBinary = isUsingStagedBinary(packagedTarget);
+
+if (process.env.REQUIRE_STAGED_BINARY === "1" && !usingStagedBinary) {
+  console.error(
+    `Packaged ${target.label} smoke test expected the staged depot binary at ${target.binaryPath}, got ${packagedTarget.binaryPath}`
+  );
+  process.exit(1);
+}
+
+console.log(`[SmokeTest] Launch target: ${packagedTarget.binaryPath}`);
+console.log(`[SmokeTest] Launch cwd: ${packagedTarget.cwd}`);
+console.log(`[SmokeTest] Using staged depot binary: ${usingStagedBinary}`);
 
 if (target.key === "macos") {
   await runMacSmokeTest(packagedTarget);
