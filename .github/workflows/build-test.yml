@@ -290,11 +290,6 @@ jobs:
             exit 1
           fi
 
-      - name: Sync staged Steam App IDs for Demo
-        run: |
-          cd client
-          node scripts/sync-steam-appids.mjs demo
-
       - name: Generate Steam TOTP
         id: steam-totp
         if: steps.steam-auth.outputs.mode == 'totp'
@@ -303,7 +298,9 @@ jobs:
           shared_secret: ${{ secrets.STEAM_SHARED_SECRET }}
 
       - name: Steam Deploy Demo (TOTP)
+        id: steam-deploy-demo-totp
         if: steps.steam-auth.outputs.mode == 'totp'
+        continue-on-error: true
         uses: game-ci/steam-deploy@v3
         with:
           username: ${{ secrets.STEAM_USERNAME }}
@@ -318,13 +315,10 @@ jobs:
           depot3Path: releases/steam/linux
           releaseBranch: public
 
-      - name: Sync staged Steam App IDs for Main Game
-        run: |
-          cd client
-          node scripts/sync-steam-appids.mjs main
-
       - name: Steam Deploy Main (TOTP)
+        id: steam-deploy-main-totp
         if: steps.steam-auth.outputs.mode == 'totp'
+        continue-on-error: true
         uses: game-ci/steam-deploy@v3
         with:
           username: ${{ secrets.STEAM_USERNAME }}
@@ -340,7 +334,9 @@ jobs:
           releaseBranch: public
 
       - name: Steam Deploy Demo (config.vdf)
+        id: steam-deploy-demo-config
         if: steps.steam-auth.outputs.mode == 'config'
+        continue-on-error: true
         uses: game-ci/steam-deploy@v3
         with:
           username: ${{ secrets.STEAM_USERNAME }}
@@ -355,7 +351,9 @@ jobs:
           releaseBranch: public
 
       - name: Steam Deploy Main (config.vdf)
+        id: steam-deploy-main-config
         if: steps.steam-auth.outputs.mode == 'config'
+        continue-on-error: true
         uses: game-ci/steam-deploy@v3
         with:
           username: ${{ secrets.STEAM_USERNAME }}
@@ -368,6 +366,34 @@ jobs:
           depot2Path: releases/steam/microsoft-windows
           depot3Path: releases/steam/linux
           releaseBranch: public
+
+      - name: Summarize Steam deploy outcomes
+        if: always()
+        shell: bash
+        run: |
+          echo "Steam deploy outcomes" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Demo (TOTP):   ${{ steps.steam-deploy-demo-totp.outcome || 'skipped' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Main (TOTP):   ${{ steps.steam-deploy-main-totp.outcome || 'skipped' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Demo (config): ${{ steps.steam-deploy-demo-config.outcome || 'skipped' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Main (config): ${{ steps.steam-deploy-main-config.outcome || 'skipped' }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail if any Steam deploy failed
+        if: always()
+        shell: bash
+        run: |
+          outcomes=(
+            "${{ steps.steam-deploy-demo-totp.outcome || 'skipped' }}"
+            "${{ steps.steam-deploy-main-totp.outcome || 'skipped' }}"
+            "${{ steps.steam-deploy-demo-config.outcome || 'skipped' }}"
+            "${{ steps.steam-deploy-main-config.outcome || 'skipped' }}"
+          )
+
+          for outcome in "${outcomes[@]}"; do
+            if [ "$outcome" = "failure" ]; then
+              echo "::error::One or more Steam deploy steps failed."
+              exit 1
+            fi
+          done
 
       - name: Steam deploy hint (on failure)
         if: failure()

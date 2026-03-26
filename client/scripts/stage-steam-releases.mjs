@@ -42,6 +42,27 @@ function syncLaunchExecutableMode(platform) {
   fs.chmodSync(stagedExecutablePath, sourceMode || 0o755);
 }
 
+function removeIfExists(filePath) {
+  if (fs.existsSync(filePath)) {
+    fs.rmSync(filePath, { force: true });
+  }
+}
+
+function stripSteamAppIdFiles(platform) {
+  const stagedPaths = [path.join(platform.stageDir, "steam_appid.txt")];
+
+  if (platform.key === "macos") {
+    stagedPaths.push(
+      path.join(platform.stageDir, "ConquerorsDominationDemo.app", "Contents", "MacOS", "steam_appid.txt"),
+      path.join(platform.stageDir, "ConquerorsDominationDemo.app", "Contents", "Resources", "steam_appid.txt")
+    );
+  }
+
+  for (const stagedPath of stagedPaths) {
+    removeIfExists(stagedPath);
+  }
+}
+
 const selectedPlatforms = getSelectedPlatforms();
 const selectedLaunchOptions = getSelectedLaunchOptions();
 
@@ -52,6 +73,7 @@ for (const platform of selectedPlatforms) {
   ensureSourceExists(platform);
   copyDirectoryContents(platform.sourceDir, platform.stageDir);
   syncLaunchExecutableMode(platform);
+  stripSteamAppIdFiles(platform);
 }
 
 const manifest = {

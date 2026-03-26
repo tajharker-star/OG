@@ -99,6 +99,7 @@ const selectedPlatforms = getSelectedPlatforms();
 
 for (const platform of selectedPlatforms) {
   const fileCount = countFilesRecursively(platform.stageDir);
+  const rootSteamAppIdPath = path.join(platform.stageDir, "steam_appid.txt");
 
   check(
     fs.existsSync(platform.binaryPath),
@@ -120,6 +121,21 @@ for (const platform of selectedPlatforms) {
     fileCount >= platform.minimumFileCount,
     `${platform.label} staged release looks incomplete. Expected at least ${platform.minimumFileCount} files, found ${fileCount}`
   );
+  check(
+    !fs.existsSync(rootSteamAppIdPath),
+    `${platform.label} staged release should not include ${path.relative(clientDir, rootSteamAppIdPath)}`
+  );
+
+  if (platform.bundlePath) {
+    check(
+      !fs.existsSync(path.join(platform.bundlePath, "Contents", "MacOS", "steam_appid.txt")),
+      `${platform.label} staged release should not include steam_appid.txt inside Contents/MacOS`
+    );
+    check(
+      !fs.existsSync(path.join(platform.bundlePath, "Contents", "Resources", "steam_appid.txt")),
+      `${platform.label} staged release should not include steam_appid.txt inside Contents/Resources`
+    );
+  }
 
   if (shouldCompareSourceOutputs) {
     compareDirectoryContents(currentRendererDistDir, platform.rendererDir, `${platform.label} renderer dist`);

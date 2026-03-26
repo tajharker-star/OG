@@ -180,8 +180,6 @@ export async function uploadWithSteamCmd(
     ? ["+login", steamUsername, steamPassword]
     : ["+login", steamUsername];
 
-  syncSteamAppIdFiles(target);
-
   const appBuildPath = options.disableSetLive ? createNoLiveAppBuildPath(target) : target.appBuildPath;
 
   try {

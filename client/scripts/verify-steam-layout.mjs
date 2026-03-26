@@ -55,6 +55,7 @@ for (const platform of selectedPlatforms) {
   const depotBuildPath = path.join(clientDir, "steampipe", `depot_build_${platform.depotId}.vdf`);
   const depotBuild = fs.readFileSync(depotBuildPath, "utf8");
   const localPath = vdfValue(depotBuild, "LocalPath");
+  const rootSteamAppIdPath = path.join(platform.stageDir, "steam_appid.txt");
 
   check(
     appBuild.includes(`"${platform.depotId}" "depot_build_${platform.depotId}.vdf"`),
@@ -72,11 +73,23 @@ for (const platform of selectedPlatforms) {
     fs.existsSync(platform.binaryPath),
     `Missing staged ${platform.label} launch target at ${path.relative(clientDir, platform.binaryPath)}`
   );
+  check(
+    !fs.existsSync(rootSteamAppIdPath),
+    `${platform.label} staged depot should not contain ${path.relative(clientDir, rootSteamAppIdPath)}`
+  );
 
   if (platform.bundlePath) {
     check(
       fs.existsSync(platform.bundlePath),
       `Missing staged ${platform.label} app bundle at ${path.relative(clientDir, platform.bundlePath)}`
+    );
+    check(
+      !fs.existsSync(path.join(platform.bundlePath, "Contents", "MacOS", "steam_appid.txt")),
+      `${platform.label} staged depot should not contain steam_appid.txt inside Contents/MacOS`
+    );
+    check(
+      !fs.existsSync(path.join(platform.bundlePath, "Contents", "Resources", "steam_appid.txt")),
+      `${platform.label} staged depot should not contain steam_appid.txt inside Contents/Resources`
     );
   }
 
