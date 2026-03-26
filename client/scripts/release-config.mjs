@@ -22,7 +22,7 @@ export const platforms = [
     stageDir: stageDir("microsoft-windows"),
     steamLocalPath: "releases/steam/microsoft-windows/*",
     binaryPath: path.join(stageDir("microsoft-windows"), "ConquerorsDominationDemo.exe"),
-    fileSignature: "PE32+ executable (GUI) x86-64, for MS Windows",
+    fileSignature: "PE32+ executable",
     resourcePath: path.join(stageDir("microsoft-windows"), "resources", "app.asar"),
     rendererIndexPath: path.join(stageDir("microsoft-windows"), "resources", "dist", "index.html"),
     serverEntryPath: path.join(stageDir("microsoft-windows"), "resources", "server", "dist", "index.js"),
