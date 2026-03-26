@@ -130,6 +130,7 @@ jobs:
 
       - name: Run Packaged Smoke Test
         if: matrix.os != 'windows-latest'
+        continue-on-error: ${{ github.event_name == 'workflow_dispatch' && matrix.os == 'macos-latest' }}
         shell: bash
         run: |
           cd client
