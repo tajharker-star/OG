@@ -1,0 +1,41 @@
+
+        <svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+                <radialGradient id="bg" cx="50%" cy="38%" r="70%">
+                    <stop offset="0%" stop-color="#152235" />
+                    <stop offset="62%" stop-color="#0e1624" />
+                    <stop offset="100%" stop-color="#09111d" />
+                </radialGradient>
+                <linearGradient id="ring" x1="24" y1="24" x2="228" y2="232">
+                    <stop offset="0%" stop-color="#d0d7e4" />
+                    <stop offset="100%" stop-color="#7c8799" />
+                </linearGradient>
+                <linearGradient id="plate" x1="76" y1="54" x2="176" y2="202">
+                    <stop offset="0%" stop-color="#151820" />
+                    <stop offset="100%" stop-color="#0a0f19" />
+                </linearGradient>
+                <filter id="softGlow" x="-40%" y="-40%" width="180%" height="180%">
+                    <feDropShadow dx="0" dy="0" stdDeviation="10" flood-color="rgba(167, 176, 191, 0.2)" />
+                </filter>
+            </defs>
+            <rect x="0" y="0" width="256" height="256" rx="52" fill="#060b13" />
+            <circle cx="128" cy="128" r="98" fill="url(#bg)" />
+            <circle cx="128" cy="128" r="96" fill="none" stroke="url(#ring)" stroke-width="12" filter="url(#softGlow)" />
+            <circle cx="128" cy="128" r="79" fill="url(#plate)" stroke="#a6b1c2" stroke-width="2" opacity="0.96" />
+            <path d="M58 72C84 48 115 38 154 42C176 44 196 52 214 68" fill="none" stroke="#d0d7e4" stroke-width="6" stroke-linecap="round" opacity="0.22" />
+            <path d="M52 194C76 212 102 220 128 220C155 220 182 211 204 194" fill="none" stroke="#7c8799" stroke-width="5" stroke-linecap="round" opacity="0.18" />
+            <rect x="58" y="28" width="140" height="28" rx="14" fill="rgba(153, 165, 183, 0.18)" stroke="rgba(179, 191, 208, 0.25)" />
+            <text x="128" y="47" text-anchor="middle" fill="#dce4ef" font-family="'Avenir Next', 'Trebuchet MS', sans-serif" font-size="13" font-weight="700" letter-spacing="1.8">LOCKED</text>
+            
+                <path d="M110 76L128 102L146 76 M110 76L98 106 M146 76L158 106 M98 106H158" stroke="#d5dde9" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" />
+                <circle cx="110" cy="76" r="8" fill="#d5dde9" />
+                <circle cx="128" cy="102" r="8" fill="#d5dde9" />
+                <circle cx="146" cy="76" r="8" fill="#d5dde9" />
+                <circle cx="98" cy="106" r="7" fill="#d5dde9" opacity="0.88" />
+                <circle cx="158" cy="106" r="7" fill="#d5dde9" opacity="0.88" />
+            
+            <text x="128" y="164" text-anchor="middle" fill="#edf2f8" font-family="'Avenir Next Condensed', 'Avenir Next', 'Trebuchet MS', sans-serif" font-size="52" font-weight="800" letter-spacing="2">NI</text>
+            <polygon points="128,196 130.35114100916988,200.7639320225002 135.60845213036123,201.52786404500043 131.80422606518061,205.2360679774998 132.7022820183398,210.47213595499957 128,208 123.29771798166021,210.47213595499957 124.19577393481939,205.2360679774998 120.39154786963877,201.52786404500043 125.6488589908301,200.7639320225002" fill="#b5c0cf" opacity="0.96" />
+            <text x="128" y="232" text-anchor="middle" fill="#98a5b8" font-family="'Avenir Next', 'Trebuchet MS', sans-serif" font-size="10" font-weight="700" letter-spacing="3">NETWORK INITIATE</text>
+        </svg>
+    

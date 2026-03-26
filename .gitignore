@@ -19,9 +19,12 @@ Thumbs.db
 # Environment
 .env
 .env.local
+client/.steam-secrets
 
 # Electron packaged server copy
 client/server/
+client/steampipe/output/
+client/steampipe/*.bak
 
 # Test output
 client/tests/output/

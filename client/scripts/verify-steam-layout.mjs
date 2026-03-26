@@ -1,11 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
-import { clientDir, installFolder, platforms, releaseRoot } from "./release-config.mjs";
+import { clientDir, getSelectedPlatforms, installFolder, platforms, releaseRoot } from "./release-config.mjs";
 
 const appBuildPath = path.join(clientDir, "steampipe", "app_build_4432220.vdf");
 const appBuild = fs.readFileSync(appBuildPath, "utf8");
 const packageJson = JSON.parse(fs.readFileSync(path.join(clientDir, "package.json"), "utf8"));
 const errors = [];
+const selectedPlatforms = getSelectedPlatforms();
+const depotIdsInAppBuild = [...appBuild.matchAll(/"(\d+)"\s+"depot_build_[^"]+\.vdf"/g)].map((match) => match[1]);
+const expectedDepotIds = platforms.map((platform) => platform.depotId).sort();
 
 function vdfValue(contents, key) {
   const match = contents.match(new RegExp(`"${key}"\\s+"([^"]+)"`));
@@ -39,8 +42,16 @@ check(
   fs.existsSync(path.join(releaseRoot, "platform-manifest.json")),
   `Missing platform manifest at ${path.relative(clientDir, path.join(releaseRoot, "platform-manifest.json"))}`
 );
+check(
+  JSON.stringify([...depotIdsInAppBuild].sort()) === JSON.stringify(expectedDepotIds),
+  `app_build_4432220.vdf should contain only demo platform depots ${expectedDepotIds.join(", ")}, found ${depotIdsInAppBuild.join(", ") || "(none)"}`
+);
+check(
+  !appBuild.includes('"4432221" "depot_build_4432221.vdf"'),
+  "app_build_4432220.vdf must not include the placeholder shared-base depot 4432221"
+);
 
-for (const platform of platforms) {
+for (const platform of selectedPlatforms) {
   const depotBuildPath = path.join(clientDir, "steampipe", `depot_build_${platform.depotId}.vdf`);
   const depotBuild = fs.readFileSync(depotBuildPath, "utf8");
   const localPath = vdfValue(depotBuild, "LocalPath");
@@ -87,6 +98,6 @@ if (errors.length > 0) {
 }
 
 console.log(`Steam layout verified for install folder: ${installFolder}`);
-for (const platform of platforms) {
+for (const platform of selectedPlatforms) {
   console.log(`- ${platform.label}: ${platform.launchExecutable}`);
 }

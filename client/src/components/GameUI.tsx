@@ -3,6 +3,7 @@ import { socket, connectionManager } from '../services/socket';
 import { steamService } from '../services/steam';
 import type { ConnectionState } from '../services/socket';
 import type { Player, GameMap, Unit } from '../types/game';
+import type { MatchResult, MatchSource, MatchStatisticsSummary } from '../utils/playerStatistics';
 import { SettingsModal } from './SettingsModal';
 import { settingsManager } from '../game/SettingsManager';
 import { Confetti } from './Confetti';
@@ -285,6 +286,8 @@ interface GameUIProps {
     initialGameStatus?: 'waiting' | 'voting' | 'playing';
     isLocalMode?: boolean;
     isDevBypass?: boolean;
+    matchStatsSource?: MatchSource;
+    onMatchResolved?: (summary: MatchStatisticsSummary) => void;
 }
 
 type LoadingCheckItem = {
@@ -306,6 +309,7 @@ const getIconForType = (type: string) => {
         case 'sniper': return '🎯';
         case 'rocketeer': return '🚀';
         case 'destroyer': return '🚢';
+        case 'pirate_ship': return '🏴‍☠️';
         case 'construction_ship': return '🏗️';
         case 'ferry': return '⛴️';
         case 'builder': return '🛠️';
@@ -318,11 +322,14 @@ const getIconForType = (type: string) => {
         case 'wall': return '🧱';
         case 'bridge_node': return '🌉';
         case 'wall_node': return '🏰';
+        case 'naval_mine': return '💣';
         case 'tank_factory': return '🏭';
         case 'tank': return '🚜';
         case 'humvee': return '🚙';
         case 'missile_launcher': return '🚚';
         case 'air_base': return '🛫';
+        case 'hospital': return '🏥';
+        case 'repair_dock': return '🛠️';
         case 'light_plane': return '🛩️';
         case 'heavy_plane': return '✈️';
         case 'aircraft_carrier': return '🛳️';
@@ -331,7 +338,15 @@ const getIconForType = (type: string) => {
     }
 };
 
-export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStatus, isLocalMode = false, isDevBypass = false }) => {
+export const GameUI: React.FC<GameUIProps> = ({
+    onLeave,
+    roomId,
+    initialGameStatus,
+    isLocalMode = false,
+    isDevBypass = false,
+    matchStatsSource = 'lan',
+    onMatchResolved,
+}) => {
     const [player, setPlayer] = useState<Player | null>(null);
     const [hoverInfo, setHoverInfo] = useState<any>(null);
     const [selectedIslandId, setSelectedIslandId] = useState<string | null>(null);
@@ -414,6 +429,8 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
     // Client-Side Gate (Anti-Bounce)
     const clientMatchState = useRef<'LOBBY' | 'STARTING' | 'IN_MATCH'>('LOBBY');
     const activeMatchId = useRef<string | null>(null);
+    const matchStatsReportedRef = useRef(false);
+    const matchReadySignalSentRef = useRef(false);
 
     // Debug State
     const [showDebug, setShowDebug] = useState(false);
@@ -427,6 +444,28 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
             setGameStatus(initialGameStatus);
         }
     }, [initialGameStatus]);
+
+    useEffect(() => {
+        if (gameStatus !== 'playing') {
+            matchReadySignalSentRef.current = false;
+        }
+    }, [gameStatus]);
+
+    useEffect(() => {
+        playerSnapshotRef.current = player;
+    }, [player]);
+
+    useEffect(() => {
+        allPlayersSnapshotRef.current = allPlayers;
+    }, [allPlayers]);
+
+    useEffect(() => {
+        onMatchResolvedRef.current = onMatchResolved;
+    }, [onMatchResolved]);
+
+    useEffect(() => {
+        matchStatsSourceRef.current = matchStatsSource;
+    }, [matchStatsSource]);
 
     // Reset stats minimization when selection changes
     useEffect(() => {
@@ -490,17 +529,39 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
     const [socketHandlersReady, setSocketHandlersReady] = useState(false);
 
     const canvasRef = useRef<HTMLCanvasElement>(null);
+    const playerSnapshotRef = useRef<Player | null>(null);
+    const allPlayersSnapshotRef = useRef<Map<string, Player>>(new Map());
+    const onMatchResolvedRef = useRef<GameUIProps['onMatchResolved']>(onMatchResolved);
+    const matchStatsSourceRef = useRef<MatchSource>(matchStatsSource);
+
+    const reportMatchResult = (result: MatchResult) => {
+        if (matchStatsReportedRef.current || !onMatchResolvedRef.current) {
+            return;
+        }
+
+        const roster = Array.from(allPlayersSnapshotRef.current.values());
+        const humanPlayers = Math.max(
+            roster.filter(candidate => !candidate.isBot).length,
+            playerSnapshotRef.current && !playerSnapshotRef.current.isBot ? 1 : 0
+        );
+        const botPlayers = roster.filter(candidate => candidate.isBot).length;
+        const source = matchStatsSourceRef.current;
+
+        matchStatsReportedRef.current = true;
+        onMatchResolvedRef.current({
+            result,
+            source,
+            humanPlayers,
+            botPlayers,
+            coop: botPlayers > 0,
+            ranked: source === 'steam' && humanPlayers >= 2 && botPlayers === 0,
+        });
+    };
 
     useEffect(() => {
         const unsubscribe = connectionManager.subscribe(setConnectionState);
         return unsubscribe;
     }, []);
-
-    useEffect(() => {
-        if (connectionState.phase === 'IDLE') {
-            connectionManager.connect(connectionState.url);
-        }
-    }, [connectionState.phase]);
 
     useEffect(() => {
         // Request game state only after socket listeners are attached,
@@ -537,6 +598,7 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
         const enteredLobby = (gameStatus === 'waiting' || gameStatus === 'voting') && (firstRun || prevStatus === 'playing');
 
         if (enteredMatch) {
+            matchStatsReportedRef.current = false;
             pingSamplesRef.current = [];
             fpsSamplesRef.current = [];
             setHasUnitsSnapshot(false);
@@ -733,6 +795,13 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
     }, [isMatchLoading, matchLoadChecks]);
 
     useEffect(() => {
+        if (gameStatus !== 'playing' || isMatchLoading || !socket.connected) return;
+        if (matchReadySignalSentRef.current) return;
+        matchReadySignalSentRef.current = true;
+        socket.emit('player_match_ready');
+    }, [gameStatus, isMatchLoading, socket]);
+
+    useEffect(() => {
         const shouldLockMatchInput = gameStatus === 'playing' && isMatchLoading;
         if ((window as any).gameMenuMode === shouldLockMatchInput) return;
         (window as any).gameMenuMode = shouldLockMatchInput;
@@ -819,6 +888,7 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
             setLocalBaseVisible(false);
             setLocalHqConfirmed(false);
             setMatchLoadTimedOut(false);
+            matchReadySignalSentRef.current = false;
             setMatchLoadChecks({
                 map: false,
                 units: false,
@@ -857,12 +927,23 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
                     mode: isMe ? 'VICTORY' : 'DEFEAT',
                     canSpectate: !isMe
                 });
+
+                reportMatchResult(isMe ? 'win' : 'loss');
             }
         };
 
         const handleMatchEnded = (data: { winnerPlayerId: string | null, eliminatedPlayerIds: string[], endReason: string, timestamp: number }) => {
-            const isMe = data.winnerPlayerId === socket.id;
-            console.log(`MATCH_ENDED received. Winner: ${data.winnerPlayerId}, Local: ${socket.id}, DidWin: ${isMe}`);
+            const localPlayerId = socket.id || playerSnapshotRef.current?.id || null;
+            const isMe = !!localPlayerId && data.winnerPlayerId === localPlayerId;
+            const wasEliminated = !!localPlayerId && data.eliminatedPlayerIds.includes(localPlayerId);
+            const result: MatchResult = isMe
+                ? 'win'
+                : (data.winnerPlayerId && data.winnerPlayerId !== localPlayerId)
+                    ? 'loss'
+                    : wasEliminated
+                        ? 'loss'
+                        : 'draw';
+            console.log(`MATCH_ENDED received. Winner: ${data.winnerPlayerId}, Local: ${localPlayerId}, Result: ${result}`);
 
             setWinnerId(data.winnerPlayerId);
             setGameOverReason(data.endReason);
@@ -877,8 +958,10 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
                 steamService.activateAchievement('WIN_GAME');
             }
 
+            reportMatchResult(result);
+
             // If we are in eliminated list and not already marked
-            if (socket.id && data.eliminatedPlayerIds.includes(socket.id)) {
+            if (wasEliminated) {
                 setEliminated(true);
                 setSpectating(true);
             }
@@ -893,6 +976,7 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
                     canSpectate: true,
                     reason: data.reason
                 });
+                reportMatchResult('loss');
             }
         };
 
@@ -962,11 +1046,20 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
         const handleUnitSelection = (e: CustomEvent) => {
             const detail = e.detail || {};
             setSelectedUnitIds(detail.unitIds || []);
+            if ((detail.unitIds || []).length > 0) {
+                setSelectedIslandId(null);
+                setSelectedBuildingId(null);
+                setSelectedBuildingType(null);
+                setSelectedBuildingIds([]);
+            }
         };
 
         const handleBuildingSelection = (e: CustomEvent) => {
             const detail = e.detail || {};
             setSelectedBuildingIds(detail.buildingIds || []);
+            if ((detail.buildingIds || []).length > 0) {
+                setSelectedUnitIds([]);
+            }
         };
 
         const handleMinimapUpdate = (e: CustomEvent) => {
@@ -1498,6 +1591,9 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
             label: 'Defenses',
             buildings: [
                 { type: 'tower', label: 'Tower (40g)', icon: '🏰' },
+                { type: 'hospital', label: 'Hospital (150g, 20o)', icon: '🏥' },
+                { type: 'repair_dock', label: 'Repair Dock (220g, 40o)', icon: '🛠️' },
+                { type: 'naval_mine', label: 'Naval Mine (120g, 20o)', icon: '💣' },
                 { type: 'wall', label: 'Wall (10g)', icon: '🧱' },
                 { type: 'wall_node', label: 'Wall Node (20g)', icon: '🏰' },
                 { type: 'bridge_node', label: 'Bridge Node (50g)', icon: '🌉' }
@@ -1559,14 +1655,13 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
     }, [activeCategory, categories, mapData]);
 
     const recruit = (type: string) => {
+        if (selectedUnitItem && (selectedUnitItem.type === 'mothership' || selectedUnitItem.type === 'aircraft_carrier')) {
+            socket.emit('recruit', { islandId: null, buildingId: selectedUnitItem.id, type });
+            return;
+        }
+
         if (selectedIslandId && selectedBuildingId && selectedBuildingType) {
             socket.emit('recruit', { islandId: selectedIslandId, buildingId: selectedBuildingId, type });
-        } else if (selectedUnitIds.length > 0) {
-            // Check if selected unit is a Mothership
-            const unit = units.find(u => u.id === selectedUnitIds[0]);
-            if (unit && (unit.type === 'mothership' || unit.type === 'aircraft_carrier')) {
-                socket.emit('recruit', { islandId: null, buildingId: unit.id, type });
-            }
         }
     };
 
@@ -1986,13 +2081,101 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
 
     const connectNodes = () => {
         if (selectedNodeIds.length >= 2) {
-            // Connect nodes in a chain (0-1, 1-2, 2-3, etc.)
-            for (let i = 0; i < selectedNodeIds.length - 1; i++) {
-                socket.emit('connect_nodes', { nodeAId: selectedNodeIds[i], nodeBId: selectedNodeIds[i + 1] });
+            const orderedNodeIds = selectedNodesAreBridgeChain
+                ? getOrderedBridgeChainNodeIds(selectedNodeIds)
+                : selectedNodeIds;
+
+            for (let i = 0; i < orderedNodeIds.length - 1; i++) {
+                socket.emit('connect_nodes', { nodeAId: orderedNodeIds[i], nodeBId: orderedNodeIds[i + 1] });
             }
             setSelectedNodeIds([]);
         }
     };
+
+    const getNodePosition = (nodeId: string): { x: number; y: number } | null => {
+        for (const island of mapData?.islands || []) {
+            const node = island.buildings.find(building => building.id === nodeId);
+            if (node) {
+                return {
+                    x: island.x + (node.x || 0),
+                    y: island.y + (node.y || 0)
+                };
+            }
+        }
+
+        for (const building of mapData?.waterBuildings || []) {
+            if (building.id === nodeId) {
+                return {
+                    x: building.x || 0,
+                    y: building.y || 0
+                };
+            }
+        }
+
+        return null;
+    };
+
+    const getOrderedBridgeChainNodeIds = (nodeIds: string[]): string[] => {
+        const positionedNodes = nodeIds
+            .map(id => {
+                const position = getNodePosition(id);
+                return position ? { id, ...position } : null;
+            })
+            .filter((node): node is { id: string; x: number; y: number } => !!node);
+
+        if (positionedNodes.length <= 2) {
+            return positionedNodes.map(node => node.id);
+        }
+
+        let startNode = positionedNodes[0];
+        let endNode = positionedNodes[1];
+        let maxDistance = -1;
+
+        for (let i = 0; i < positionedNodes.length - 1; i += 1) {
+            for (let j = i + 1; j < positionedNodes.length; j += 1) {
+                const distance = Math.hypot(
+                    positionedNodes[j].x - positionedNodes[i].x,
+                    positionedNodes[j].y - positionedNodes[i].y
+                );
+                if (distance > maxDistance) {
+                    maxDistance = distance;
+                    startNode = positionedNodes[i];
+                    endNode = positionedNodes[j];
+                }
+            }
+        }
+
+        const dx = endNode.x - startNode.x;
+        const dy = endNode.y - startNode.y;
+        const lengthSq = dx * dx + dy * dy;
+        if (lengthSq <= 1) {
+            return positionedNodes.map(node => node.id);
+        }
+
+        return [...positionedNodes]
+            .sort((left, right) => {
+                const leftProjection = ((left.x - startNode.x) * dx + (left.y - startNode.y) * dy) / lengthSq;
+                const rightProjection = ((right.x - startNode.x) * dx + (right.y - startNode.y) * dy) / lengthSq;
+                return leftProjection - rightProjection;
+            })
+            .map(node => node.id);
+    };
+
+    const getSelectedNodeType = (nodeId: string) => {
+        for (const island of mapData?.islands || []) {
+            const node = island.buildings.find(building => building.id === nodeId);
+            if (node) return node.type;
+        }
+        for (const building of mapData?.waterBuildings || []) {
+            if (building.id === nodeId) return building.type;
+        }
+        return null;
+    };
+
+    const selectedNodeTypes = selectedNodeIds.map(getSelectedNodeType).filter(Boolean);
+    const selectedNodesAreBridgeChain =
+        selectedNodeTypes.length > 0 &&
+        selectedNodeTypes.every(type => type === 'bridge_node');
 
     let recruitTitle = '';
     let recruitOptions: { type: string; label: string }[] = [];
@@ -2024,6 +2207,7 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
         } else if (selectedBuildingType === 'dock') {
             recruitTitle = 'Dock Recruitment';
             recruitOptions = [
+                { type: 'pirate_ship', label: '🏴‍☠️ Pirate Ship (200g)' },
                 { type: 'destroyer', label: '🚢 Destroyer (50g, 10o)' },
                 { type: 'construction_ship', label: '🏗️ Construction Ship (100g)' },
                 { type: 'ferry', label: '⛴️ Ferry (100g, 50o)' },
@@ -2125,11 +2309,11 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
             'Starting Match',
             matchLoadTimedOut
                 ? (waitingForHq
-                    ? 'Waiting for your headquarters to be confirmed before gameplay can begin.'
-                    : 'Network is still syncing. Entering game view as soon as core data is ready.')
+                    ? 'Waiting for your headquarters to be confirmed before gameplay can begin. Bots stay paused until every human commander is ready.'
+                    : 'Network is still syncing. Bots stay paused until every human commander is ready to begin.')
                 : (waitingForHq
-                    ? 'Verifying your headquarters and syncing the opening map state.'
-                    : 'Loading map, units, and stabilizing ping/FPS'),
+                    ? 'Verifying your headquarters and syncing the opening map state before the start gate opens for everyone.'
+                    : 'Loading map, units, and stabilizing ping/FPS while bots wait for every human commander to finish loading.'),
             matchLoadItems
         );
     }
@@ -2435,9 +2619,9 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
                                     onClick={connectNodes}
                                     className="bridge-btn bridge-btn-connect"
                                 >
-                                    Connect Chain
+                                    {selectedNodesAreBridgeChain ? 'Connect Bridge Chain' : 'Connect Chain'}
                                 </button>
-                                {selectedNodeIds.length > 2 && (
+                                {selectedNodeIds.length > 2 && !selectedNodesAreBridgeChain && (
                                     <button
                                         onClick={() => {
                                             if (selectedNodeIds.length >= 2) {

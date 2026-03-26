@@ -1,0 +1,11 @@
+"DepotBuild"
+{
+	"DepotID" "4432212"
+	"FileMapping"
+	{
+		"LocalPath" "releases/steam/macos/*"
+		"DepotPath" "."
+		"recursive" "1"
+	}
+	"FileExclusion" "*.DS_Store"
+}

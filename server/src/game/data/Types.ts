@@ -29,4 +29,8 @@ export interface BuildingStats {
     description?: string;
     canAttackAir?: boolean; // Can this building attack air units?
     radius?: number; // Optional collision/hitbox radius
+    hiddenFromEnemies?: boolean;
+    minSpacing?: number;
+    burnDurationMs?: number;
+    burnDamagePercentPerSecond?: number;
 }

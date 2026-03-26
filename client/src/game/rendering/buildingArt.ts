@@ -7,6 +7,8 @@ export const BUILDING_PREVIEW_TYPES: Building['type'][] = [
   'barracks',
   'tank_factory',
   'air_base',
+  'hospital',
+  'repair_dock',
   'dock',
   'tower',
   'mine',
@@ -15,7 +17,8 @@ export const BUILDING_PREVIEW_TYPES: Building['type'][] = [
   'farm',
   'wall',
   'bridge_node',
-  'wall_node'
+  'wall_node',
+  'naval_mine'
 ];
 
 export const BUILDING_PREVIEW_LABELS: Record<Building['type'], string> = {
@@ -23,6 +26,8 @@ export const BUILDING_PREVIEW_LABELS: Record<Building['type'], string> = {
   barracks: 'Barracks',
   tank_factory: 'Tank Factory',
   air_base: 'Air Base',
+  hospital: 'Hospital',
+  repair_dock: 'Repair Dock',
   dock: 'Dock',
   tower: 'Guard Tower',
   mine: 'Gold Mine',
@@ -31,7 +36,8 @@ export const BUILDING_PREVIEW_LABELS: Record<Building['type'], string> = {
   farm: 'Farm',
   wall: 'Wall',
   bridge_node: 'Bridge Node',
-  wall_node: 'Wall Node'
+  wall_node: 'Wall Node',
+  naval_mine: 'Naval Mine'
 };
 
 function mixColor(base: number, target: number, t: number) {
@@ -296,6 +302,38 @@ export function createBuildingArt(
     const bannerBracket = scene.add.rectangle(17, -12, 4, 2, metal);
     const banner = scene.add.polygon(19, -12, [0, 0, 10, 2, 0, 8], accent);
     container.add([slab, base, roof, awning, awningPostLeft, awningPostRight, door, window1, window2, bannerPole, bannerBracket, banner]);
+  } else if (type === 'hospital') {
+    const slab = scene.add.rectangle(0, 13, 40, 6, darken(hull, 0.08));
+    const base = scene.add.rectangle(0, 5, 36, 20, hull);
+    const roof = scene.add.rectangle(0, -7, 30, 10, panel);
+    const wingLeft = scene.add.rectangle(-12, 1, 8, 14, darken(panel, 0.12));
+    const wingRight = scene.add.rectangle(12, 1, 8, 14, darken(panel, 0.12));
+    const door = scene.add.rectangle(0, 9, 8, 10, 0x111927);
+    const crossVertical = scene.add.rectangle(0, -4, 4, 14, accent);
+    const crossHorizontal = scene.add.rectangle(0, -4, 14, 4, accent);
+    const windowLeft = scene.add.rectangle(-8, 3, 5, 5, windowColor);
+    const windowRight = scene.add.rectangle(8, 3, 5, 5, windowColor);
+    const beacon = scene.add.circle(14, -10, 3, accent);
+    container.add([slab, base, roof, wingLeft, wingRight, door, crossVertical, crossHorizontal, windowLeft, windowRight, beacon]);
+  } else if (type === 'repair_dock') {
+    const foundation = scene.add.rectangle(0, 13, 40, 6, darken(hull, 0.08));
+    const floor = scene.add.rectangle(0, 6, 36, 18, hull);
+    const gantryBase = scene.add.rectangle(-10, -3, 8, 16, panel);
+    const gantryArm = scene.add.line(-10, -10, 0, 0, 18, -8, trim);
+    const gantryHook = scene.add.line(8, -8, 0, 0, 0, 12, trim);
+    const servicePad = scene.add.rectangle(8, 7, 14, 8, darken(panel, 0.1));
+    const toolRack = scene.add.rectangle(0, -8, 14, 6, metal);
+    const spark1 = scene.add.circle(6, -6, 2, accent);
+    const spark2 = scene.add.circle(10, -9, 2, lighten(accent, 0.3));
+    const beacon = scene.add.circle(-14, -10, 3, accent);
+    container.add([foundation, floor, gantryBase, gantryArm, gantryHook, servicePad, toolRack, spark1, spark2, beacon]);
+    scene.tweens.add({
+      targets: [spark1, spark2],
+      alpha: 0.2,
+      duration: 500,
+      yoyo: true,
+      repeat: -1
+    });
   } else if (type === 'dock') {
     const foundation = scene.add.rectangle(0, 13, 38, 6, 0x5b4836);
     const pier = scene.add.rectangle(0, 2, 34, 20, 0x6f563f);
@@ -371,6 +409,23 @@ export function createBuildingArt(
       scaleY: 1.35,
       alpha: 0.45,
       duration: 450,
+      yoyo: true,
+      repeat: -1
+    });
+  } else if (type === 'naval_mine') {
+    const wake = scene.add.ellipse(0, 8, 26, 10, 0x23415a, 0.45);
+    const buoy = scene.add.circle(0, 0, 9, hull);
+    const cap = scene.add.circle(0, -6, 4, accent);
+    const spike1 = scene.add.line(0, 0, 0, -11, 0, 11, trim);
+    const spike2 = scene.add.line(0, 0, -11, 0, 11, 0, trim);
+    const pulse = scene.add.circle(0, 0, 4, lighten(accent, 0.35), 0.7);
+    container.add([wake, buoy, cap, spike1, spike2, pulse]);
+    scene.tweens.add({
+      targets: pulse,
+      alpha: 0.2,
+      scaleX: 1.5,
+      scaleY: 1.5,
+      duration: 700,
       yoyo: true,
       repeat: -1
     });

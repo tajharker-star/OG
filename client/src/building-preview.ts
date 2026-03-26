@@ -7,6 +7,8 @@ const PREVIEW_COLORS: Record<Building['type'], number> = {
   barracks: 0xef4444,
   tank_factory: 0x84cc16,
   air_base: 0x0ea5e9,
+  hospital: 0x22c55e,
+  repair_dock: 0xf59e0b,
   dock: 0x14b8a6,
   tower: 0x94a3b8,
   mine: 0xfacc15,
@@ -15,7 +17,8 @@ const PREVIEW_COLORS: Record<Building['type'], number> = {
   farm: 0x4ade80,
   wall: 0x9ca3af,
   bridge_node: 0xc084fc,
-  wall_node: 0xe5e7eb
+  wall_node: 0xe5e7eb,
+  naval_mine: 0x38bdf8
 };
 
 function getRecruitmentPreview(type: Building['type'], index: number) {

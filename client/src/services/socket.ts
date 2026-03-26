@@ -1,5 +1,71 @@
 import { io, Socket } from 'socket.io-client';
 
+const stripIpv6Brackets = (host: string) => host.replace(/^\[/, '').replace(/\]$/, '');
+
+const isPrivateIpv4Host = (host: string) => {
+    const parts = host.split('.').map(part => Number(part));
+    if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) {
+        return false;
+    }
+
+    if (parts[0] === 10) return true;
+    if (parts[0] === 127) return true;
+    if (parts[0] === 192 && parts[1] === 168) return true;
+    if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true;
+
+    return false;
+};
+
+const parseEndpointHost = (rawValue?: string | null): string | null => {
+    if (!rawValue) return null;
+
+    const value = rawValue.trim();
+    if (!value) return null;
+
+    try {
+        return stripIpv6Brackets(new URL(value).hostname);
+    } catch {
+        const normalized = value.startsWith('ws://')
+            ? `http://${value.slice('ws://'.length)}`
+            : value.startsWith('wss://')
+                ? `https://${value.slice('wss://'.length)}`
+                : value;
+
+        try {
+            return stripIpv6Brackets(new URL(normalized).hostname);
+        } catch {
+            return null;
+        }
+    }
+};
+
+export const isLocalSocketEndpoint = (rawValue?: string | null): boolean => {
+    const host = parseEndpointHost(rawValue);
+    if (!host) return false;
+
+    if (host === 'localhost' || host === '0.0.0.0' || host === '::1') {
+        return true;
+    }
+
+    if (host.endsWith('.local')) {
+        return true;
+    }
+
+    return isPrivateIpv4Host(host);
+};
+
+const getCurrentSocketTarget = () => {
+    return (socket.io as any)?.uri || INITIAL_URL || '';
+};
+
+const getPreferredTransports = (rawValue?: string | null) => {
+    if (isLocalSocketEndpoint(rawValue)) {
+        return ['websocket'];
+    }
+
+    return ['polling', 'websocket'];
+};
+
 const getSocketUrl = () => {
     // 1. Check for Playit placeholder override
     let serverUrl = import.meta.env.VITE_SERVER_URL;
@@ -15,8 +81,8 @@ const getSocketUrl = () => {
         if (import.meta.env.VITE_SERVER_URL) return import.meta.env.VITE_SERVER_URL;
 
         if (window.location.protocol === 'file:') {
-            // NOTE: Change this to your real server IP/Domain for Steam builds!
-            return import.meta.env.VITE_PROD_SERVER_URL || 'http://localhost:3001';
+            // Packaged Electron/Steam builds should prefer the embedded local engine.
+            return import.meta.env.VITE_PROD_SERVER_URL || 'http://127.0.0.1:3001';
         }
         return undefined; // Connect to origin
     }
@@ -41,8 +107,10 @@ export const socket: Socket = io(INITIAL_URL, {
         "bypass-tunnel-reminder": "true"
     },
     autoConnect: false,
-    reconnection: false
+    reconnection: false,
+    transports: getPreferredTransports(INITIAL_URL)
 });
+(socket as any).isTunnel = !isLocalSocketEndpoint(INITIAL_URL);
 
 export type ConnectionPhase = 'IDLE' | 'CONNECTING' | 'OPEN' | 'HANDSHAKING' | 'READY' | 'FAILED' | 'DISCONNECTED';
 
@@ -72,7 +140,11 @@ class ConnectionManager {
 
     private setupSocketListeners() {
         socket.on('connect', () => {
-            console.log('[ConnectionManager] Socket Open');
+            console.log('[ConnectionManager] Socket Open', {
+                id: socket.id,
+                url: getCurrentSocketTarget(),
+                transport: (socket.io.engine as any)?.transport?.name || 'unknown'
+            });
 
             // Prevent duplicate handshake if already handled
             if (this.state.phase === 'HANDSHAKING' || this.state.phase === 'READY') {
@@ -132,50 +204,62 @@ class ConnectionManager {
         socket.on('SERVER_HELLO', (data) => {
             console.log('[ConnectionManager] Received SERVER_HELLO', data);
             this.clearHandshakeTimeout();
-            this.updateState({ phase: 'READY' });
+            const connectionUrl = getCurrentSocketTarget();
+            const isLocal = isLocalSocketEndpoint(connectionUrl);
 
-            // Identify connection type after handshake
-            const hostname = window.location.hostname;
-            const isLocal = hostname === 'localhost' ||
-                hostname === '127.0.0.1' ||
-                hostname.startsWith('192.168.') ||
-                hostname.startsWith('10.') ||
-                (hostname.startsWith('172.') && parseInt(hostname.split('.')[1]) >= 16 && parseInt(hostname.split('.')[1]) <= 31);
+            (socket as any).isTunnel = !isLocal;
+            this.updateState({ phase: 'READY', url: connectionUrl });
+
+            console.log('[ConnectionManager] Connection profile:', isLocal ? 'LOCAL' : 'TUNNEL', connectionUrl);
 
             socket.emit('identify_connection', { isTunnel: !isLocal });
         });
     }
 
+    private getConnectTimeoutMs() {
+        return isLocalSocketEndpoint(this.state.url) ? 20000 : 8000;
+    }
+
+    private getHandshakeTimeoutMs() {
+        return isLocalSocketEndpoint(this.state.url) ? 15000 : 10000;
+    }
+
     private startConnectTimeout() {
         this.cleanupTimeouts();
+        const timeoutMs = this.getConnectTimeoutMs();
         this.connectTimeoutTimer = setTimeout(() => {
             if (this.state.phase === 'CONNECTING') {
                 console.error('[ConnectionManager] Connect Timeout');
                 this.updateState({
                     phase: 'FAILED',
                     error: 'Connection Timeout',
-                    details: 'Server did not accept connection within 5s'
+                    details: `Server did not accept connection within ${Math.round(timeoutMs / 1000)}s`
                 });
                 socket.disconnect();
             }
-        }, 5000);
+        }, timeoutMs);
     }
 
     private startHandshake() {
         this.clearHandshakeTimeout(); // Clear any existing timeout
+        const timeoutMs = this.getHandshakeTimeoutMs();
         this.handshakeTimeoutTimer = setTimeout(() => {
             if (this.state.phase === 'HANDSHAKING') {
                 console.error('[ConnectionManager] Handshake Timeout');
                 this.updateState({
                     phase: 'FAILED',
                     error: 'Handshake Timeout',
-                    details: 'Server connected but did not respond to hello (10s)'
+                    details: `Server connected but did not respond to hello (${Math.round(timeoutMs / 1000)}s)`
                 });
                 socket.disconnect();
             }
-        }, 10000);
+        }, timeoutMs);
 
         // Send Client Hello
+        console.log('[ConnectionManager] Sending CLIENT_HELLO', {
+            url: getCurrentSocketTarget(),
+            transport: (socket.io.engine as any)?.transport?.name || 'unknown'
+        });
         socket.emit('CLIENT_HELLO', {
             clientVersion: '1.0.0',
             userAgent: navigator.userAgent
@@ -310,6 +394,9 @@ class ConnectionManager {
 
         // @ts-ignore
         socket.io.uri = targetUrl;
+        (socket as any).isTunnel = !isLocalSocketEndpoint(targetUrl);
+        socket.io.opts.transports = getPreferredTransports(targetUrl);
+        console.log('[ConnectionManager] Preferred transports:', socket.io.opts.transports);
         socket.connect();
 
         this.startConnectTimeout();
@@ -330,15 +417,25 @@ class ConnectionManager {
 export const connectionManager = new ConnectionManager();
 
 // Backward compatibility wrapper for existing code
-export const connectToServer = (input: string): Promise<{ success: boolean; error?: string }> => {
+export const connectToServer = (
+    input: string,
+    timeoutMs: number = 12000
+): Promise<{ success: boolean; error?: string }> => {
     return new Promise((resolve) => {
         connectionManager.connect(input);
 
+        const timeoutId = window.setTimeout(() => {
+            unsubscribe();
+            resolve({ success: false, error: 'Connection attempt timed out.' });
+        }, timeoutMs);
+
         const unsubscribe = connectionManager.subscribe((state) => {
             if (state.phase === 'READY') {
+                window.clearTimeout(timeoutId);
                 unsubscribe();
                 resolve({ success: true });
             } else if (state.phase === 'FAILED') {
+                window.clearTimeout(timeoutId);
                 unsubscribe();
                 resolve({ success: false, error: state.error });
             }

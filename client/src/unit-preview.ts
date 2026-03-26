@@ -8,6 +8,7 @@ const PREVIEW_COLORS: Record<string, number> = {
   oil_seeker: 0x60a5fa,
   missile_launcher: 0xef4444,
   destroyer: 0x38bdf8,
+  pirate_ship: 0xf59e0b,
   construction_ship: 0xf59e0b,
   sniper: 0x84cc16,
   rocketeer: 0xa78bfa,
@@ -18,7 +19,7 @@ const PREVIEW_COLORS: Record<string, number> = {
 };
 
 function getPreviewScale(type: string) {
-  if (type === 'destroyer' || type === 'construction_ship' || type === 'ferry') return 1.15;
+  if (type === 'destroyer' || type === 'pirate_ship' || type === 'construction_ship' || type === 'ferry') return 1.15;
   if (type === 'heavy_plane') return 1.1;
   return 1.2;
 }

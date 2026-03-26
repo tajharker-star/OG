@@ -1,0 +1,41 @@
+
+        <svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+                <radialGradient id="bg" cx="50%" cy="38%" r="70%">
+                    <stop offset="0%" stop-color="#152235" />
+                    <stop offset="62%" stop-color="#0e1624" />
+                    <stop offset="100%" stop-color="#09111d" />
+                </radialGradient>
+                <linearGradient id="ring" x1="24" y1="24" x2="228" y2="232">
+                    <stop offset="0%" stop-color="#ffbf74" />
+                    <stop offset="100%" stop-color="#ff7864" />
+                </linearGradient>
+                <linearGradient id="plate" x1="76" y1="54" x2="176" y2="202">
+                    <stop offset="0%" stop-color="#281512" />
+                    <stop offset="100%" stop-color="#0a0f19" />
+                </linearGradient>
+                <filter id="softGlow" x="-40%" y="-40%" width="180%" height="180%">
+                    <feDropShadow dx="0" dy="0" stdDeviation="10" flood-color="rgba(255, 120, 100, 0.34)" />
+                </filter>
+            </defs>
+            <rect x="0" y="0" width="256" height="256" rx="52" fill="#060b13" />
+            <circle cx="128" cy="128" r="98" fill="url(#bg)" />
+            <circle cx="128" cy="128" r="96" fill="none" stroke="url(#ring)" stroke-width="12" filter="url(#softGlow)" />
+            <circle cx="128" cy="128" r="79" fill="url(#plate)" stroke="#ffb08c" stroke-width="2" opacity="0.96" />
+            <path d="M58 72C84 48 115 38 154 42C176 44 196 52 214 68" fill="none" stroke="#ffbf74" stroke-width="6" stroke-linecap="round" opacity="0.22" />
+            <path d="M52 194C76 212 102 220 128 220C155 220 182 211 204 194" fill="none" stroke="#ff7864" stroke-width="5" stroke-linecap="round" opacity="0.18" />
+            <rect x="58" y="28" width="140" height="28" rx="14" fill="rgba(8, 14, 24, 0.44)" stroke="rgba(255,255,255,0.12)" />
+            <text x="128" y="47" text-anchor="middle" fill="#ffbf74" font-family="'Avenir Next', 'Trebuchet MS', sans-serif" font-size="13" font-weight="700" letter-spacing="1.8">MULTI</text>
+            
+                <path d="M110 76L128 102L146 76 M110 76L98 106 M146 76L158 106 M98 106H158" stroke="#ffbf74" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" />
+                <circle cx="110" cy="76" r="8" fill="#ffbf74" />
+                <circle cx="128" cy="102" r="8" fill="#ffbf74" />
+                <circle cx="146" cy="76" r="8" fill="#ffbf74" />
+                <circle cx="98" cy="106" r="7" fill="#ffbf74" opacity="0.88" />
+                <circle cx="158" cy="106" r="7" fill="#ffbf74" opacity="0.88" />
+            
+            <text x="128" y="164" text-anchor="middle" fill="#fff7e5" font-family="'Avenir Next Condensed', 'Avenir Next', 'Trebuchet MS', sans-serif" font-size="52" font-weight="800" letter-spacing="2">OW</text>
+            <polygon points="114,196 116.3511410091699,200.7639320225002 121.60845213036123,201.52786404500043 117.80422606518061,205.2360679774998 118.70228201833979,210.47213595499957 114,208 109.29771798166021,210.47213595499957 110.19577393481939,205.2360679774998 106.39154786963877,201.52786404500043 111.6488589908301,200.7639320225002" fill="#ffbf74" opacity="0.96" /><polygon points="142,196 144.35114100916988,200.7639320225002 149.60845213036123,201.52786404500043 145.80422606518061,205.2360679774998 146.7022820183398,210.47213595499957 142,208 137.2977179816602,210.47213595499957 138.19577393481939,205.2360679774998 134.39154786963877,201.52786404500043 139.64885899083012,200.7639320225002" fill="#ffbf74" opacity="0.96" />
+            <text x="128" y="232" text-anchor="middle" fill="#ff7864" font-family="'Avenir Next', 'Trebuchet MS', sans-serif" font-size="10" font-weight="700" letter-spacing="3">ONLINE WARLORD</text>
+        </svg>
+    

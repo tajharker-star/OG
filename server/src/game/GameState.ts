@@ -1,7 +1,13 @@
-import { MapGenerator, GameMap, Island, Building } from './MapGenerator';
+import { MapGenerator, GameMap, Island, Building, Bridge } from './MapGenerator';
 import { BotAI } from './BotAI';
+import { createBotAI } from './BotAIFactory';
 import { UnitData, BuildingData } from './data/Registry';
 import { randomUUID } from 'crypto';
+
+const ENABLE_VALID_POSITION_LOGS = process.env.DEBUG_VALID_POSITION === '1';
+const SIMULATION_TICKS_PER_SECOND = 30;
+const CONSTRUCTION_SPEED_MULTIPLIER = 3;
+const PLAYER_SNAPSHOT_INTERVAL_MS = 250;
 
 export interface Player {
     id: string;
@@ -59,6 +65,8 @@ export class GameState {
     lastTickTime: number = 0;
     lastMapEmitTime: number = 0;
     lastUnitEmitTime: number = 0;
+    lastPlayerEmitTime: number = 0;
+    lastPlayerSnapshotSignature: string = '';
     tickCounter: number = 0;
     io: any;
     roomId: string | undefined;
@@ -77,6 +85,12 @@ export class GameState {
     mapType: string = 'random';
     serverRegion: string = 'US-East';
     private startupHqCheckTimeout: NodeJS.Timeout | null = null;
+    private playerCollapseStates: Map<string, { startedAt: number; ticksApplied: number; nextTickAt: number }> = new Map();
+    private humanMatchReadyPlayerIds: Set<string> = new Set();
+    private requireHumanReadyForBotStart: boolean = false;
+    private botsReleasedForMatch: boolean = true;
+    private traversalPathCache: Map<string, string[]> = new Map();
+    private economySecondAccumulator: number = 0;
 
     // Spatial Grid for O(N) optimization
     private grid: Map<string, Unit[]> = new Map();
@@ -90,6 +104,7 @@ export class GameState {
         this.map = MapGenerator.generate(3200, 2400, 40, this.mapType as any);
         this.map.mapType = this.mapType;
         this.map.serverRegion = this.serverRegion;
+        this.map.waterBuildings = this.map.waterBuildings || [];
         this.map.version = randomUUID();
 
         this.players = new Map();
@@ -98,8 +113,433 @@ export class GameState {
         this.startTime = Date.now();
     }
 
+    public getSimplifiedUnitsSnapshot() {
+        return this.units.map(u => ({
+            id: u.id,
+            ownerId: u.ownerId,
+            type: u.type,
+            x: Math.round(u.x),
+            y: Math.round(u.y),
+            status: u.status,
+            health: Math.round(u.health),
+            maxHealth: u.maxHealth,
+            speed: u.speed,
+            damage: u.damage,
+            range: u.range,
+            fireRate: u.fireRate,
+            facingAngle: u.facingAngle ?? 0,
+            cargo: u.cargo ? u.cargo.map(c => ({ type: c.type })) : [],
+            recruitmentQueue: u.recruitmentQueue
+        }));
+    }
+
+    public getPlayersSnapshot(trackEmission: boolean = false): Player[] {
+        const snapshot = Array.from(this.players.values()).map(player => ({
+            ...player,
+            resources: { ...player.resources }
+        }));
+
+        if (trackEmission) {
+            this.lastPlayerSnapshotSignature = this.getPlayersSnapshotSignature(snapshot);
+        }
+
+        return snapshot;
+    }
+
+    private getPlayersSnapshotSignature(snapshot: Player[]): string {
+        return snapshot
+            .map(player => [
+                player.id,
+                player.resources.gold,
+                player.resources.oil,
+                player.status || 'active',
+                player.godMode ? 1 : 0,
+                player.canBuildHQ === false ? 0 : 1,
+                player.hqRespawnsUsed || 0,
+                player.hqSpawnedOnce ? 1 : 0
+            ].join(':'))
+            .sort()
+            .join('|');
+    }
+
     private touchMapVersion() {
+        this.map.waterBuildings = this.map.waterBuildings || [];
         this.map.version = randomUUID();
+    }
+
+    private getActiveHumanPlayerIds(): string[] {
+        return Array.from(this.players.values())
+            .filter(player => !player.isBot && player.status !== 'eliminated')
+            .map(player => player.id);
+    }
+
+    private areAllHumansReadyForMatchStart(): boolean {
+        if (!this.requireHumanReadyForBotStart) return true;
+        const humanIds = this.getActiveHumanPlayerIds();
+        if (humanIds.length === 0) return true;
+        return humanIds.every(playerId => this.humanMatchReadyPlayerIds.has(playerId));
+    }
+
+    private releaseBotsForHumanReadyGate(reason: string) {
+        if (this.botsReleasedForMatch) return;
+        const now = Date.now();
+        this.botsReleasedForMatch = true;
+        this.matchState = 'IN_MATCH';
+        this.bots.forEach(bot => bot.resetMatchStartTime(now));
+        console.log(`[BOT_START_GATE] released room=${this.roomId || 'unknown'} reason=${reason} ready=${this.humanMatchReadyPlayerIds.size}/${this.getActiveHumanPlayerIds().length}`);
+    }
+
+    public armHumanReadyBotStartGate() {
+        this.humanMatchReadyPlayerIds.clear();
+        this.requireHumanReadyForBotStart = true;
+        const humanIds = this.getActiveHumanPlayerIds();
+        this.botsReleasedForMatch = humanIds.length === 0;
+        this.matchState = this.botsReleasedForMatch ? 'IN_MATCH' : 'STARTING';
+        if (this.botsReleasedForMatch) {
+            const now = Date.now();
+            this.bots.forEach(bot => bot.resetMatchStartTime(now));
+        } else {
+            console.log(`[BOT_START_GATE] armed room=${this.roomId || 'unknown'} humans=${humanIds.length}`);
+        }
+    }
+
+    public markHumanPlayerMatchReady(playerId: string): boolean {
+        if (!this.requireHumanReadyForBotStart || this.status !== 'playing') return false;
+        const player = this.players.get(playerId);
+        if (!player || player.isBot || player.status === 'eliminated') return false;
+
+        const sizeBefore = this.humanMatchReadyPlayerIds.size;
+        this.humanMatchReadyPlayerIds.add(playerId);
+        if (this.humanMatchReadyPlayerIds.size !== sizeBefore) {
+            console.log(`[BOT_START_GATE] ready room=${this.roomId || 'unknown'} player=${playerId} progress=${this.humanMatchReadyPlayerIds.size}/${this.getActiveHumanPlayerIds().length}`);
+        }
+
+        if (this.areAllHumansReadyForMatchStart()) {
+            this.releaseBotsForHumanReadyGate('all_humans_ready');
+        }
+
+        return true;
+    }
+
+    private isOwnerOnlyBuilding(building: Building): boolean {
+        return building.type === 'naval_mine' || !!BuildingData[building.type]?.hiddenFromEnemies;
+    }
+
+    private isBuildingVisibleToPlayer(building: Building, playerId: string): boolean {
+        if (!this.isOwnerOnlyBuilding(building)) return true;
+        return building.ownerId === playerId;
+    }
+
+    public getVisibleMapForPlayer(playerId: string): GameMap {
+        return {
+            ...this.map,
+            islands: this.map.islands.map(island => ({
+                ...island,
+                points: island.points?.map(point => ({ ...point })),
+                goldSpots: island.goldSpots.map(spot => ({ ...spot })),
+                buildings: island.buildings
+                    .filter(building => this.isBuildingVisibleToPlayer(building, playerId))
+                    .map(building => ({
+                        ...building,
+                        recruitmentQueue: building.recruitmentQueue?.map(item => ({ ...item }))
+                    }))
+            })),
+            oilSpots: this.map.oilSpots.map(spot => ({ ...(spot as any) })),
+            bridges: this.map.bridges.map(bridge => ({ ...bridge })),
+            waterBuildings: (this.map.waterBuildings || [])
+                .filter(building => this.isBuildingVisibleToPlayer(building as Building, playerId))
+                .map(building => ({
+                    ...building,
+                    recruitmentQueue: building.recruitmentQueue?.map(item => ({ ...item }))
+                })),
+            highGrounds: this.map.highGrounds?.map(highGround => ({
+                ...highGround,
+                points: highGround.points.map(point => ({ ...point }))
+            }))
+        };
+    }
+
+    public emitVisibleMapData(io: any, roomId?: string) {
+        const targetRoomId = roomId || this.roomId;
+        if (!io || !targetRoomId) return;
+
+        let emitted = false;
+        this.players.forEach(player => {
+            if (player.isBot) return;
+            io.to(player.id).emit('mapData', this.getVisibleMapForPlayer(player.id));
+            emitted = true;
+        });
+
+        if (!emitted) {
+            io.to(targetRoomId).emit('mapData', this.map);
+        }
+    }
+
+    public emitVisibleMapDataToPlayer(io: any, playerId: string) {
+        if (!io) return;
+        io.to(playerId).emit('mapData', this.getVisibleMapForPlayer(playerId));
+    }
+
+    private getBuildSupportUnitTypes(type: string): string[] {
+        if (type === 'naval_mine') return ['construction_ship'];
+        if (type === 'bridge_node') return ['builder', 'construction_ship'];
+        return ['builder'];
+    }
+
+    private getBuildSupportRange(type: string): number {
+        if (type === 'oil_rig') return 150;
+        if (type === 'naval_mine') return 180;
+        if (type === 'bridge_node') return 220;
+        return 400;
+    }
+
+    private canBuildOnNeutralIsland(type: string): boolean {
+        return type === 'bridge_node';
+    }
+
+    private getBuildSupportUnitsInRange(playerId: string, type: string, x: number, y: number, range: number): Unit[] {
+        const allowedTypes = new Set(this.getBuildSupportUnitTypes(type));
+        return this.units.filter(unit =>
+            unit.ownerId === playerId &&
+            allowedTypes.has(unit.type) &&
+            Math.hypot(unit.x - x, unit.y - y) <= range
+        );
+    }
+
+    private getClosestBuildSupportUnit(playerId: string, type: string, x: number, y: number): Unit | null {
+        const allowedTypes = new Set(this.getBuildSupportUnitTypes(type));
+        const workers = this.units.filter(unit => unit.ownerId === playerId && allowedTypes.has(unit.type));
+        if (workers.length === 0) return null;
+
+        return workers.reduce((best, unit) => {
+            if (!best) return unit;
+            const bestDist = Math.hypot(best.x - x, best.y - y);
+            const unitDist = Math.hypot(unit.x - x, unit.y - y);
+            return unitDist < bestDist ? unit : best;
+        }, workers[0]);
+    }
+
+    private isNavalMinePlacementClear(absX: number, absY: number): boolean {
+        const footprint = this.getBuildingFootprintRadius('naval_mine');
+        if (
+            absX < footprint ||
+            absX > this.map.width - footprint ||
+            absY < footprint ||
+            absY > this.map.height - footprint
+        ) {
+            return false;
+        }
+
+        if (!this.isValidPosition(absX, absY, 'destroyer')) {
+            return false;
+        }
+
+        const minSpacing = BuildingData.naval_mine?.minSpacing ?? 110;
+        for (const building of this.map.waterBuildings || []) {
+            if (building.type !== 'naval_mine') continue;
+            const mineX = building.x || 0;
+            const mineY = building.y || 0;
+            if (Math.hypot(mineX - absX, mineY - absY) < minSpacing) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private clearTraversalCaches() {
+        this.pathCache.clear();
+        this.traversalPathCache.clear();
+    }
+
+    private isPointOnAnyIslandSurface(x: number, y: number): boolean {
+        return this.map.islands.some(island => this.isPointOnIslandSurface(island, x, y));
+    }
+
+    private getExactIslandCandidatesAtPoint(x: number, y: number): Island[] {
+        return this.map.islands
+            .filter(island => this.isPointOnIslandSurface(island, x, y))
+            .sort((a, b) => a.radius - b.radius);
+    }
+
+    private isBridgeNodeWaterPlacementClear(absX: number, absY: number): boolean {
+        const footprint = this.getBuildingFootprintRadius('bridge_node');
+        if (
+            absX < footprint ||
+            absX > this.map.width - footprint ||
+            absY < footprint ||
+            absY > this.map.height - footprint
+        ) {
+            return false;
+        }
+
+        if (this.isPointOnAnyIslandSurface(absX, absY)) {
+            return false;
+        }
+
+        if (!this.isValidPosition(absX, absY, 'construction_ship')) {
+            return false;
+        }
+
+        for (const spot of this.map.oilSpots) {
+            if (Math.hypot(spot.x - absX, spot.y - absY) < spot.radius + 10) {
+                return false;
+            }
+        }
+
+        const minSpacing = Math.max(18, footprint * 2);
+        for (const building of this.map.waterBuildings || []) {
+            if (!building.id) continue;
+            const otherX = building.x || 0;
+            const otherY = building.y || 0;
+            const sameFamily =
+                building.type === 'bridge_node' ||
+                building.type === 'naval_mine' ||
+                building.type === 'oil_rig';
+            if (!sameFamily) continue;
+            if (Math.hypot(otherX - absX, otherY - absY) < minSpacing) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    public getNodeContext(nodeId: string): { node: Building; island?: Island; islandId?: string; x: number; y: number } | null {
+        for (const island of this.map.islands) {
+            const node = island.buildings.find(building => building.id === nodeId);
+            if (!node) continue;
+            return {
+                node,
+                island,
+                islandId: island.id,
+                x: island.x + (node.x || 0),
+                y: island.y + (node.y || 0)
+            };
+        }
+
+        for (const building of this.map.waterBuildings || []) {
+            if (building.id !== nodeId) continue;
+            return {
+                node: building,
+                x: building.x || 0,
+                y: building.y || 0
+            };
+        }
+
+        return null;
+    }
+
+    public getBridgeEndpoints(bridge: Bridge | any): { ax: number; ay: number; bx: number; by: number } | null {
+        const nodeA = this.getNodeContext(bridge.nodeAId);
+        const nodeB = this.getNodeContext(bridge.nodeBId);
+        if (!nodeA || !nodeB) return null;
+
+        return {
+            ax: nodeA.x,
+            ay: nodeA.y,
+            bx: nodeB.x,
+            by: nodeB.y
+        };
+    }
+
+    private getBridgeNodeDegree(nodeId: string): number {
+        return this.map.bridges.filter(bridge =>
+            bridge.type === 'bridge' && (bridge.nodeAId === nodeId || bridge.nodeBId === nodeId)
+        ).length;
+    }
+
+    private hasBridgeNodePath(startNodeId: string, endNodeId: string): boolean {
+        if (startNodeId === endNodeId) return true;
+
+        const visited = new Set<string>([startNodeId]);
+        const queue: string[] = [startNodeId];
+
+        while (queue.length > 0) {
+            const currentNodeId = queue.shift()!;
+            const neighbors = this.map.bridges
+                .filter(bridge =>
+                    bridge.type === 'bridge' &&
+                    (bridge.nodeAId === currentNodeId || bridge.nodeBId === currentNodeId)
+                )
+                .map(bridge => bridge.nodeAId === currentNodeId ? bridge.nodeBId : bridge.nodeAId);
+
+            for (const neighbor of neighbors) {
+                if (neighbor === endNodeId) return true;
+                if (visited.has(neighbor)) continue;
+                visited.add(neighbor);
+                queue.push(neighbor);
+            }
+        }
+
+        return false;
+    }
+
+    public findIslandTraversalPath(startIslandId: string, endIslandId: string): string[] | null {
+        const cacheKey = `${startIslandId}->${endIslandId}`;
+        if (this.traversalPathCache.has(cacheKey)) {
+            return this.traversalPathCache.get(cacheKey)!;
+        }
+
+        const startToken = `island:${startIslandId}`;
+        const endToken = `island:${endIslandId}`;
+        const queue: Array<{ token: string; path: string[] }> = [{ token: startToken, path: [startToken] }];
+        const visited = new Set<string>([startToken]);
+
+        const getNeighbors = (token: string): string[] => {
+            if (token.startsWith('island:')) {
+                const islandId = token.slice('island:'.length);
+                const island = this.map.islands.find(candidate => candidate.id === islandId);
+                if (!island) return [];
+
+                const neighbors = island.buildings
+                    .filter(building => building.type === 'bridge_node' && !building.isConstructing && building.health > 0)
+                    .map(building => `node:${building.id}`);
+
+                this.map.islands.forEach(other => {
+                    if (other.id === island.id) return;
+                    if (!this.areIslandsLandConnected(island, other)) return;
+                    neighbors.push(`island:${other.id}`);
+                });
+
+                return neighbors;
+            }
+
+            const nodeId = token.slice('node:'.length);
+            const context = this.getNodeContext(nodeId);
+            if (!context || context.node.type !== 'bridge_node' || context.node.isConstructing || context.node.health <= 0) {
+                return [];
+            }
+
+            const neighbors: string[] = [];
+            if (context.islandId) {
+                neighbors.push(`island:${context.islandId}`);
+            }
+
+            this.map.bridges.forEach(bridge => {
+                if (bridge.type !== 'bridge') return;
+                if (bridge.nodeAId === nodeId) neighbors.push(`node:${bridge.nodeBId}`);
+                if (bridge.nodeBId === nodeId) neighbors.push(`node:${bridge.nodeAId}`);
+            });
+
+            return neighbors;
+        };
+
+        while (queue.length > 0) {
+            const { token, path } = queue.shift()!;
+            if (token === endToken) {
+                this.traversalPathCache.set(cacheKey, path);
+                return path;
+            }
+
+            for (const neighbor of getNeighbors(token)) {
+                if (visited.has(neighbor)) continue;
+                visited.add(neighbor);
+                queue.push({ token: neighbor, path: [...path, neighbor] });
+            }
+        }
+
+        return null;
     }
 
     private isLandUnitType(type: string): boolean {
@@ -107,11 +547,351 @@ export class GameState {
     }
 
     private isWaterUnitType(type: string): boolean {
-        return ['destroyer', 'construction_ship', 'ferry', 'oil_rig', 'aircraft_carrier'].includes(type);
+        return ['destroyer', 'pirate_ship', 'construction_ship', 'ferry', 'oil_rig', 'aircraft_carrier'].includes(type);
     }
 
     private isAirUnitType(type: string): boolean {
         return ['light_plane', 'heavy_plane', 'mothership', 'alien_scout', 'heavy_alien'].includes(type);
+    }
+
+    private isHospitalUnitType(type: string): boolean {
+        return ['soldier', 'sniper', 'rocketeer', 'builder', 'oil_seeker'].includes(type);
+    }
+
+    private processSupportBuildingHealingTick() {
+        this.map.islands.forEach(island => {
+            island.buildings.forEach(building => {
+                if (building.isConstructing || !building.ownerId) return;
+                if (building.type !== 'hospital' && building.type !== 'repair_dock') return;
+
+                const owner = this.players.get(building.ownerId);
+                if (!owner || owner.status === 'eliminated') return;
+
+                const centerX = island.x + (building.x || 0);
+                const centerY = island.y + (building.y || 0);
+                const healRadius = building.range || BuildingData[building.type]?.range || 220;
+                const isHospital = building.type === 'hospital';
+
+                this.units.forEach(unit => {
+                    if (unit.ownerId !== building.ownerId || unit.health >= unit.maxHealth) return;
+
+                    const isHospitalUnit = this.isHospitalUnitType(unit.type);
+                    if (isHospital && !isHospitalUnit) return;
+                    if (!isHospital && isHospitalUnit) return;
+
+                    if (Math.hypot(unit.x - centerX, unit.y - centerY) > healRadius) return;
+
+                    const missingHealth = unit.maxHealth - unit.health;
+                    const healAmount = missingHealth * 0.05;
+                    unit.health = Math.min(unit.maxHealth, unit.health + healAmount);
+                });
+            });
+        });
+    }
+
+    private getSimulationTickDelta(deltaTimeSeconds: number) {
+        if (!Number.isFinite(deltaTimeSeconds) || deltaTimeSeconds <= 0) return 0;
+        return deltaTimeSeconds * SIMULATION_TICKS_PER_SECOND;
+    }
+
+    private processEconomySecondTick() {
+        this.players.forEach(player => {
+            let goldIncome = 1;
+            let oilIncome = 0;
+
+            this.map.oilSpots.forEach(spot => {
+                if ((spot as any).ownerId === player.id && (spot as any).building && !(spot as any).building.isConstructing) {
+                    if ((spot as any).building.type === 'oil_rig') {
+                        goldIncome += 200;
+                        oilIncome += 5;
+                    } else if ((spot as any).building.type === 'oil_well') {
+                        goldIncome += 200;
+                        oilIncome += 5;
+                    } else {
+                        oilIncome += 5;
+                    }
+                }
+            });
+
+            this.map.islands.forEach(island => {
+                if (island.ownerId === player.id) {
+                    goldIncome += 1;
+                }
+
+                island.buildings.forEach(b => {
+                    if (b.ownerId !== player.id) return;
+                    if (b.isConstructing) return;
+                    if (b.type === 'mine') goldIncome += 50;
+                    if (b.type === 'base') goldIncome += 10;
+                    if (b.type === 'farm') goldIncome += 25;
+                });
+            });
+
+            player.resources.gold += goldIncome;
+            player.resources.oil += oilIncome;
+        });
+
+        this.processSupportBuildingHealingTick();
+    }
+
+    private advanceEconomy(deltaTimeSeconds: number) {
+        if (!Number.isFinite(deltaTimeSeconds) || deltaTimeSeconds <= 0) return;
+
+        this.economySecondAccumulator += deltaTimeSeconds;
+        const wholeSeconds = Math.floor(this.economySecondAccumulator);
+        if (wholeSeconds <= 0) return;
+
+        this.economySecondAccumulator -= wholeSeconds;
+        for (let second = 0; second < wholeSeconds; second += 1) {
+            this.processEconomySecondTick();
+        }
+    }
+
+    private advanceConstructionRepairAndRecruitment(deltaTimeSeconds: number) {
+        const tickDelta = this.getSimulationTickDelta(deltaTimeSeconds);
+        if (tickDelta <= 0) return;
+
+        const processConstruction = (b: any, x: number, y: number, ownerId: string) => {
+            if (!b.isConstructing) return;
+
+            const stats = BuildingData[b.type];
+            if (!stats) {
+                console.log(`[Construction] Missing stats for ${b.type}, finishing instantly.`);
+                b.isConstructing = false;
+                b.health = b.maxHealth;
+                return;
+            }
+
+            const totalTicks = stats.constructionTime || 100;
+            let progressPerTick = (100 / totalTicks) * CONSTRUCTION_SPEED_MULTIPLIER;
+
+            if (!isNaN(x) && !isNaN(y)) {
+                const builders = this.getNearbyUnits(x, y, 300).filter(u =>
+                    u.ownerId === ownerId &&
+                    (u.type === 'builder' || u.type === 'construction_ship')
+                );
+
+                if (builders.length > 0) {
+                    progressPerTick *= (1 + builders.length * 1.0);
+                }
+            }
+
+            b.constructionProgress = (b.constructionProgress || 0) + (progressPerTick * tickDelta);
+            const calculatedHealth = Math.floor(b.maxHealth * (b.constructionProgress / 100));
+            b.health = Math.max(1, Math.min(b.maxHealth, calculatedHealth));
+
+            if (b.constructionProgress >= 100) {
+                b.constructionProgress = 100;
+                b.isConstructing = false;
+                b.health = b.maxHealth;
+            }
+        };
+
+        const processRepair = (b: any, x: number, y: number, ownerId: string) => {
+            if (b.isConstructing || b.health >= b.maxHealth) return;
+            if (b.type === 'bridge_node' || b.type === 'wall_node') return;
+
+            const enemyPressure = this.getNearbyUnits(x, y, b.type === 'base' ? 325 : 240).some(u =>
+                u.ownerId !== ownerId &&
+                u.health > 0 &&
+                !['builder', 'construction_ship', 'oil_seeker', 'ferry'].includes(u.type)
+            );
+            if (enemyPressure) return;
+
+            if (!isNaN(x) && !isNaN(y)) {
+                const builders = this.getNearbyUnits(x, y, 150).filter(u =>
+                    u.ownerId === ownerId &&
+                    u.type === 'builder' &&
+                    u.status === 'idle'
+                );
+
+                if (builders.length > 0) {
+                    const count = Math.min(builders.length, 5);
+                    const repairAmount = 0.15 * count * tickDelta;
+                    b.health = Math.min(b.maxHealth, b.health + repairAmount);
+                }
+            }
+        };
+
+        const processRecruitment = (b: any, island: any) => {
+            if (!b.recruitmentQueue || b.recruitmentQueue.length === 0) return;
+
+            let remainingTickBudget = tickDelta;
+            while (b.recruitmentQueue.length > 0 && remainingTickBudget > 0) {
+                const item = b.recruitmentQueue[0];
+                item.progress = item.progress || 0;
+                item.totalTime = item.totalTime || 100;
+
+                const remainingTicks = Math.max(0, item.totalTime - item.progress);
+                if (remainingTicks > remainingTickBudget) {
+                    item.progress += remainingTickBudget;
+                    remainingTickBudget = 0;
+                    break;
+                }
+
+                item.progress = item.totalTime;
+                remainingTickBudget -= remainingTicks;
+
+                const ownerId = b.ownerId || (island ? island.ownerId : null);
+                if (ownerId) {
+                    this.spawnUnit(ownerId, item.unitType, island, b);
+                }
+                b.recruitmentQueue.shift();
+            }
+        };
+
+        this.map.islands.forEach(island => {
+            island.buildings.forEach(b => {
+                if (!b.ownerId) return;
+                processConstruction(b, island.x + (b.x || 0), island.y + (b.y || 0), b.ownerId);
+                processRepair(b, island.x + (b.x || 0), island.y + (b.y || 0), b.ownerId);
+                processRecruitment(b, island);
+            });
+        });
+
+        this.units.forEach(u => {
+            if (u.type === 'mothership' || u.type === 'aircraft_carrier') {
+                processRecruitment(u, null);
+            }
+        });
+
+        this.map.oilSpots.forEach(spot => {
+            const b = (spot as any).building;
+            if (b && (spot as any).ownerId) {
+                if (this.isOilStructureBackedByIslandBuilding(b)) return;
+                processConstruction(b, spot.x, spot.y, (spot as any).ownerId);
+                processRepair(b, spot.x, spot.y, (spot as any).ownerId);
+            }
+        });
+
+        (this.map.waterBuildings || []).forEach(building => {
+            if (!building.ownerId) return;
+            processConstruction(building, building.x || 0, building.y || 0, building.ownerId);
+            processRepair(building, building.x || 0, building.y || 0, building.ownerId);
+        });
+    }
+
+    private isUnitWithinFriendlyRepairDock(unit: Unit): boolean {
+        return this.map.islands.some(island =>
+            island.buildings.some(building => {
+                if (building.type !== 'repair_dock' || building.isConstructing || building.ownerId !== unit.ownerId) return false;
+                const centerX = island.x + (building.x || 0);
+                const centerY = island.y + (building.y || 0);
+                const healRadius = building.range || BuildingData[building.type]?.range || 220;
+                return Math.hypot(unit.x - centerX, unit.y - centerY) <= healRadius;
+            })
+        );
+    }
+
+    private applyDamageOverTimeEffect(unit: Unit, type: string, durationMs: number, damagePerSecond: number, now: number) {
+        const effects = ((unit as any).damageOverTimeEffects || []) as Array<{
+            type: string;
+            endsAt: number;
+            damagePerSecond: number;
+        }>;
+        const existing = effects.find(effect => effect.type === type);
+        if (existing) {
+            existing.endsAt = Math.max(existing.endsAt, now + durationMs);
+            existing.damagePerSecond = Math.max(existing.damagePerSecond, damagePerSecond);
+        } else {
+            effects.push({
+                type,
+                endsAt: now + durationMs,
+                damagePerSecond
+            });
+        }
+
+        (unit as any).damageOverTimeEffects = effects;
+        (unit as any).burning = true;
+        (unit as any).burningUntil = Math.max((unit as any).burningUntil || 0, now + durationMs);
+    }
+
+    private processDamageOverTime(deltaTimeSeconds: number, now: number) {
+        this.units.forEach(unit => {
+            const owner = this.players.get(unit.ownerId);
+            const effects = (((unit as any).damageOverTimeEffects || []) as Array<{
+                type: string;
+                endsAt: number;
+                damagePerSecond: number;
+            }>).filter(effect => effect.endsAt > now);
+
+            if (effects.length === 0) {
+                (unit as any).damageOverTimeEffects = [];
+                if (((unit as any).burningUntil || 0) <= now) {
+                    delete (unit as any).burning;
+                    delete (unit as any).burningUntil;
+                }
+                return;
+            }
+
+            (unit as any).damageOverTimeEffects = effects;
+            if (owner?.godMode) return;
+
+            const protectedByRepairDock = this.isUnitWithinFriendlyRepairDock(unit);
+            const totalDamagePerSecond = effects.reduce((sum, effect) => {
+                let effectDamage = effect.damagePerSecond;
+                if (protectedByRepairDock && effect.type === 'naval_mine_burn') {
+                    effectDamage *= 0.2;
+                }
+                return sum + effectDamage;
+            }, 0);
+            unit.health -= totalDamagePerSecond * deltaTimeSeconds;
+            (unit as any).burning = true;
+            (unit as any).burningUntil = Math.max(...effects.map(effect => effect.endsAt));
+        });
+    }
+
+    private processNavalMineTriggers(now: number) {
+        const waterBuildings = this.map.waterBuildings || [];
+        if (waterBuildings.length === 0) return;
+
+        const triggerRadius = BuildingData.naval_mine?.range ?? 38;
+        const blastRadius = UnitData.pirate_ship?.range ?? 180;
+        const blastDamage = BuildingData.naval_mine?.damage ?? 500;
+
+        waterBuildings.forEach(building => {
+            if (building.type !== 'naval_mine' || building.isConstructing || !building.ownerId || building.health <= 0) return;
+            const mineX = building.x || 0;
+            const mineY = building.y || 0;
+
+            const triggerTarget = this.units
+                .filter(unit =>
+                    unit.ownerId !== building.ownerId &&
+                    unit.health > 0 &&
+                    this.isWaterUnitType(unit.type) &&
+                    Math.hypot(unit.x - mineX, unit.y - mineY) <= triggerRadius
+                )
+                .sort((left, right) =>
+                    Math.hypot(left.x - mineX, left.y - mineY) -
+                    Math.hypot(right.x - mineX, right.y - mineY)
+                )[0];
+
+            if (!triggerTarget) return;
+
+            const affectedUnits = this.units.filter(unit =>
+                unit.ownerId !== building.ownerId &&
+                unit.health > 0 &&
+                this.isWaterUnitType(unit.type) &&
+                Math.hypot(unit.x - mineX, unit.y - mineY) <= blastRadius
+            );
+
+            affectedUnits.forEach(unit => {
+                if (!this.players.get(unit.ownerId)?.godMode) {
+                    unit.health -= blastDamage;
+                }
+            });
+
+            this.pendingProjectiles.push({
+                x1: mineX,
+                y1: mineY,
+                x2: mineX,
+                y2: mineY,
+                type: 'naval_mine_blast',
+                speed: 0,
+                radius: blastRadius
+            });
+            building.health = 0;
+        });
     }
 
     public getBuildingFootprintRadius(buildingType: string): number {
@@ -126,17 +906,57 @@ export class GameState {
         return 30;
     }
 
+    public getBuildingPlacementRadius(buildingType: string): number {
+        return this.getEffectivePlacementFootprintRadius(buildingType);
+    }
+
+    private isNonBlockingBuildingType(buildingType: string): boolean {
+        return buildingType === 'mine' || buildingType === 'bridge_node' || buildingType === 'naval_mine';
+    }
+
+    private getEffectivePlacementFootprintRadius(buildingType: string, _island?: Island): number {
+        if (this.isNonBlockingBuildingType(buildingType)) return 0;
+        const baseRadius = this.getBuildingFootprintRadius(buildingType);
+
+        if (buildingType === 'air_base') {
+            if (this.mapType === 'islands') return Math.max(14, Math.round(baseRadius * 0.5));
+            return Math.max(22, Math.round(baseRadius * 0.7));
+        }
+
+        if (this.mapType === 'islands') {
+            if (['barracks', 'tank_factory', 'tower', 'farm', 'oil_well', 'dock', 'hospital', 'repair_dock'].includes(buildingType)) {
+                return Math.max(9, Math.round(baseRadius * 0.68));
+            }
+            if (buildingType === 'wall' || buildingType === 'wall_node') {
+                return Math.max(5, Math.round(baseRadius * 0.7));
+            }
+        }
+
+        return baseRadius;
+    }
+
     private getBuildingCollisionRadius(buildingType: string, _unitType?: string): number {
+        if (this.isNonBlockingBuildingType(buildingType)) return 0;
+        if (this.mapType === 'islands' && ['air_base', 'barracks', 'tank_factory', 'tower', 'dock', 'oil_well', 'hospital', 'repair_dock'].includes(buildingType)) {
+            return Math.max(8, Math.round(this.getBuildingFootprintRadius(buildingType) * 0.72));
+        }
         return this.getBuildingFootprintRadius(buildingType);
     }
 
     private getBuildingPlacementPadding(buildingType: string): number {
-        if (buildingType === 'bridge_node' || buildingType === 'wall_node' || buildingType === 'wall') return 2;
+        if (this.isNonBlockingBuildingType(buildingType)) return 0;
+        if (buildingType === 'air_base') return this.mapType === 'islands' ? 0 : 2;
+        if (this.mapType === 'islands' && ['wall', 'wall_node'].includes(buildingType)) return 1;
+        if (buildingType === 'wall_node' || buildingType === 'wall') return 2;
+        if (this.mapType === 'islands' && ['air_base', 'barracks', 'tank_factory', 'tower', 'farm', 'oil_well', 'dock', 'hospital', 'repair_dock'].includes(buildingType)) {
+            return 0;
+        }
         return 4;
     }
 
     public isBuildingPlacementClearOnIsland(island: Island, buildingType: string, absX: number, absY: number): boolean {
-        const footprint = this.getBuildingFootprintRadius(buildingType);
+        const footprint = this.getEffectivePlacementFootprintRadius(buildingType, island);
+        const nonBlocking = this.isNonBlockingBuildingType(buildingType);
 
         if (
             absX < footprint ||
@@ -147,7 +967,7 @@ export class GameState {
             return false;
         }
 
-        if (this.map.highGrounds && buildingType !== 'dock' && buildingType !== 'oil_rig') {
+        if (this.map.highGrounds) {
             for (const hg of this.map.highGrounds) {
                 if (absX < hg.x - hg.radius - footprint || absX > hg.x + hg.radius + footprint || absY < hg.y - hg.radius - footprint || absY > hg.y + hg.radius + footprint) {
                     continue;
@@ -158,35 +978,48 @@ export class GameState {
                 }
 
                 const closest = MapGenerator.getClosestPointOnPolygon(absX, absY, hg.points);
-                if (Math.hypot(absX - closest.x, absY - closest.y) < footprint + 4) {
+                const highGroundEdgePadding = nonBlocking ? 0 : footprint + 4;
+                if (Math.hypot(absX - closest.x, absY - closest.y) < highGroundEdgePadding) {
                     return false;
                 }
             }
         }
 
         if (buildingType !== 'dock' && buildingType !== 'oil_rig') {
+            const edgePadding = nonBlocking
+                ? 0
+                : this.mapType === 'islands'
+                    ? ['air_base', 'barracks', 'tank_factory', 'tower', 'farm', 'oil_well', 'hospital', 'repair_dock'].includes(buildingType)
+                        ? Math.max(1, Math.round(footprint * 0.15))
+                        : Math.max(1, Math.round(footprint * 0.25))
+                    : footprint + 4;
             if (island.points) {
                 if (!MapGenerator.isPointInPolygon(absX, absY, island.points)) {
                     return false;
                 }
 
                 const closest = MapGenerator.getClosestPointOnPolygon(absX, absY, island.points);
-                if (Math.hypot(absX - closest.x, absY - closest.y) < footprint + 4) {
+                if (Math.hypot(absX - closest.x, absY - closest.y) < edgePadding) {
                     return false;
                 }
-            } else if (Math.hypot(absX - island.x, absY - island.y) > Math.max(0, island.radius - footprint - 4)) {
+            } else if (Math.hypot(absX - island.x, absY - island.y) > Math.max(0, island.radius - footprint - edgePadding)) {
                 return false;
             }
         }
 
+        if (nonBlocking) return true;
+
         return !island.buildings.some(existing => {
+            if (this.isNonBlockingBuildingType(existing.type)) return false;
             const existingX = island.x + (existing.x || 0);
             const existingY = island.y + (existing.y || 0);
+            const existingFootprint = this.getEffectivePlacementFootprintRadius(existing.type, island);
             const requiredSeparation =
                 footprint +
-                this.getBuildingFootprintRadius(existing.type) +
+                existingFootprint +
                 Math.max(this.getBuildingPlacementPadding(buildingType), this.getBuildingPlacementPadding(existing.type));
 
+            if (requiredSeparation <= 0) return false;
             return Math.hypot(absX - existingX, absY - existingY) < requiredSeparation;
         });
     }
@@ -196,6 +1029,123 @@ export class GameState {
             return MapGenerator.isPointInPolygon(x, y, island.points);
         }
         return Math.hypot(x - island.x, y - island.y) <= island.radius;
+    }
+
+    private getIslandShorelineProbe(
+        island: Island,
+        x: number,
+        y: number,
+        tolerance: number = 20
+    ): { edgeX: number; edgeY: number; outwardX: number; outwardY: number } | null {
+        if (island.points && island.points.length > 2) {
+            if (!MapGenerator.isPointInPolygon(x, y, island.points)) {
+                return null;
+            }
+
+            const closest = MapGenerator.getClosestPointOnPolygon(x, y, island.points);
+            if (Math.hypot(x - closest.x, y - closest.y) > tolerance) {
+                return null;
+            }
+
+            let outwardX = closest.x - island.x;
+            let outwardY = closest.y - island.y;
+            const outwardLength = Math.hypot(outwardX, outwardY);
+            if (outwardLength <= 0.001) {
+                outwardX = x - island.x;
+                outwardY = y - island.y;
+            }
+            const normalizedLength = Math.hypot(outwardX, outwardY) || 1;
+            return {
+                edgeX: closest.x,
+                edgeY: closest.y,
+                outwardX: outwardX / normalizedLength,
+                outwardY: outwardY / normalizedLength
+            };
+        }
+
+        const dx = x - island.x;
+        const dy = y - island.y;
+        const distance = Math.hypot(dx, dy);
+        const innerRadius = Math.max(0, island.radius - tolerance);
+        if (distance < innerRadius || distance > island.radius + 2) {
+            return null;
+        }
+
+        const length = distance || 1;
+        return {
+            edgeX: island.x + (dx / length) * island.radius,
+            edgeY: island.y + (dy / length) * island.radius,
+            outwardX: dx / length,
+            outwardY: dy / length
+        };
+    }
+
+    public isPointOnExposedIslandShoreline(island: Island, x: number, y: number, tolerance: number = 20): boolean {
+        const probe = this.getIslandShorelineProbe(island, x, y, tolerance);
+        if (!probe) return false;
+
+        const probeDistances = [6, 12, 18];
+        return probeDistances.some(distance => {
+            const probeX = probe.edgeX + probe.outwardX * distance;
+            const probeY = probe.edgeY + probe.outwardY * distance;
+            return !this.isPointOnAnyIslandSurface(probeX, probeY);
+        });
+    }
+
+    private isPointTouchingIslandSurface(island: Island, x: number, y: number, tolerance: number = 8): boolean {
+        if (this.isPointOnIslandSurface(island, x, y)) return true;
+
+        if (island.points && island.points.length > 2) {
+            const closest = MapGenerator.getClosestPointOnPolygon(x, y, island.points);
+            return Math.hypot(x - closest.x, y - closest.y) <= tolerance;
+        }
+
+        return Math.hypot(x - island.x, y - island.y) <= island.radius + tolerance;
+    }
+
+    private areIslandsLandConnected(islandA: Island, islandB: Island, tolerance: number = 10): boolean {
+        const centerDist = Math.hypot(islandA.x - islandB.x, islandA.y - islandB.y);
+        if (centerDist > islandA.radius + islandB.radius + Math.max(80, tolerance * 4)) {
+            return false;
+        }
+
+        if (!islandA.points && !islandB.points) {
+            return centerDist <= islandA.radius + islandB.radius + tolerance;
+        }
+
+        const sampleIslandAgainst = (source: Island, target: Island): boolean => {
+            if (source.points && source.points.length > 0) {
+                const step = Math.max(1, Math.floor(source.points.length / 24));
+                for (let i = 0; i < source.points.length; i += step) {
+                    const p = source.points[i];
+                    if (this.isPointTouchingIslandSurface(target, p.x, p.y, tolerance)) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            const samples = 24;
+            for (let i = 0; i < samples; i++) {
+                const angle = (i / samples) * Math.PI * 2;
+                const px = source.x + Math.cos(angle) * source.radius;
+                const py = source.y + Math.sin(angle) * source.radius;
+                if (this.isPointTouchingIslandSurface(target, px, py, tolerance)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        if (sampleIslandAgainst(islandA, islandB)) return true;
+        if (sampleIslandAgainst(islandB, islandA)) return true;
+
+        const midX = (islandA.x + islandB.x) * 0.5;
+        const midY = (islandA.y + islandB.y) * 0.5;
+        return (
+            this.isPointTouchingIslandSurface(islandA, midX, midY, tolerance) &&
+            this.isPointTouchingIslandSurface(islandB, midX, midY, tolerance)
+        );
     }
 
     private isSpawnClearOfBuildings(x: number, y: number, island: Island, unitType: string): boolean {
@@ -294,6 +1244,18 @@ export class GameState {
         }
 
         return null;
+    }
+
+    public getBuildingHitboxSnapshot(): Record<string, { placementRadius: number; collisionRadius: number; blocking: boolean }> {
+        const snapshot: Record<string, { placementRadius: number; collisionRadius: number; blocking: boolean }> = {};
+        Object.keys(BuildingData).forEach(type => {
+            snapshot[type] = {
+                placementRadius: this.getEffectivePlacementFootprintRadius(type),
+                collisionRadius: this.getBuildingCollisionRadius(type),
+                blocking: !this.isNonBlockingBuildingType(type)
+            };
+        });
+        return snapshot;
     }
 
     getPlayerBase(playerId: string): { island: Island; building: Building; x: number; y: number } | null {
@@ -422,9 +1384,9 @@ export class GameState {
 
             if (changed) {
                 this.touchMapVersion();
-                io.to(roomId).emit('mapData', this.map);
-                io.to(roomId).emit('playersData', Array.from(this.players.values()));
-                io.to(roomId).emit('unitsData', this.units);
+                this.emitVisibleMapData(io, roomId);
+                io.to(roomId).emit('playersData', this.getPlayersSnapshot(true));
+                io.to(roomId).emit('unitsData', this.getSimplifiedUnitsSnapshot());
             }
 
             this.emitHumanHqStatuses(io);
@@ -512,6 +1474,7 @@ export class GameState {
         this.map = MapGenerator.generate(3200, 2400, 40, this.mapType as any);
         this.map.mapType = this.mapType;
         this.map.serverRegion = this.serverRegion;
+        this.map.waterBuildings = this.map.waterBuildings || [];
         this.touchMapVersion();
 
         this.units = [];
@@ -519,7 +1482,7 @@ export class GameState {
         const botPlayers = Array.from(this.players.values()).filter(p => p.isBot);
         this.bots = [];
         botPlayers.forEach(p => {
-            this.bots.push(new BotAI(p.id, p.difficulty || 5));
+            this.bots.push(createBotAI(p.id, p.difficulty || 5));
         });
 
         this.players.forEach(p => {
@@ -549,12 +1512,13 @@ export class GameState {
         this.status = 'playing';
         this.startTime = Date.now();
         this.scheduleStartupHqVerification(io, roomId);
+        this.armHumanReadyBotStartGate();
 
         io.to(roomId).emit('gameStatus', 'playing');
         io.to(roomId).emit('gameStarted', { mapType: this.mapType });
-        io.to(roomId).emit('mapData', this.map);
-        io.to(roomId).emit('playersData', Array.from(this.players.values()));
-        io.to(roomId).emit('unitsData', this.units);
+        this.emitVisibleMapData(io, roomId);
+        io.to(roomId).emit('playersData', this.getPlayersSnapshot(true));
+        io.to(roomId).emit('unitsData', this.getSimplifiedUnitsSnapshot());
         this.emitHumanHqStatuses(io);
     }
 
@@ -635,6 +1599,7 @@ export class GameState {
         this.map = MapGenerator.generate(3200, 2400, 40, this.mapType as any);
         this.map.mapType = this.mapType;
         this.map.serverRegion = this.serverRegion;
+        this.map.waterBuildings = this.map.waterBuildings || [];
         this.touchMapVersion();
 
         // Reset State but keep players
@@ -683,8 +1648,9 @@ export class GameState {
         const botPlayers = Array.from(this.players.values()).filter(p => p.isBot);
         this.bots = [];
         botPlayers.forEach(p => {
-            this.bots.push(new BotAI(p.id, p.difficulty || 5));
+            this.bots.push(createBotAI(p.id, p.difficulty || 5));
         });
+        this.armHumanReadyBotStartGate();
 
         const baseCount = this.map.islands.reduce((acc, i) => acc + i.buildings.filter(b => b.type === 'base').length, 0);
         console.log(`[MATCH] initMatch complete matchId=${roomId} entitiesSpawned=${this.units.length} bases=${baseCount}`);
@@ -694,9 +1660,9 @@ export class GameState {
         io.to(roomId).emit('gameStatus', 'playing'); // Explicitly update status
         io.to(roomId).emit('gameStarted', { mapType: this.mapType });
         io.to(roomId).emit('MATCH_STARTED', { matchId: roomId }); // Authoritative start event
-        io.to(roomId).emit('mapData', this.map);
-        io.to(roomId).emit('playersData', Array.from(this.players.values()));
-        io.to(roomId).emit('unitsData', this.units);
+        this.emitVisibleMapData(io, roomId);
+        io.to(roomId).emit('playersData', this.getPlayersSnapshot(true));
+        io.to(roomId).emit('unitsData', this.getSimplifiedUnitsSnapshot());
         this.emitHumanHqStatuses(io);
     }
 
@@ -727,7 +1693,7 @@ export class GameState {
         if (this.status === 'playing') {
             this.assignStartingIsland(id);
             if (isBot) {
-                this.bots.push(new BotAI(id, difficulty));
+                this.bots.push(createBotAI(id, difficulty));
             }
         }
 
@@ -767,6 +1733,11 @@ export class GameState {
             console.log(`Player ${id} disconnected during game. Marked as eliminated.`);
         } else {
             this.players.delete(id);
+        }
+
+        this.humanMatchReadyPlayerIds.delete(id);
+        if (this.requireHumanReadyForBotStart && !this.botsReleasedForMatch && this.areAllHumansReadyForMatchStart()) {
+            this.releaseBotsForHumanReadyGate('player_removed');
         }
 
         this.bots = this.bots.filter(b => b.playerId !== id);
@@ -846,11 +1817,64 @@ export class GameState {
             return true;
         }
 
+        const activePlayerCount = Array.from(this.players.values()).filter(p => p.status !== 'eliminated').length;
+        const participantCount = Math.max(2, activePlayerCount || this.players.size || 2);
+        const minMapDim = Math.max(600, Math.min(this.map.width, this.map.height));
+        const densityScale = Math.max(0.58, Math.min(1, 2.6 / Math.sqrt(participantCount)));
+        const mapCenterX = this.map.width / 2;
+        const mapCenterY = this.map.height / 2;
+        const spawnSlotIndex = Math.min(existingBases.length, Math.max(0, participantCount - 1));
+        const targetAngle = (-Math.PI / 2) + (spawnSlotIndex / participantCount) * Math.PI * 2;
+        const angleDelta = (a: number, b: number) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)));
+        const existingBaseAngles = existingBases.map(base => Math.atan2(base.y - mapCenterY, base.x - mapCenterX));
+
+        const getEligibleSpawnIslands = (): Island[] => {
+            if (isSharedMap) {
+                return this.map.islands.filter(isl =>
+                    isl.radius > 200 &&
+                    isl.id !== 'oil_pit' &&
+                    isl.id !== 'high_land'
+                );
+            }
+
+            return this.map.islands.filter(isl => !isl.ownerId);
+        };
+
+        const rankIslandForSpawn = (island: Island): number => {
+            const islandAngle = Math.atan2(island.y - mapCenterY, island.x - mapCenterX);
+            const targetDelta = angleDelta(islandAngle, targetAngle);
+            const targetAlignmentScore = (Math.PI - targetDelta) * 260;
+            const nearestExistingAngle = existingBaseAngles.length > 0
+                ? Math.min(...existingBaseAngles.map(baseAngle => angleDelta(islandAngle, baseAngle)))
+                : Math.PI;
+            const angularSpreadScore = nearestExistingAngle * 220;
+            const islandSizeScore = this.mapType === 'islands' ? island.radius * 11 : island.radius * 5;
+            return islandSizeScore + targetAlignmentScore + angularSpreadScore;
+        };
+
+        const strictBaseSeparation = isSharedMap
+            ? Math.max(420, Math.floor(minMapDim * 0.24))
+            : Math.max(300, Math.floor(minMapDim * 0.16));
+        const relaxedBaseSeparation = isSharedMap
+            ? Math.max(340, Math.floor(strictBaseSeparation * 0.82))
+            : Math.max(250, Math.floor(strictBaseSeparation * 0.8));
+        const minimalBaseSeparation = isSharedMap
+            ? Math.max(280, Math.floor(strictBaseSeparation * 0.68))
+            : Math.max(220, Math.floor(strictBaseSeparation * 0.65));
+
+        const strictSeparation = Math.max(isSharedMap ? 340 : 220, Math.floor(strictBaseSeparation * densityScale));
+        const relaxedSeparation = Math.max(isSharedMap ? 300 : 200, Math.floor(relaxedBaseSeparation * densityScale));
+        const minimalSeparation = Math.max(isSharedMap ? 240 : 180, Math.floor(minimalBaseSeparation * densityScale));
+        const idealAngularGap = (Math.PI * 2) / participantCount;
+        const strictAngularSeparation = participantCount >= 3 ? idealAngularGap * 0.55 : 0;
+        const relaxedAngularSeparation = participantCount >= 3 ? idealAngularGap * 0.4 : 0;
+        const minimalAngularSeparation = participantCount >= 3 ? idealAngularGap * 0.28 : 0;
+
         // Strategy Phases
         const phases = [
-            { attempts: 50, buffer: 60, separation: 600, name: 'Strict' },
-            { attempts: 50, buffer: 20, separation: 300, name: 'Relaxed' },
-            { attempts: 20, buffer: 0, separation: 100, name: 'Minimal' }
+            { attempts: 70, buffer: 70, separation: strictSeparation, angleSeparation: strictAngularSeparation, name: 'Strict' },
+            { attempts: 60, buffer: 36, separation: relaxedSeparation, angleSeparation: relaxedAngularSeparation, name: 'Relaxed' },
+            { attempts: 40, buffer: 14, separation: minimalSeparation, angleSeparation: minimalAngularSeparation, name: 'Minimal' }
         ];
 
         let bestCandidate: { island: Island, x: number, y: number, score: number } | null = null;
@@ -863,34 +1887,10 @@ export class GameState {
 
             for (let i = 0; i < phase.attempts; i++) {
                 // Pick an island
-                let island: Island | undefined;
-
-                if (isSharedMap) {
-                    // Pick any large island (High Land or Low Land or Grassland)
-                    // Filter out obstacles (High Land, Oil Pit) to prevent spawning there
-                    const possible = this.map.islands.filter(isl =>
-                        isl.radius > 200 &&
-                        isl.id !== 'oil_pit' &&
-                        isl.id !== 'high_land'
-                    );
-                    if (possible.length > 0) {
-                        island = possible[Math.floor(Math.random() * possible.length)];
-                    }
-                } else {
-                    // Classic mode: Pick unowned island
-                    const unowned = this.map.islands.filter(isl => !isl.ownerId);
-                    if (unowned.length > 0) {
-                        if (this.mapType === 'islands') {
-                            const largerIslands = unowned
-                                .filter(isl => isl.radius >= 72)
-                                .sort((a, b) => b.radius - a.radius);
-                            const pool = (largerIslands.length > 0 ? largerIslands : [...unowned].sort((a, b) => b.radius - a.radius));
-                            island = pool[0];
-                        } else {
-                            island = unowned[Math.floor(Math.random() * unowned.length)];
-                        }
-                    }
-                }
+                const eligibleIslands = getEligibleSpawnIslands()
+                    .sort((a, b) => rankIslandForSpawn(b) - rankIslandForSpawn(a));
+                const islandPool = eligibleIslands.slice(0, Math.min(eligibleIslands.length, isSharedMap ? 6 : 8));
+                const island = islandPool.length > 0 ? islandPool[i % islandPool.length] : undefined;
 
                 if (!island) continue;
 
@@ -939,7 +1939,7 @@ export class GameState {
 
                 if (valid) {
                     // Score based on distance to nearest base
-                    let minDist = Infinity;
+                    let minDist = existingBases.length > 0 ? Infinity : phase.separation + island.radius;
                     existingBases.forEach(base => {
                         const d = Math.hypot(testX - base.x, testY - base.y);
                         if (d < minDist) minDist = d;
@@ -947,11 +1947,24 @@ export class GameState {
 
                     if (minDist < phase.separation) valid = false;
 
+                    const candidateAngle = Math.atan2(testY - mapCenterY, testX - mapCenterX);
+                    const nearestExistingAngle = existingBaseAngles.length > 0
+                        ? Math.min(...existingBaseAngles.map(baseAngle => angleDelta(candidateAngle, baseAngle)))
+                        : Math.PI;
+                    if (nearestExistingAngle < phase.angleSeparation) valid = false;
+
                     if (valid) {
                         let score = minDist;
+                        const targetDelta = angleDelta(candidateAngle, targetAngle);
+                        const targetAlignmentScore = (Math.PI - targetDelta) * 260;
+                        const angularSpreadScore = nearestExistingAngle * 220;
+                        score += targetAlignmentScore + angularSpreadScore;
                         if (this.mapType === 'islands') {
                             score += island.radius * 12;
                             score += distToEdge * 14;
+                        } else {
+                            score += island.radius * 6;
+                            score += distToEdge * 8;
                         }
 
                         candidates.push({
@@ -973,29 +1986,94 @@ export class GameState {
         // Failsafe: Force spawn somewhere if nothing found
         if (!bestCandidate) {
             console.warn(`WARN: Could not find valid spawn for ${playerId}. Using failsafe.`);
-            // Try random islands instead of just [0] to avoid stacking
             const validIslands = this.map.islands
                 .filter(i => i.id !== 'oil_pit' && i.id !== 'high_land')
-                .sort((a, b) => b.radius - a.radius);
-            const island = validIslands[0];
+                .sort((a, b) => rankIslandForSpawn(b) - rankIslandForSpawn(a));
+            let fallbackBest: { island: Island, x: number, y: number, score: number } | null = null;
 
-            if (island) {
-                let fx = 0;
-                let fy = 0;
-                if (island.points) {
-                    // If center is not safe, find closest valid land point (edge)
-                    // We use the island center as the reference point to find the closest edge
-                    const p = MapGenerator.getClosestPointOnPolygon(island.x, island.y, island.points);
-                    fx = p.x - island.x;
-                    fy = p.y - island.y;
+            validIslands.forEach(island => {
+                const sampleAttempts = island.points ? 64 : 80;
+                for (let attempt = 0; attempt < sampleAttempts; attempt++) {
+                    let testX = island.x;
+                    let testY = island.y;
+                    if (island.points) {
+                        const minX = Math.max(0, island.x - island.radius);
+                        const maxX = Math.min(this.map.width, island.x + island.radius);
+                        const minY = Math.max(0, island.y - island.radius);
+                        const maxY = Math.min(this.map.height, island.y + island.radius);
+                        testX = minX + Math.random() * (maxX - minX);
+                        testY = minY + Math.random() * (maxY - minY);
+                        if (!MapGenerator.isPointInPolygon(testX, testY, island.points)) continue;
+                    } else {
+                        const angle = Math.random() * Math.PI * 2;
+                        const dist = Math.random() * Math.max(12, island.radius - 14);
+                        testX = island.x + Math.cos(angle) * dist;
+                        testY = island.y + Math.sin(angle) * dist;
+                    }
+
+                    if (this.map.highGrounds) {
+                        let insideHighGround = false;
+                        for (const hg of this.map.highGrounds) {
+                            if (MapGenerator.isPointInPolygon(testX, testY, hg.points)) {
+                                insideHighGround = true;
+                                break;
+                            }
+                        }
+                        if (insideHighGround) continue;
+                    }
+
+                    const edgeDist = island.points
+                        ? Math.hypot(
+                            testX - MapGenerator.getClosestPointOnPolygon(testX, testY, island.points).x,
+                            testY - MapGenerator.getClosestPointOnPolygon(testX, testY, island.points).y
+                        )
+                        : Math.max(0, island.radius - Math.hypot(testX - island.x, testY - island.y));
+
+                    let minDist = existingBases.length > 0 ? Infinity : minimalSeparation + island.radius;
+                    existingBases.forEach(base => {
+                        const d = Math.hypot(testX - base.x, testY - base.y);
+                        if (d < minDist) minDist = d;
+                    });
+
+                    const candidateAngle = Math.atan2(testY - mapCenterY, testX - mapCenterX);
+                    const targetDelta = angleDelta(candidateAngle, targetAngle);
+                    const targetAlignmentScore = (Math.PI - targetDelta) * 220;
+                    const nearestExistingAngle = existingBaseAngles.length > 0
+                        ? Math.min(...existingBaseAngles.map(baseAngle => angleDelta(candidateAngle, baseAngle)))
+                        : Math.PI;
+                    const angularSpreadScore = nearestExistingAngle * 180;
+                    const score = minDist + island.radius * 9 + edgeDist * 6 + targetAlignmentScore + angularSpreadScore;
+                    if (!fallbackBest || score > fallbackBest.score) {
+                        fallbackBest = {
+                            island,
+                            x: testX - island.x,
+                            y: testY - island.y,
+                            score
+                        };
+                    }
                 }
+            });
 
-                bestCandidate = {
-                    island,
-                    x: fx,
-                    y: fy,
-                    score: 0
-                };
+            if (fallbackBest) {
+                bestCandidate = fallbackBest;
+            } else {
+                const island = validIslands[0];
+                if (island) {
+                    let fx = 0;
+                    let fy = 0;
+                    if (island.points) {
+                        const p = MapGenerator.getClosestPointOnPolygon(island.x, island.y, island.points);
+                        fx = p.x - island.x;
+                        fy = p.y - island.y;
+                    }
+
+                    bestCandidate = {
+                        island,
+                        x: fx,
+                        y: fy,
+                        score: 0
+                    };
+                }
             }
         }
 
@@ -1109,7 +2187,7 @@ export class GameState {
         }
     }
 
-    buildStructure(playerId: string, locationId: string, type: 'barracks' | 'mine' | 'tower' | 'dock' | 'base' | 'oil_rig' | 'oil_well' | 'wall' | 'bridge_node' | 'wall_node' | 'farm' | 'tank_factory' | 'air_base', x?: number, y?: number): boolean {
+    buildStructure(playerId: string, locationId: string, type: 'barracks' | 'mine' | 'tower' | 'dock' | 'base' | 'oil_rig' | 'oil_well' | 'wall' | 'bridge_node' | 'wall_node' | 'farm' | 'tank_factory' | 'air_base' | 'hospital' | 'repair_dock' | 'naval_mine', x?: number, y?: number): boolean {
         const player = this.players.get(playerId);
         if (!player) return false;
 
@@ -1132,6 +2210,45 @@ export class GameState {
 
         if (player.resources.gold < stats.cost.gold || player.resources.oil < stats.cost.oil) return false;
 
+        if (type === 'naval_mine') {
+            if (x === undefined || y === undefined) return false;
+            if (!this.isNavalMinePlacementClear(x, y)) return false;
+
+            const BUILD_RANGE = this.getBuildSupportRange(type);
+            const nearbyWorkers = this.getBuildSupportUnitsInRange(playerId, type, x, y, BUILD_RANGE);
+            if (nearbyWorkers.length === 0) return false;
+
+            player.resources.gold -= stats.cost.gold;
+            player.resources.oil -= stats.cost.oil;
+
+            const building = {
+                id: `bld_${Date.now()}_${Math.random()}`,
+                type,
+                level: 1,
+                health: 1,
+                maxHealth: stats.maxHealth,
+                x,
+                y,
+                isConstructing: true,
+                constructionProgress: 0,
+                ownerId: playerId,
+                range: stats.range,
+                hiddenFromEnemies: true
+            };
+
+            this.map.waterBuildings = this.map.waterBuildings || [];
+            this.map.waterBuildings.push(building as any);
+
+            const worker = this.getClosestBuildSupportUnit(playerId, type, x, y);
+            if (worker) {
+                this.moveUnitsToPosition(playerId, [worker.id], x, y);
+            }
+            this.touchMapVersion();
+            return true;
+        }
+
+        const useExactBridgeNodeIslandLookup = type === 'bridge_node' && x !== undefined && y !== undefined;
+
         // Check if location is an Island or OilSpot
         let island = this.map.islands.find(i => i.id === locationId);
         let oilSpot = this.map.oilSpots.find(o => o.id === locationId);
@@ -1145,30 +2262,65 @@ export class GameState {
 
         // If x/y provided, try to find the location if locationId is not specific enough or mismatched
         if (x !== undefined && y !== undefined) {
-            // Find island at this position
-            // Prioritize smaller islands (e.g. Oases on top of Desert Floor)
-            const candidates = this.map.islands.filter(i => {
-                if (i.points) return MapGenerator.isPointInPolygon(x, y, i.points);
-                return Math.hypot(i.x - x, i.y - y) < i.radius + 50;
-            });
-
-            // Sort by radius (ascending) to pick the most specific/smallest island (e.g. Oasis vs Low Land)
-            candidates.sort((a, b) => a.radius - b.radius);
-
-            if (candidates.length > 0) island = candidates[0];
-
             const foundOilSpot = this.map.oilSpots.find(o => Math.hypot(o.x - x, o.y - y) < o.radius + 20);
             if (foundOilSpot) oilSpot = foundOilSpot;
+
+            const preferOilSpotForRig = type === 'oil_rig' && !!oilSpot;
+            const preferAccessibleIslandForOilWell = type === 'oil_well' && !!oilSpot;
+            if (!preferOilSpotForRig) {
+                // Find island at this position
+                // Prioritize smaller islands (e.g. Oases on top of Desert Floor)
+                let candidates = useExactBridgeNodeIslandLookup
+                    ? this.getExactIslandCandidatesAtPoint(x, y)
+                    : this.map.islands.filter(i => {
+                        if (i.points) return MapGenerator.isPointInPolygon(x, y, i.points);
+                        return Math.hypot(i.x - x, i.y - y) < i.radius + 50;
+                    });
+
+                if (type === 'dock') {
+                    candidates = candidates.filter(candidate => this.isPointOnExposedIslandShoreline(candidate, x!, y!));
+                }
+
+                if (candidates.length > 0) {
+                    if (preferAccessibleIslandForOilWell) {
+                        const ownedCandidates = candidates.filter(candidate => candidate.ownerId === playerId);
+                        const builderUnits = this.units.filter(unit => unit.ownerId === playerId && unit.type === 'builder');
+                        const scoreCandidate = (candidate: Island) => {
+                            const distToCenter = Math.hypot(candidate.x - x, candidate.y - y);
+                            const nearestBuilderDist =
+                                builderUnits.length > 0
+                                    ? Math.min(...builderUnits.map(unit => Math.hypot(unit.x - x, unit.y - y)))
+                                    : Number.POSITIVE_INFINITY;
+                            const ownerBias = candidate.ownerId === playerId ? -300 : candidate.ownerId ? 220 : 0;
+                            return distToCenter + nearestBuilderDist * 0.6 + ownerBias + candidate.radius * 0.08;
+                        };
+
+                        const ranked = (ownedCandidates.length > 0 ? ownedCandidates : candidates).sort(
+                            (a, b) => scoreCandidate(a) - scoreCandidate(b)
+                        );
+                        island = ranked[0];
+                    } else {
+                        island = candidates[0];
+                    }
+                }
+            } else {
+                island = undefined;
+            }
         }
 
         if (island) {
-            // Ownership check: Strict for classic maps, relaxed for shared maps (Desert/Grasslands)
+            // Ownership check:
+            // - Shared maps already allow open land building.
+            // - Neutral islands on classic maps still require bridge footholds / bridge nodes.
+            // - Enemy-owned land is now buildable as long as the player still satisfies normal worker/range/footprint rules.
             const isSharedMap = this.mapType === 'desert' || this.mapType === 'grasslands';
-            if (!isSharedMap && island.ownerId !== playerId) return false;
-
-            // Prevent building on enemy islands even in shared maps? 
-            // If island has an owner and it's not us, deny.
-            if (island.ownerId && island.ownerId !== playerId) return false;
+            const enemyOwnedIsland = !!island.ownerId && island.ownerId !== playerId;
+            const allowNeutralBridgeNode = !island.ownerId && this.canBuildOnNeutralIsland(type);
+            const hasForwardBridgeFoothold =
+                !island.ownerId &&
+                island.buildings.some(building => building.ownerId === playerId && building.type === 'bridge_node');
+            const neutralIslandAllowed = isSharedMap || allowNeutralBridgeNode || hasForwardBridgeFoothold;
+            if (!enemyOwnedIsland && island.ownerId !== playerId && !neutralIslandAllowed) return false;
 
             if (type === 'oil_rig') return false;
 
@@ -1214,11 +2366,7 @@ export class GameState {
                     const absY = island.y + targetY;
                     if (type === 'mine') {
                     } else if (type === 'dock') {
-                        const inside = MapGenerator.isPointInPolygon(absX, absY, island.points);
-                        if (!inside) return false;
-                        const closest = MapGenerator.getClosestPointOnPolygon(absX, absY, island.points);
-                        const d = Math.hypot(absX - closest.x, absY - closest.y);
-                        if (d > 20) return false;
+                        if (!this.isPointOnExposedIslandShoreline(island, absX, absY)) return false;
                         if (!hasDockWaterSpawn(absX, absY)) return false;
                     } else {
                         const inside = MapGenerator.isPointInPolygon(absX, absY, island.points);
@@ -1227,10 +2375,9 @@ export class GameState {
                 } else {
                     const dist = Math.hypot(targetX, targetY);
                     if (type === 'dock') {
-                        const inner = Math.max(0, island.radius - 20);
-                        if (dist < inner || dist > island.radius) return false;
                         const absX = island.x + targetX;
                         const absY = island.y + targetY;
+                        if (!this.isPointOnExposedIslandShoreline(island, absX, absY)) return false;
                         if (!hasDockWaterSpawn(absX, absY)) return false;
                     } else if (dist > island.radius) {
                         return false;
@@ -1239,12 +2386,8 @@ export class GameState {
 
                 // Oil Well Specific Validation
                 if (type === 'oil_well') {
-                    // Strict: Desert Land Only
-                    if (island.type !== 'desert') return false;
-
-                    // Check if placed on an Oil Spot (Land)
-                    // We allow placing on 'hidden_oil' spots too (if player found them)
-                    // The client ensures they can only click what they see.
+                    // Land oil wells are allowed on any valid land island oil spot.
+                    // Water spots remain oil rigs only and are filtered by radius below.
                     const absX = island.x + targetX;
                     const absY = island.y + targetY;
 
@@ -1284,17 +2427,12 @@ export class GameState {
 
                 // Check for Builder in range
                 // User requested larger radius, increased to 400px
-                const BUILD_RANGE = 400;
+                const BUILD_RANGE = this.getBuildSupportRange(type);
                 const finalAbsX = island.x + targetX;
                 const finalAbsY = island.y + targetY;
 
-                const hasBuilderInRange = this.units.some(u =>
-                    u.ownerId === playerId &&
-                    u.type === 'builder' &&
-                    Math.hypot(u.x - finalAbsX, u.y - finalAbsY) <= BUILD_RANGE
-                );
-
-                if (!hasBuilderInRange) return false;
+                const nearbyWorkers = this.getBuildSupportUnitsInRange(playerId, type, finalAbsX, finalAbsY, BUILD_RANGE);
+                if (nearbyWorkers.length === 0) return false;
             } else {
                 // Auto placement logic (legacy/bot)
                 if (type === 'mine') {
@@ -1305,9 +2443,9 @@ export class GameState {
                 } else if (type === 'dock') {
                     let valid = false;
                     let attempts = 0;
-                    while (!valid && attempts < 40) {
-                        attempts++;
-                        if (island.points && island.points.length > 0) {
+                        while (!valid && attempts < 40) {
+                            attempts++;
+                            if (island.points && island.points.length > 0) {
                             const index = Math.floor(Math.random() * island.points.length);
                             const p = island.points[index];
                             const dx = p.x - island.x;
@@ -1319,11 +2457,14 @@ export class GameState {
                             if (!MapGenerator.isPointInPolygon(anchorX, anchorY, island.points)) {
                                 continue;
                             }
-                            const absX = anchorX;
-                            const absY = anchorY;
-                            if (!hasDockWaterSpawn(absX, absY)) {
-                                continue;
-                            }
+                                const absX = anchorX;
+                                const absY = anchorY;
+                                if (!this.isPointOnExposedIslandShoreline(island, absX, absY)) {
+                                    continue;
+                                }
+                                if (!hasDockWaterSpawn(absX, absY)) {
+                                    continue;
+                                }
                             const relX = anchorX - island.x;
                             const relY = anchorY - island.y;
                             if (!this.isBuildingPlacementClearOnIsland(island, type, absX, absY)) {
@@ -1339,6 +2480,9 @@ export class GameState {
                             const ty = Math.sin(angle) * innerRadius;
                             const absX = island.x + tx;
                             const absY = island.y + ty;
+                            if (!this.isPointOnExposedIslandShoreline(island, absX, absY)) {
+                                continue;
+                            }
                             if (!hasDockWaterSpawn(absX, absY)) {
                                 continue;
                             }
@@ -1355,16 +2499,25 @@ export class GameState {
                     let valid = false;
                     let attempts = 0;
                     const base = island.buildings.find(b => b.type === 'base' && b.ownerId === playerId);
-                    const footprint = this.getBuildingFootprintRadius(type);
-                    const baseFootprint = base ? this.getBuildingFootprintRadius('base') : 0;
+                    const footprint = this.getEffectivePlacementFootprintRadius(type, island);
+                    const baseFootprint = base ? this.getEffectivePlacementFootprintRadius('base', island) : 0;
                     const anchorX = base ? island.x + (base.x || 0) : island.x;
                     const anchorY = base ? island.y + (base.y || 0) : island.y;
-                    const minDist = Math.max(footprint + 20, baseFootprint + footprint + 12);
+                    const minDist = type === 'air_base'
+                        ? Math.max(footprint + 6, baseFootprint + footprint - 10)
+                        : Math.max(footprint + 20, baseFootprint + footprint + 12);
+                    const maxIslandDist = Math.max(footprint + 4, island.radius - Math.max(0, footprint) - 6);
                     const maxDist = island.points
-                        ? minDist + 220
-                        : Math.max(minDist + 20, Math.min(Math.max(footprint + 20, island.radius - footprint - 8), minDist + 220));
+                        ? minDist + (type === 'air_base' ? 260 : 220)
+                        : Math.max(
+                            minDist + 12,
+                            Math.min(
+                                Math.max(footprint + 12, maxIslandDist),
+                                minDist + (type === 'air_base' ? 260 : 220)
+                            )
+                        );
 
-                    while (!valid && attempts < 64) {
+                    while (!valid && attempts < (type === 'air_base' ? 120 : 64)) {
                         const angle = Math.random() * Math.PI * 2;
                         const dist = minDist + Math.random() * Math.max(20, maxDist - minDist);
                         const absX = anchorX + Math.cos(angle) * dist;
@@ -1384,13 +2537,6 @@ export class GameState {
                     if (!valid) return false;
                 }
 
-                // Check if player has ANY Builder unit (Global check)
-                const hasBuilder = this.units.some(u =>
-                    u.ownerId === playerId &&
-                    u.type === 'builder'
-                );
-
-                if (!hasBuilder) return false;
             }
 
             const finalAbsX = island.x + targetX;
@@ -1400,52 +2546,40 @@ export class GameState {
                 return false;
             }
 
+            const BUILD_RANGE = this.getBuildSupportRange(type);
+            const nearbyWorkers = this.getBuildSupportUnitsInRange(playerId, type, finalAbsX, finalAbsY, BUILD_RANGE);
+            if (nearbyWorkers.length === 0) return false;
+
             // Deduct cost
             player.resources.gold -= stats.cost.gold;
             player.resources.oil -= stats.cost.oil;
 
             const buildingId = `bld_${Date.now()}_${Math.random()}`;
+            let linkedOilSpot: any = null;
 
-                if (type === 'oil_well') {
-                    const targetId = (stats as any).targetOilSpotId;
-                    if (targetId) {
-                        const spot = this.map.oilSpots.find(s => s.id === targetId);
-                        if (spot) {
-                        // Link spot to this well so oil income is counted like rigs
-                        (spot as any).ownerId = playerId;
-                        (spot as any).building = {
-                            id: buildingId,
-                            type: 'oil_well',
-                            level: 1,
-                            health: 1,
-                            maxHealth: stats.maxHealth,
-                            isConstructing: true,
-                            constructionProgress: 0,
-                            range: stats.range
-                        };
-                        spot.occupiedBy = buildingId;
-                        // Snap to spot (relative to island)
+            if (type === 'oil_well') {
+                const targetId = (stats as any).targetOilSpotId;
+                if (targetId) {
+                    const spot = this.map.oilSpots.find(s => s.id === targetId);
+                    if (spot) {
+                        linkedOilSpot = spot;
                         targetX = spot.x - island.x;
                         targetY = spot.y - island.y;
 
-                        // PERMANENT REVEAL: Change ID so client renders it always
-                            if (spot.id.startsWith('hidden_oil_')) {
-                                spot.id = spot.id.replace('hidden_oil_', 'oil_revealed_');
-                            }
+                        if (spot.id.startsWith('hidden_oil_')) {
+                            spot.id = spot.id.replace('hidden_oil_', 'oil_revealed_');
+                        }
 
-                            const snappedAbsX = island.x + targetX;
-                            const snappedAbsY = island.y + targetY;
-                            if (!this.isBuildingPlacementClearOnIsland(island, type, snappedAbsX, snappedAbsY)) {
-                                player.resources.gold += stats.cost.gold;
-                                player.resources.oil += stats.cost.oil;
-                                delete (spot as any).ownerId;
-                                delete (spot as any).building;
-                                spot.occupiedBy = undefined;
-                                return false;
-                            }
+                        const snappedAbsX = island.x + targetX;
+                        const snappedAbsY = island.y + targetY;
+                        if (!this.isBuildingPlacementClearOnIsland(island, type, snappedAbsX, snappedAbsY)) {
+                            player.resources.gold += stats.cost.gold;
+                            player.resources.oil += stats.cost.oil;
+                            return false;
                         }
                     }
                 }
+            }
 
             if (type === 'mine') {
                 // If manual, find closest gold spot?
@@ -1490,7 +2624,7 @@ export class GameState {
             const isInstant = ((type as string) === 'barracks' || (type as string) === 'base');
             // console.log(`Building constructed: ${type} at ${targetX},${targetY}. Instant? ${isInstant}`);
 
-            island.buildings.push({
+            const building = {
                 id: buildingId,
                 type,
                 level: 1,
@@ -1502,26 +2636,56 @@ export class GameState {
                 constructionProgress: isInstant ? stats.maxHealth : 0,
                 ownerId: playerId, // Assign ownership
                 range: stats.range
-            });
+            };
 
-            // Command closest builder to move to construction site
-            let closestBuilder: Unit | null = null;
-            let minDist = Infinity;
+            island.buildings.push(building);
 
-            this.units.forEach(u => {
-                if (u.ownerId === playerId && u.type === 'builder') {
-                    const d = Math.hypot(u.x - finalAbsX, u.y - finalAbsY);
-                    if (d < minDist) {
-                        minDist = d;
-                        closestBuilder = u;
-                    }
-                }
-            });
-
-            if (closestBuilder) {
-                this.moveUnitsToPosition(playerId, [(closestBuilder as Unit).id], finalAbsX, finalAbsY);
+            if (linkedOilSpot) {
+                linkedOilSpot.occupiedBy = buildingId;
+                (linkedOilSpot as any).ownerId = playerId;
+                (linkedOilSpot as any).building = building;
             }
 
+            // Command closest builder to move to construction site
+            const closestWorker = this.getClosestBuildSupportUnit(playerId, type, finalAbsX, finalAbsY);
+            if (closestWorker) {
+                this.moveUnitsToPosition(playerId, [closestWorker.id], finalAbsX, finalAbsY);
+            }
+
+            return true;
+        } else if (type === 'bridge_node' && x !== undefined && y !== undefined) {
+            if (!this.isBridgeNodeWaterPlacementClear(x, y)) return false;
+
+            const BUILD_RANGE = this.getBuildSupportRange(type);
+            const nearbyWorkers = this.getBuildSupportUnitsInRange(playerId, type, x, y, BUILD_RANGE);
+            if (nearbyWorkers.length === 0) return false;
+
+            player.resources.gold -= stats.cost.gold;
+            player.resources.oil -= stats.cost.oil;
+
+            const building = {
+                id: `bld_${Date.now()}_${Math.random()}`,
+                type,
+                level: 1,
+                health: 1,
+                maxHealth: stats.maxHealth,
+                x,
+                y,
+                isConstructing: true,
+                constructionProgress: 0,
+                ownerId: playerId,
+                range: stats.range
+            };
+
+            this.map.waterBuildings = this.map.waterBuildings || [];
+            this.map.waterBuildings.push(building as any);
+
+            const closestWorker = this.getClosestBuildSupportUnit(playerId, type, x, y);
+            if (closestWorker) {
+                this.moveUnitsToPosition(playerId, [closestWorker.id], x, y);
+            }
+
+            this.touchMapVersion();
             return true;
         } else if (oilSpot) {
             if (type !== 'oil_rig') return false;
@@ -1603,7 +2767,7 @@ export class GameState {
         }
     }
 
-    recruitUnit(playerId: string, islandId: string, type: string, buildingId?: string): boolean {
+    recruitUnit(playerId: string, islandId: string | null, type: string, buildingId?: string): boolean {
         const player = this.players.get(playerId);
         if (!player) return false;
 
@@ -1635,7 +2799,7 @@ export class GameState {
         if (buildingId && (!sourceBuilding || (sourceBuilding.isConstructing && !['mothership', 'aircraft_carrier'].includes(sourceBuilding.type)))) return false;
 
         const isInfantry = ['soldier', 'sniper', 'rocketeer', 'builder', 'oil_seeker'].includes(type);
-        const isNaval = ['destroyer', 'construction_ship', 'ferry', 'aircraft_carrier'].includes(type);
+        const isNaval = ['destroyer', 'pirate_ship', 'construction_ship', 'ferry', 'aircraft_carrier'].includes(type);
         const isVehicle = ['tank', 'humvee', 'missile_launcher'].includes(type);
         const isAir = ['light_plane', 'heavy_plane', 'mothership', 'alien_scout', 'heavy_alien'].includes(type);
 
@@ -1673,13 +2837,13 @@ export class GameState {
 
         if (player.resources.gold < stats.cost.gold || player.resources.oil < stats.cost.oil) return false;
 
-        player.resources.gold -= stats.cost.gold;
-        player.resources.oil -= stats.cost.oil;
-
         if (sourceBuilding) {
             if (!sourceBuilding.recruitmentQueue) sourceBuilding.recruitmentQueue = [];
 
             if (sourceBuilding.recruitmentQueue.length >= 5) return false;
+
+            player.resources.gold -= stats.cost.gold;
+            player.resources.oil -= stats.cost.oil;
 
             // Add to queue
             sourceBuilding.recruitmentQueue.push({
@@ -1769,7 +2933,7 @@ export class GameState {
         const bx = island.x + (building.x || 0);
         const by = island.y + (building.y || 0);
 
-        const isNaval = ['destroyer', 'construction_ship', 'ferry'].includes(type);
+        const isNaval = ['destroyer', 'pirate_ship', 'construction_ship', 'ferry'].includes(type);
 
         if (building.type === 'dock' && isNaval) {
             // Robust Water Search: Scan in expanding rings around the dock
@@ -1898,17 +3062,12 @@ export class GameState {
                             // Check for overlap connection
                             let connectedByLand = false;
                             if (tIsland) {
-                                const dist = Math.hypot(currentIsland.x - tIsland.x, currentIsland.y - tIsland.y);
-                                connectedByLand = dist < (currentIsland.radius + tIsland.radius);
+                                connectedByLand = this.areIslandsLandConnected(currentIsland, tIsland);
                             }
 
                             if (!connectedByLand) {
-                                // Moving between islands: Must have a bridge
-                                const hasBridge = this.map.bridges.some(b =>
-                                    b.type === 'bridge' &&
-                                    ((b.islandAId === currentIsland.id && b.islandBId === targetIslandId) ||
-                                        (b.islandAId === targetIslandId && b.islandBId === currentIsland.id))
-                                );
+                                // Moving between islands: Must have a traversable bridge chain
+                                const hasBridge = !!this.findIslandPath(currentIsland.id, targetIslandId);
 
                                 if (!hasBridge) {
                                     // Block movement
@@ -1919,20 +3078,16 @@ export class GameState {
                             }
                         }
                     } else {
-                        // Not on an island (presumably on a bridge or water)
-                        // If on a bridge, we should allow moving to either end.
-                        // We'll optimistically allow if we can find a bridge connecting to target, 
-                        // assuming the unit is on that bridge or a connected one.
-                        // But to be safe against water walking:
-                        const nearbyBridge = this.map.bridges.find(b =>
-                            b.type === 'bridge' &&
-                            // Simple distance check to bridge segment?
-                            // Let's assume if not on island, and requesting move to island,
-                            // we must be on a bridge connected to it.
-                            (b.islandAId === targetIslandId || b.islandBId === targetIslandId)
-                        );
+                        const bridgeInfo = this.getBridgeAt(unit.x, unit.y);
+                        if (!bridgeInfo) return;
 
-                        if (!nearbyBridge) return; // Block if no bridge to target
+                        const nodeAContext = this.getNodeContext(bridgeInfo.bridge.nodeAId);
+                        const nodeBContext = this.getNodeContext(bridgeInfo.bridge.nodeBId);
+                        const canReachTarget =
+                            (!!nodeAContext?.islandId && !!this.findIslandPath(nodeAContext.islandId, targetIslandId)) ||
+                            (!!nodeBContext?.islandId && !!this.findIslandPath(nodeBContext.islandId, targetIslandId));
+
+                        if (!canReachTarget) return;
                     }
                 }
 
@@ -1987,6 +3142,136 @@ export class GameState {
         return owner.status === 'eliminated' || owner.canBuildHQ === false || owner.hqSpawnedOnce === true;
     }
 
+    private isOilStructureBackedByIslandBuilding(building: any): boolean {
+        return this.map.islands.some(island =>
+            island.buildings.some(existing => existing === building || existing.id === building.id)
+        );
+    }
+
+    private destroyOilStructureById(buildingId: string) {
+        this.map.islands.forEach(island => {
+            island.buildings = island.buildings.filter(building => building.id !== buildingId);
+        });
+
+        this.map.oilSpots.forEach(spot => {
+            if (spot.occupiedBy === buildingId || (spot as any).building?.id === buildingId) {
+                spot.occupiedBy = undefined;
+                delete (spot as any).ownerId;
+                delete (spot as any).building;
+            }
+        });
+    }
+
+    private startPlayerAssetCollapse(playerId: string) {
+        if (this.playerCollapseStates.has(playerId)) return;
+
+        const now = Date.now();
+        this.playerCollapseStates.set(playerId, {
+            startedAt: now,
+            ticksApplied: 0,
+            nextTickAt: now + 1000
+        });
+
+        this.units.forEach(unit => {
+            if (unit.ownerId !== playerId) return;
+            unit.status = 'idle';
+            unit.targetX = undefined;
+            unit.targetY = undefined;
+            unit.targetIslandId = undefined;
+            unit.path = [];
+            unit.damage = 0;
+            (unit as any).burning = true;
+            (unit as any).burningUntil = now + 10000;
+        });
+
+        this.map.islands.forEach(island => {
+            island.buildings.forEach(building => {
+                if (building.ownerId !== playerId) return;
+                (building as any).burning = true;
+                (building as any).burningUntil = now + 10000;
+            });
+        });
+
+        (this.map.waterBuildings || []).forEach(building => {
+            if (building.ownerId !== playerId) return;
+            (building as any).burning = true;
+            (building as any).burningUntil = now + 10000;
+        });
+
+        this.map.oilSpots.forEach(spot => {
+            if ((spot as any).ownerId !== playerId) return;
+            const building = (spot as any).building;
+            if (!building) return;
+            (building as any).burning = true;
+            (building as any).burningUntil = now + 10000;
+        });
+    }
+
+    private processPlayerAssetCollapse(now: number) {
+        if (this.playerCollapseStates.size === 0) return;
+
+        const completed: string[] = [];
+        this.playerCollapseStates.forEach((state, playerId) => {
+            while (state.ticksApplied < 10 && now >= state.nextTickAt) {
+                state.ticksApplied += 1;
+                state.nextTickAt += 1000;
+
+                this.units.forEach(unit => {
+                    if (unit.ownerId !== playerId || unit.health <= 0) return;
+                    unit.health -= Math.max(1, unit.maxHealth * 0.1);
+                });
+
+                this.map.islands.forEach(island => {
+                    island.buildings.forEach(building => {
+                        if (building.ownerId !== playerId || building.health <= 0) return;
+                        building.health -= Math.max(1, building.maxHealth * 0.1);
+                    });
+                });
+
+                (this.map.waterBuildings || []).forEach(building => {
+                    if (building.ownerId !== playerId || building.health <= 0) return;
+                    building.health -= Math.max(1, building.maxHealth * 0.1);
+                });
+
+                this.map.oilSpots.forEach(spot => {
+                    if ((spot as any).ownerId !== playerId) return;
+                    const building = (spot as any).building;
+                    if (!building || building.health <= 0) return;
+                    building.health -= Math.max(1, building.maxHealth * 0.1);
+                });
+            }
+
+            if (state.ticksApplied >= 10) {
+                this.units.forEach(unit => {
+                    if (unit.ownerId !== playerId) return;
+                    unit.health = 0;
+                });
+
+                this.map.islands.forEach(island => {
+                    island.buildings.forEach(building => {
+                        if (building.ownerId !== playerId) return;
+                        building.health = 0;
+                    });
+                });
+
+                (this.map.waterBuildings || []).forEach(building => {
+                    if (building.ownerId !== playerId) return;
+                    building.health = 0;
+                });
+
+                this.map.oilSpots.forEach(spot => {
+                    if ((spot as any).ownerId !== playerId) return;
+                    const building = (spot as any).building;
+                    if (building) building.health = 0;
+                });
+
+                completed.push(playerId);
+            }
+        });
+
+        completed.forEach(playerId => this.playerCollapseStates.delete(playerId));
+    }
+
     cleanupDeadEntities() {
         // Remove dead units
         const initialCount = this.units.length;
@@ -2007,6 +3292,7 @@ export class GameState {
         // Remove destroyed buildings and resolve HQ elimination consistently.
         // This catches every combat path, including AoE paths that bypass explicit HQ checks.
         const eliminateQueue = new Set<string>();
+        const destroyedNodeIds = new Set<string>();
         this.map.islands.forEach(island => {
             island.buildings = island.buildings.filter(b => {
                 if (b.health > 0) return true;
@@ -2023,17 +3309,52 @@ export class GameState {
                 }
 
                 if (b.type === 'oil_rig' || b.type === 'oil_well') {
-                    const spot = this.map.oilSpots.find(s => s.occupiedBy === b.id);
+                    const spot = this.map.oilSpots.find(s => s.occupiedBy === b.id || (s as any).building?.id === b.id);
                     if (spot) {
                         spot.occupiedBy = undefined;
-                        (spot as any).ownerId = undefined;
-                        (spot as any).building = undefined;
+                        delete (spot as any).ownerId;
+                        delete (spot as any).building;
                     }
+                }
+
+                if ((b.type === 'bridge_node' || b.type === 'wall_node') && b.id) {
+                    destroyedNodeIds.add(b.id);
                 }
 
                 return false;
             });
         });
+
+        if (destroyedNodeIds.size > 0) {
+            this.map.bridges = this.map.bridges.filter(bridge =>
+                !destroyedNodeIds.has(bridge.nodeAId) && !destroyedNodeIds.has(bridge.nodeBId)
+            );
+            this.clearTraversalCaches();
+        }
+
+        this.map.oilSpots.forEach(spot => {
+            const building = (spot as any).building;
+            if (building && building.health <= 0) {
+                this.destroyOilStructureById(building.id);
+            }
+        });
+
+        if (this.map.waterBuildings && this.map.waterBuildings.length > 0) {
+            this.map.waterBuildings = this.map.waterBuildings.filter(building => {
+                if (building.health > 0) return true;
+                if ((building.type === 'bridge_node' || building.type === 'wall_node') && building.id) {
+                    destroyedNodeIds.add(building.id);
+                }
+                return false;
+            });
+        }
+
+        if (destroyedNodeIds.size > 0) {
+            this.map.bridges = this.map.bridges.filter(bridge =>
+                !destroyedNodeIds.has(bridge.nodeAId) && !destroyedNodeIds.has(bridge.nodeBId)
+            );
+            this.clearTraversalCaches();
+        }
 
         eliminateQueue.forEach(playerId => this.eliminatePlayer(playerId, 'HQ_DESTROYED'));
 
@@ -2173,7 +3494,7 @@ export class GameState {
             if (unit && unit.ownerId === playerId) {
                 const adjusted = this.adjustTarget(unit.type, x, y);
                 const isAirUnit = ['light_plane', 'heavy_plane', 'mothership', 'alien_scout', 'heavy_alien'].includes(unit.type);
-                const isWaterUnit = ['ferry', 'construction_ship', 'destroyer', 'oil_tanker', 'aircraft_carrier'].includes(unit.type);
+                const isWaterUnit = ['ferry', 'construction_ship', 'destroyer', 'pirate_ship', 'oil_tanker', 'aircraft_carrier'].includes(unit.type);
                 const isLandUnit = ['soldier', 'sniper', 'rocketeer', 'builder', 'oil_seeker', 'tank', 'humvee', 'missile_launcher'].includes(unit.type);
 
                 if (isAirUnit) {
@@ -2220,34 +3541,22 @@ export class GameState {
                     if (currentIsland && targetIsland && currentIsland.id !== targetIsland.id) {
                         // Moving between different islands
 
-                        // Check for overlap connection
-                        const dist = Math.hypot(currentIsland.x - targetIsland.x, currentIsland.y - targetIsland.y);
-                        const connectedByLand = dist < (currentIsland.radius + targetIsland.radius);
-
-                        if (!connectedByLand) {
-                            // Moving between different islands: Must have a bridge connecting them
-                            const hasBridge = this.map.bridges.some(b =>
-                                b.type === 'bridge' &&
-                                ((b.islandAId === currentIsland.id && b.islandBId === targetIsland.id) ||
-                                    (b.islandAId === targetIsland.id && b.islandBId === currentIsland.id))
-                            );
-
-                            if (!hasBridge) {
-                                // If no bridge, move to the edge of the current island closest to the target
-                                if (currentIsland.points) {
-                                    const closest = MapGenerator.getClosestPointOnPolygon(adjusted.x, adjusted.y, currentIsland.points);
-                                    const angle = Math.atan2(closest.y - currentIsland.y, closest.x - currentIsland.x);
-                                    unit.targetX = closest.x - Math.cos(angle) * 5;
-                                    unit.targetY = closest.y - Math.sin(angle) * 5;
-                                } else {
-                                    const angle = Math.atan2(adjusted.y - currentIsland.y, adjusted.x - currentIsland.x);
-                                    unit.targetX = currentIsland.x + Math.cos(angle) * (currentIsland.radius - 10);
-                                    unit.targetY = currentIsland.y + Math.sin(angle) * (currentIsland.radius - 10);
-                                }
-                                unit.targetIslandId = undefined;
-                                unit.status = 'moving';
-                                return;
+                        const islandPath = this.findIslandPath(currentIsland.id, targetIsland.id);
+                        if (!islandPath) {
+                            // If no path, move to the edge of the current island closest to the target
+                            if (currentIsland.points) {
+                                const closest = MapGenerator.getClosestPointOnPolygon(adjusted.x, adjusted.y, currentIsland.points);
+                                const angle = Math.atan2(closest.y - currentIsland.y, closest.x - currentIsland.x);
+                                unit.targetX = closest.x - Math.cos(angle) * 5;
+                                unit.targetY = closest.y - Math.sin(angle) * 5;
+                            } else {
+                                const angle = Math.atan2(adjusted.y - currentIsland.y, adjusted.x - currentIsland.x);
+                                unit.targetX = currentIsland.x + Math.cos(angle) * (currentIsland.radius - 10);
+                                unit.targetY = currentIsland.y + Math.sin(angle) * (currentIsland.radius - 10);
                             }
+                            unit.targetIslandId = undefined;
+                            unit.status = 'moving';
+                            return;
                         }
                     }
 
@@ -2435,16 +3744,12 @@ export class GameState {
             return;
         }
 
-        let nodeA: any, nodeB: any, islandA: any, islandB: any;
+        const nodeAContext = this.getNodeContext(nodeAId);
+        const nodeBContext = this.getNodeContext(nodeBId);
+        const nodeA = nodeAContext?.node;
+        const nodeB = nodeBContext?.node;
 
-        this.map.islands.forEach(island => {
-            const bA = island.buildings.find(b => b.id === nodeAId);
-            if (bA) { nodeA = bA; islandA = island; }
-            const bB = island.buildings.find(b => b.id === nodeBId);
-            if (bB) { nodeB = bB; islandB = island; }
-        });
-
-        if (!nodeA || !nodeB || !islandA || !islandB) {
+        if (!nodeAContext || !nodeBContext || !nodeA || !nodeB) {
             this.logWallPair(playerId, nodeAId, nodeBId, 'unknown', null, null, false, 'INVALID_NODE');
             return;
         }
@@ -2458,15 +3763,33 @@ export class GameState {
             return;
         }
 
-        if (islandA.ownerId !== playerId && islandB.ownerId !== playerId) {
+        if (nodeA.ownerId !== playerId || nodeB.ownerId !== playerId) {
             this.logWallPair(playerId, nodeAId, nodeBId, type, null, null, false, 'NOT_OWNED');
             return;
         }
 
-        const ax = islandA.x + (nodeA.x || 0);
-        const ay = islandA.y + (nodeA.y || 0);
-        const bx = islandB.x + (nodeB.x || 0);
-        const by = islandB.y + (nodeB.y || 0);
+        if (isWall && (!nodeAContext.islandId || !nodeBContext.islandId)) {
+            this.logWallPair(playerId, nodeAId, nodeBId, type, null, null, false, 'WALL_REQUIRES_LAND');
+            return;
+        }
+
+        if (isBridge) {
+            const nodeADegree = this.getBridgeNodeDegree(nodeAId);
+            const nodeBDegree = this.getBridgeNodeDegree(nodeBId);
+            if (nodeADegree >= 2 || nodeBDegree >= 2) {
+                this.logWallPair(playerId, nodeAId, nodeBId, type, null, null, false, 'CHAIN_BRANCH_BLOCKED');
+                return;
+            }
+            if (this.hasBridgeNodePath(nodeAId, nodeBId)) {
+                this.logWallPair(playerId, nodeAId, nodeBId, type, null, null, false, 'CHAIN_LOOP_BLOCKED');
+                return;
+            }
+        }
+
+        const ax = nodeAContext.x;
+        const ay = nodeAContext.y;
+        const bx = nodeBContext.x;
+        const by = nodeBContext.y;
         const dist = Math.hypot(ax - bx, ay - by);
 
         const maxDist = isBridge ? 800 : 999999;
@@ -2508,19 +3831,10 @@ export class GameState {
         };
 
         const overlap = this.map.bridges.some(b => {
-            const iA = this.map.islands.find(i => i.id === b.islandAId);
-            const iB = this.map.islands.find(i => i.id === b.islandBId);
-            if (!iA || !iB) return false;
-            const nA = iA.buildings.find(n => n.id === b.nodeAId);
-            const nB = iB.buildings.find(n => n.id === b.nodeBId);
-            if (!nA || !nB) return false;
+            const endpoints = this.getBridgeEndpoints(b);
+            if (!endpoints) return false;
 
-            const pax = iA.x + (nA.x || 0);
-            const pay = iA.y + (nA.y || 0);
-            const pbx = iB.x + (nB.x || 0);
-            const pby = iB.y + (nB.y || 0);
-
-            return intersect(ax, ay, bx, by, pax, pay, pbx, pby);
+            return intersect(ax, ay, bx, by, endpoints.ax, endpoints.ay, endpoints.bx, endpoints.by);
         });
 
         if (overlap) {
@@ -2535,8 +3849,8 @@ export class GameState {
             type,
             nodeAId,
             nodeBId,
-            islandAId: islandA.id,
-            islandBId: islandB.id,
+            islandAId: nodeAContext.islandId,
+            islandBId: nodeBContext.islandId,
             ownerId: playerId,
             health: 500,
             maxHealth: 500
@@ -2550,7 +3864,7 @@ export class GameState {
         this.logWallPair(playerId, nodeAId, nodeBId, type, dist, maxDist, true, 'OK');
 
         // Clear path cache as connectivity changed
-        if (this.pathCache) this.pathCache.clear();
+        this.clearTraversalCaches();
     }
 
     convertWallToGate(playerId: string, nodeAId: string, nodeBId: string) {
@@ -2579,50 +3893,16 @@ export class GameState {
             return this.pathCache.get(cacheKey)!;
         }
 
-        // BFS
-        const queue: { id: string, path: string[] }[] = [{ id: startIslandId, path: [startIslandId] }];
-        const visited = new Set<string>();
-        visited.add(startIslandId);
+        const traversalPath = this.findIslandTraversalPath(startIslandId, endIslandId);
+        if (!traversalPath) return null;
 
-        while (queue.length > 0) {
-            const { id, path } = queue.shift()!;
-            if (id === endIslandId) {
-                this.pathCache.set(cacheKey, path);
-                return path;
-            }
+        const islandPath = traversalPath
+            .filter(token => token.startsWith('island:'))
+            .map(token => token.slice('island:'.length))
+            .filter((islandId, index, array) => index === 0 || islandId !== array[index - 1]);
 
-            const currentIsland = this.map.islands.find(i => i.id === id);
-            if (!currentIsland) continue;
-
-            // Find neighbors
-            const neighbors: string[] = [];
-
-            // 1. Connected by Bridge
-            this.map.bridges.forEach(b => {
-                if (b.type !== 'bridge' && b.type !== 'gate') return; // Only cross bridges/gates
-                if (b.islandAId === id && !visited.has(b.islandBId)) neighbors.push(b.islandBId);
-                if (b.islandBId === id && !visited.has(b.islandAId)) neighbors.push(b.islandAId);
-            });
-
-            // 2. Connected by Overlap (Land Connection)
-            this.map.islands.forEach(other => {
-                if (other.id === id) return;
-                if (visited.has(other.id)) return;
-
-                const dist = Math.hypot(currentIsland.x - other.x, currentIsland.y - other.y);
-                if (dist < (currentIsland.radius + other.radius)) {
-                    neighbors.push(other.id);
-                }
-            });
-
-            for (const nid of neighbors) {
-                if (!visited.has(nid)) {
-                    visited.add(nid);
-                    queue.push({ id: nid, path: [...path, nid] });
-                }
-            }
-        }
-        return null;
+        this.pathCache.set(cacheKey, islandPath);
+        return islandPath;
     }
 
     adjustTarget(unitType: string, targetX: number, targetY: number): { x: number, y: number } {
@@ -2676,19 +3956,9 @@ export class GameState {
         if (isLandUnit) {
             const onBridge = this.map.bridges.some(bridge => {
                 if (bridge.type !== 'bridge') return false;
-
-                const iA = this.map.islands.find(i => i.id === bridge.islandAId);
-                const iB = this.map.islands.find(i => i.id === bridge.islandBId);
-                if (!iA || !iB) return false;
-
-                const nA = iA.buildings.find(b => b.id === bridge.nodeAId);
-                const nB = iB.buildings.find(b => b.id === bridge.nodeBId);
-                if (!nA || !nB) return false;
-
-                const ax = iA.x + (nA.x || 0);
-                const ay = iA.y + (nA.y || 0);
-                const bx = iB.x + (nB.x || 0);
-                const by = iB.y + (nB.y || 0);
+                const endpoints = this.getBridgeEndpoints(bridge);
+                if (!endpoints) return false;
+                const { ax, ay, bx, by } = endpoints;
 
                 const l2 = (bx - ax) ** 2 + (by - ay) ** 2;
                 if (l2 === 0) return false;
@@ -2800,7 +4070,7 @@ export class GameState {
         const getMass = (type: string) => {
             if (['oil_rig', 'oil_well'].includes(type)) return 10000;
             if (['mothership', 'aircraft_carrier'].includes(type)) return 100;
-            if (['tank', 'heavy_plane', 'destroyer', 'construction_ship'].includes(type)) return 40;
+            if (['tank', 'heavy_plane', 'destroyer', 'pirate_ship', 'construction_ship'].includes(type)) return 40;
             if (['humvee', 'ferry', 'light_plane', 'missile_launcher'].includes(type)) return 20;
             return 10;
         };
@@ -2834,8 +4104,8 @@ export class GameState {
                         const isU2Land = ['soldier', 'sniper', 'rocketeer', 'builder', 'tank', 'humvee', 'missile_launcher', 'oil_seeker'].includes(u2.type);
                         const isU1Air = ['light_plane', 'heavy_plane', 'mothership'].includes(u1.type);
                         const isU2Air = ['light_plane', 'heavy_plane', 'mothership'].includes(u2.type);
-                        const isU1Water = ['destroyer', 'construction_ship', 'ferry', 'oil_rig', 'aircraft_carrier'].includes(u1.type);
-                        const isU2Water = ['destroyer', 'construction_ship', 'ferry', 'oil_rig', 'aircraft_carrier'].includes(u2.type);
+                        const isU1Water = ['destroyer', 'pirate_ship', 'construction_ship', 'ferry', 'oil_rig', 'aircraft_carrier'].includes(u1.type);
+                        const isU2Water = ['destroyer', 'pirate_ship', 'construction_ship', 'ferry', 'oil_rig', 'aircraft_carrier'].includes(u2.type);
 
                         if (isU1Land && !isU2Land) continue;
                         if (isU1Air && !isU2Air) continue;
@@ -2883,7 +4153,7 @@ export class GameState {
         const canHit = (atkType: string, tarType: string) => {
             const tarLayer = getLayer(tarType);
             if (tarLayer === 'AIR_2') {
-                if (['destroyer', 'construction_ship', 'ferry', 'aircraft_carrier', 'oil_tanker'].includes(atkType)) {
+                if (['destroyer', 'pirate_ship', 'construction_ship', 'ferry', 'aircraft_carrier', 'oil_tanker'].includes(atkType)) {
                     return !!UnitData[atkType]?.canAttackAir;
                 }
                 return ['missile_launcher', 'rocketeer', 'tower', 'base'].includes(atkType) || getLayer(atkType).startsWith('AIR') || !!UnitData[atkType]?.canAttackAir;
@@ -2891,7 +4161,27 @@ export class GameState {
             return true;
         };
 
+        const getTargetPriority = (attackerType: string, targetType: string, isBuildingTarget: boolean): number => {
+            const isAirAttacker = ['light_plane', 'heavy_plane', 'mothership'].includes(attackerType);
+            const isProductionTarget = ['base', 'barracks', 'tank_factory', 'dock', 'air_base'].includes(targetType);
+            const isEconomyTarget = ['mine', 'oil_rig', 'oil_well'].includes(targetType);
+            const isNodeTarget = targetType === 'wall_node' || targetType === 'bridge_node';
+
+            if (targetType === 'base') return 0;
+            if (isProductionTarget) return 1;
+
+            if (isAirAttacker && isNodeTarget) return 9;
+            if (targetType === 'tower') return 2;
+            if (isEconomyTarget) return 3;
+            if (isNodeTarget) return 5;
+            if (isBuildingTarget) return 4;
+            return 2;
+        };
+
         this.units.forEach(attacker => {
+            const attackerOwner = this.players.get(attacker.ownerId);
+            if (attackerOwner?.status === 'eliminated') return;
+
             if (attacker.type === 'mothership' && (attacker as any).laserTargetId) {
                 const targetId = (attacker as any).laserTargetId;
                 let targetUnit = this.units.find(u => u.id === targetId);
@@ -2948,8 +4238,7 @@ export class GameState {
                                     if (spot) spot.occupiedBy = undefined;
                                 }
                             }
-                            const oSpot = this.map.oilSpots.find(s => s.occupiedBy === targetBuilding.id);
-                            if (oSpot) { oSpot.occupiedBy = undefined; (oSpot as any).ownerId = undefined; (oSpot as any).building = undefined; }
+                            this.destroyOilStructureById(targetBuilding.id);
                         }
                     }
                 }
@@ -2981,6 +4270,7 @@ export class GameState {
                 this.map.oilSpots.forEach(spot => {
                     const b = (spot as any).building;
                     if (b && (spot as any).ownerId && (spot as any).ownerId !== attacker.ownerId) {
+                        if (this.isOilStructureBackedByIslandBuilding(b)) return;
                         if (Math.hypot(spot.x - attacker.x, spot.y - attacker.y) <= attacker.range) {
                             buildingsInRange.push({ ...b, realX: spot.x, realY: spot.y, isOilBuilding: true });
                         }
@@ -2992,15 +4282,35 @@ export class GameState {
             }
 
             if (attacker.type === 'missile_launcher') { /* nearbyEnemies = [] */ }
-            const targets = attacker.type === 'missile_launcher' ? buildingsInRange : [...nearbyEnemies, ...buildingsInRange];
+            let targets: any[] = [];
+            if (attacker.type === 'missile_launcher') {
+                targets = buildingsInRange;
+            } else if (attacker.type === 'destroyer' || attacker.type === 'pirate_ship' || attacker.type === 'aircraft_carrier') {
+                const baseTargets = buildingsInRange.filter(candidate => candidate.type === 'base');
+                if (baseTargets.length > 0) {
+                    targets = [...baseTargets, ...buildingsInRange];
+                } else if (buildingsInRange.length > 0) {
+                    targets = buildingsInRange;
+                } else {
+                    targets = nearbyEnemies;
+                }
+            } else {
+                targets = [...nearbyEnemies, ...buildingsInRange];
+            }
 
             if (targets.length > 0) {
                 const target = targets.reduce((closest, curr) => {
                     const tx = ('realX' in curr) ? curr.realX : curr.x;
                     const ty = ('realY' in curr) ? curr.realY : curr.y;
                     const dist = Math.hypot(tx - attacker.x, ty - attacker.y);
-                    return (!closest || dist < closest.dist) ? { t: curr, dist } : closest;
-                }, null as { t: any, dist: number } | null)?.t;
+                    const isBuildingTarget = 'realX' in curr || 'realY' in curr;
+                    const priority = getTargetPriority(attacker.type, curr.type, isBuildingTarget);
+
+                    if (!closest) return { t: curr, dist, priority };
+                    if (priority < closest.priority) return { t: curr, dist, priority };
+                    if (priority > closest.priority) return closest;
+                    return dist < closest.dist ? { t: curr, dist, priority } : closest;
+                }, null as { t: any, dist: number, priority: number } | null)?.t;
 
                 const tx = ('realX' in target) ? target.realX : target.x;
                 const ty = ('realY' in target) ? target.realY : target.y;
@@ -3039,12 +4349,7 @@ export class GameState {
                                         if (spot) spot.occupiedBy = undefined;
                                     }
                                     if (b.type === 'oil_rig' || b.type === 'oil_well') {
-                                        const spot = this.map.oilSpots.find(s => s.occupiedBy === b.id);
-                                        if (spot) {
-                                            spot.occupiedBy = undefined;
-                                            (spot as any).ownerId = undefined;
-                                            (spot as any).building = undefined;
-                                        }
+                                        this.destroyOilStructureById(b.id);
                                     }
                                     island.buildings = island.buildings.filter(build => build.id !== b.id);
                                 }
@@ -3052,6 +4357,24 @@ export class GameState {
                         });
                     });
                     attacker.lastAttackTime = now;
+                } else if (attacker.type === 'rocketeer') {
+                    this.pendingProjectiles.push({ attackerId: attacker.id, x1: attacker.x, y1: attacker.y, x2: tx, y2: ty, type: 'rocketeer_rocket', speed: 720 });
+                    if ('realX' in target) {
+                        const building = target.isOilBuilding ? (this.map.oilSpots.find(s => s.occupiedBy === target.id) as any)?.building : this.map.islands.find(i => i.id === target.islandId)?.buildings.find(b => b.id === target.id);
+                        if (building) { this.damageBuilding(building, attacker.damage); attacker.lastAttackTime = now; }
+                    } else {
+                        if (!this.players.get(target.ownerId)?.godMode) target.health -= attacker.damage;
+                        attacker.lastAttackTime = now;
+                    }
+                } else if (attacker.type === 'pirate_ship') {
+                    this.pendingProjectiles.push({ attackerId: attacker.id, x1: attacker.x, y1: attacker.y, x2: tx, y2: ty, type: 'cannon_ball', speed: 560 });
+                    if ('realX' in target) {
+                        const building = target.isOilBuilding ? (this.map.oilSpots.find(s => s.occupiedBy === target.id) as any)?.building : this.map.islands.find(i => i.id === target.islandId)?.buildings.find(b => b.id === target.id);
+                        if (building) { this.damageBuilding(building, attacker.damage); attacker.lastAttackTime = now; }
+                    } else {
+                        if (!this.players.get(target.ownerId)?.godMode) target.health -= attacker.damage;
+                        attacker.lastAttackTime = now;
+                    }
                 } else {
                     this.pendingProjectiles.push({ attackerId: attacker.id, x1: attacker.x, y1: attacker.y, x2: tx, y2: ty, type: 'bullet', speed: 800 });
                     if ('realX' in target) {
@@ -3069,6 +4392,8 @@ export class GameState {
         this.map.islands.forEach(island => {
             island.buildings.forEach(b => {
                 if (!b.ownerId) return;
+                const buildingOwner = this.players.get(b.ownerId);
+                if (buildingOwner?.status === 'eliminated') return;
                 let stats = BuildingData[b.type];
                 if (b.type === 'base' && b.hasTesla) stats = { ...stats, range: 400, damage: 100, fireRate: 500 };
                 if (!stats?.damage || (b.lastAttackTime && now - b.lastAttackTime < (stats.fireRate || 1000))) return;
@@ -3277,12 +4602,7 @@ export class GameState {
 
                         // If it was an oil rig, free the oil spot
                         if (building.type === 'oil_rig' || building.type === 'oil_well') {
-                            const spot = this.map.oilSpots.find(s => s.occupiedBy === id);
-                            if (spot) {
-                                spot.occupiedBy = undefined;
-                                (spot as any).ownerId = undefined;
-                                (spot as any).building = undefined;
-                            }
+                            this.destroyOilStructureById(id);
                         }
                         return;
                     }
@@ -3296,7 +4616,25 @@ export class GameState {
                     const bridge = this.map.bridges[wIndex];
                     if (bridge.ownerId === playerId) {
                         this.map.bridges.splice(wIndex, 1);
-                        if ((this as any).pathCache) (this as any).pathCache.clear();
+                        this.clearTraversalCaches();
+                        return;
+                    }
+                }
+            }
+
+            // 4. Try to find and delete a water building
+            if (this.map.waterBuildings) {
+                const waterBuildingIndex = this.map.waterBuildings.findIndex(building => building.id === id);
+                if (waterBuildingIndex !== -1) {
+                    const waterBuilding = this.map.waterBuildings[waterBuildingIndex];
+                    if (waterBuilding.ownerId === playerId) {
+                        if ((waterBuilding.type === 'bridge_node' || waterBuilding.type === 'wall_node') && waterBuilding.id) {
+                            this.map.bridges = this.map.bridges.filter(bridge =>
+                                bridge.nodeAId !== waterBuilding.id && bridge.nodeBId !== waterBuilding.id
+                            );
+                            this.clearTraversalCaches();
+                        }
+                        this.map.waterBuildings.splice(waterBuildingIndex, 1);
                         return;
                     }
                 }
@@ -3335,7 +4673,12 @@ export class GameState {
     checkMatchEnd() {
         // Wait for game to settle (e.g. 10 seconds after start)
         if (Date.now() - this.startTime < 10000) return;
-        if (this.matchState === 'ENDED') return;
+        if (this.matchState === 'ENDED') {
+            if (this.playerCollapseStates.size === 0) {
+                this.stopGameLoop();
+            }
+            return;
+        }
 
         // Count active players (not eliminated)
         const activePlayers = Array.from(this.players.values()).filter(p => p.status !== 'eliminated');
@@ -3366,7 +4709,9 @@ export class GameState {
                 // Emit new authoritative event
                 this.io.to(this.roomId).emit('MATCH_ENDED', payload);
 
-                this.stopGameLoop();
+                if (this.playerCollapseStates.size === 0) {
+                    this.stopGameLoop();
+                }
             }
         } else if (activePlayers.length === 0 && this.players.size > 0) {
             // Draw / Everyone died?
@@ -3388,7 +4733,9 @@ export class GameState {
 
                 this.io.to(this.roomId).emit('MATCH_ENDED', payload);
 
-                this.stopGameLoop();
+                if (this.playerCollapseStates.size === 0) {
+                    this.stopGameLoop();
+                }
             }
         }
     }
@@ -3401,6 +4748,14 @@ export class GameState {
             this.eliminatedPlayerIds.add(playerId);
             console.log(`Player ${playerId} eliminated! Reason: ${reason}`);
 
+            // Clear island control immediately, but keep owned entities for collapse burn-down.
+            this.map.islands.forEach(island => {
+                if (island.ownerId === playerId) island.ownerId = undefined;
+            });
+
+            // Freeze player-controlled units and begin timed collapse (10s, 10% max HP per second).
+            this.startPlayerAssetCollapse(playerId);
+
             // Check if this elimination triggers match end
             this.checkMatchEnd();
 
@@ -3410,35 +4765,6 @@ export class GameState {
                     this.io.to(this.roomId).emit('playerEliminated', { playerId, reason });
                 }
             }
-
-            // Mark all units as dead/neutral or delete them?
-            // Usually better to delete or make neutral. Let's delete for now to clear clutter.
-            this.units = this.units.filter(u => u.ownerId !== playerId);
-
-            // Buildings remain but might be capturable or just inert?
-            // For now, let's leave buildings (ruins) or clear them?
-            // Existing logic in 'deleteEntities' does some cleanup, but let's keep buildings as "rubble" or unowned?
-            // Actually, 'eliminatePlayer' is called when Base is destroyed.
-            // Let's clear ownership of remaining buildings so others can capture/destroy.
-            this.map.islands.forEach(island => {
-                if (island.ownerId === playerId) island.ownerId = undefined;
-                island.buildings.forEach(b => {
-                    if (b.ownerId === playerId) {
-                        // b.ownerId = undefined; // Make neutral? Or keep ownership for stats?
-                        // If neutral, towers stop shooting.
-                        b.ownerId = undefined;
-                    }
-                });
-            });
-
-            // Clear Oil Spots
-            this.map.oilSpots.forEach(spot => {
-                if ((spot as any).ownerId === playerId) {
-                    (spot as any).ownerId = undefined;
-                    (spot as any).building = undefined;
-                    spot.occupiedBy = undefined;
-                }
-            });
 
             // If Bot, stop AI
             const botIndex = this.bots.findIndex(b => b.playerId === playerId);
@@ -3458,18 +4784,9 @@ export class GameState {
         for (const bridge of this.map.bridges) {
             if (bridge.type !== 'bridge') continue;
 
-            const iA = this.map.islands.find(i => i.id === bridge.islandAId);
-            const iB = this.map.islands.find(i => i.id === bridge.islandBId);
-            if (!iA || !iB) continue;
-
-            const nA = iA.buildings.find(b => b.id === bridge.nodeAId);
-            const nB = iB.buildings.find(b => b.id === bridge.nodeBId);
-            if (!nA || !nB) continue;
-
-            const ax = iA.x + (nA.x || 0);
-            const ay = iA.y + (nA.y || 0);
-            const bx = iB.x + (nB.x || 0);
-            const by = iB.y + (nB.y || 0);
+            const endpoints = this.getBridgeEndpoints(bridge);
+            if (!endpoints) continue;
+            const { ax, ay, bx, by } = endpoints;
 
             const closest = MapGenerator.getClosestPointOnSegment(x, y, ax, ay, bx, by);
             const distToSegment = Math.hypot(x - closest.x, y - closest.y);
@@ -3482,9 +4799,10 @@ export class GameState {
 
     // Helper to check if position is valid for unit type
     isValidPosition(x: number, y: number, type: string): boolean {
+        const shouldLogValidPos = ENABLE_VALID_POSITION_LOGS && type === 'builder';
         // Map Boundary Check
         if (x < 0 || x > this.map.width || y < 0 || y > this.map.height) {
-            if (type === 'builder') console.log(`[ValidPos] Builder OUT OF BOUNDS: ${x},${y}`);
+            if (shouldLogValidPos) console.log(`[ValidPos] Builder OUT OF BOUNDS: ${x},${y}`);
             return false;
         }
 
@@ -3496,7 +4814,7 @@ export class GameState {
                 if (x < hg.x - hg.radius || x > hg.x + hg.radius || y < hg.y - hg.radius || y > hg.y + hg.radius) continue;
 
                 if (MapGenerator.isPointInPolygon(x, y, hg.points)) {
-                    if (type === 'builder') console.log(`[ValidPos] Builder HIT HIGH GROUND: ${x},${y}`);
+                    if (shouldLogValidPos) console.log(`[ValidPos] Builder HIT HIGH GROUND: ${x},${y}`);
                     return false; // Blocked for everyone
                 }
             }
@@ -3546,7 +4864,7 @@ export class GameState {
                 // Farm radius is 30. Most buildings are ~30-40.
                 // We use a safe collision radius of 25 to prevent walking through center but allow getting close.
                 const hitBuilding = currentIsland.buildings.some(b => {
-                    if (b.type === 'bridge_node' || b.type === 'wall_node') return false; // Ignore nodes for now (or walls might need specific logic)
+                    if (b.type === 'bridge_node' || b.type === 'wall_node' || b.type === 'mine') return false;
 
                     // Base is larger (approx 50-60 radius visual)
                     // Farm is 30
@@ -3562,14 +4880,29 @@ export class GameState {
                 });
 
                 if (hitBuilding) {
-                    if (type === 'builder') console.log(`[ValidPos] Builder HIT BUILDING on Island ${currentIsland.id}`);
+                    if (shouldLogValidPos) console.log(`[ValidPos] Builder HIT BUILDING on Island ${currentIsland.id}`);
                     return false;
+                }
+            }
+
+            if (this.map.bridges && !['light_plane', 'heavy_plane', 'aircraft_carrier', 'mothership'].includes(type)) {
+                for (const bridge of this.map.bridges) {
+                    if (bridge.type !== 'wall') continue;
+                    const endpoints = this.getBridgeEndpoints(bridge);
+                    if (!endpoints) continue;
+                    const { ax, ay, bx, by } = endpoints;
+
+                    const closest = MapGenerator.getClosestPointOnSegment(x, y, ax, ay, bx, by);
+                    const distToWall = Math.hypot(x - closest.x, y - closest.y);
+                    if (distToWall < 26) {
+                        return false;
+                    }
                 }
             }
 
             const onBridge = this.isPointOnBridge(x, y);
             if (!isLand && !onBridge) {
-                if (type === 'builder') {
+                if (shouldLogValidPos) {
                     console.log(`[ValidPos] Builder IN WATER (Not Land, Not Bridge): ${x},${y}`);
                     const nearest = this.map.islands.map(i => ({
                         id: i.id,
@@ -3582,7 +4915,7 @@ export class GameState {
                 return false;
             }
             return true;
-        } else if (['destroyer', 'construction_ship', 'ferry', 'oil_rig', 'aircraft_carrier'].includes(type)) {
+        } else if (['destroyer', 'pirate_ship', 'construction_ship', 'ferry', 'oil_rig', 'aircraft_carrier'].includes(type)) {
             return !isLand;
         } else if (['light_plane', 'heavy_plane', 'mothership', 'alien_scout', 'heavy_alien'].includes(type)) {
             return true; // Air units can go anywhere
@@ -3622,6 +4955,7 @@ export class GameState {
         this.io = io;
         this.roomId = roomId;
         this.lastTickTime = Date.now();
+        this.economySecondAccumulator = 0;
         // Run loop at 20 Hz (50ms)
         this.gameLoopInterval = setInterval(() => {
             if (this.gameEnded) return;
@@ -3654,6 +4988,19 @@ export class GameState {
             //     }
             // }
 
+            const holdForHumanReadyGate = this.requireHumanReadyForBotStart && !this.botsReleasedForMatch;
+
+            // While the match-start loading gate is active, freeze the entire simulation.
+            // This keeps economy, construction, and movement from advancing off-screen and
+            // ensures bots only begin acting once every human client has finished loading.
+            if (holdForHumanReadyGate) {
+                this.bots.forEach(bot => {
+                    bot.debugState.currentGoal = 'WAITING_FOR_PLAYERS';
+                    bot.debugState.lastDecision = 'Holding until all human players finish match load';
+                });
+                return;
+            }
+
             // Bot Updates (Every tick, let bots throttle themselves)
             this.bots.forEach(bot => {
                 try {
@@ -3663,157 +5010,8 @@ export class GameState {
                 }
             });
 
-            // Income Logic (Every 1 second approx)
-            if (Math.floor(now / 1000) > Math.floor((now - 33) / 1000)) {
-                this.players.forEach(player => {
-                    let goldIncome = 1;
-                    let oilIncome = 0;
-
-                    this.map.oilSpots.forEach(spot => {
-                        if ((spot as any).ownerId === player.id && (spot as any).building && !(spot as any).building.isConstructing) {
-                            if ((spot as any).building.type === 'oil_rig') {
-                                goldIncome += 200;
-                                oilIncome += 5;
-                            } else if ((spot as any).building.type === 'oil_well') {
-                                goldIncome += 200; // Same as Oil Rig
-                                oilIncome += 5;    // Same as Oil Rig
-                            } else {
-                                oilIncome += 5;
-                            }
-                        }
-                    });
-
-                    this.map.islands.forEach(island => {
-                        // Check if island is owned by player OR if it's a shared map/island with player's buildings
-
-                        if (island.ownerId === player.id) {
-                            goldIncome += 1; // Island ownership bonus
-                        }
-
-                        island.buildings.forEach(b => {
-                            if (b.ownerId !== player.id) return; // Only count player's buildings
-                            if (b.isConstructing) return;
-                            if (b.type === 'mine') goldIncome += 50;
-                            if (b.type === 'base') goldIncome += 10;
-                            if (b.type === 'farm') goldIncome += 25;
-                            // Note: oil_well income (Gold+Oil) is handled in the oilSpots loop to match oil_rig logic
-                        });
-                    });
-
-                    player.resources.gold += goldIncome;
-                    player.resources.oil += oilIncome;
-                });
-            }
-
-            // Construction Logic
-            const processConstruction = (b: any, x: number, y: number, ownerId: string) => {
-                if (b.isConstructing) {
-                    const stats = BuildingData[b.type];
-                    if (!stats) {
-                        // Fallback if stats missing
-                        console.log(`[Construction] Missing stats for ${b.type}, finishing instantly.`);
-                        b.isConstructing = false;
-                        b.health = b.maxHealth;
-                        return;
-                    }
-
-                    // Speed up construction significantly (3x faster base speed)
-                    const totalTicks = stats.constructionTime || 100;
-                    let progressPerTick = (100 / totalTicks) * 3;
-
-                    // Builder Boost
-                    // Ensure x/y are valid
-                    if (!isNaN(x) && !isNaN(y)) {
-                        const builders = this.getNearbyUnits(x, y, 300).filter(u =>
-                            u.ownerId === ownerId &&
-                            (u.type === 'builder' || u.type === 'construction_ship')
-                        );
-
-                        if (builders.length > 0) {
-                            progressPerTick *= (1 + builders.length * 1.0); // 100% boost per builder (was 50%)
-                        }
-                    }
-
-                    b.constructionProgress = (b.constructionProgress || 0) + progressPerTick;
-
-                    // Ensure health updates correctly
-                    const calculatedHealth = Math.floor(b.maxHealth * (b.constructionProgress / 100));
-                    b.health = Math.max(1, Math.min(b.maxHealth, calculatedHealth));
-
-                    // Debug log for stuck barracks
-                    // if (b.type === 'barracks' && Math.random() < 0.05) console.log(`[Construction] Barracks progress: ${b.constructionProgress.toFixed(1)}%, Health: ${b.health}`);
-
-                    if (b.constructionProgress >= 100) {
-                        b.constructionProgress = 100;
-                        b.isConstructing = false;
-                        b.health = b.maxHealth;
-                    }
-                }
-            };
-
-            // Repair Logic
-            const processRepair = (b: any, x: number, y: number, ownerId: string) => {
-                if (!b.isConstructing && b.health < b.maxHealth) {
-                    // Find nearby idle builders
-                    if (!isNaN(x) && !isNaN(y)) {
-                        const builders = this.getNearbyUnits(x, y, 150).filter(u =>
-                            u.ownerId === ownerId &&
-                            u.type === 'builder' &&
-                            u.status === 'idle'
-                        );
-
-                        if (builders.length > 0) {
-                            const count = Math.min(builders.length, 5); // Stack up to 5
-                            // Repair rate: 0.5 HP per tick (15 HP/s) per builder
-                            const repairAmount = 0.5 * count;
-                            b.health = Math.min(b.maxHealth, b.health + repairAmount);
-                        }
-                    }
-                }
-            };
-
-            // Recruitment Logic
-            const processRecruitment = (b: any, island: any) => {
-                if (b.recruitmentQueue && b.recruitmentQueue.length > 0) {
-                    const item = b.recruitmentQueue[0];
-                    item.progress += 1;
-
-                    if (item.progress >= item.totalTime) {
-                        // Prioritize building owner for unit ownership, fallback to island owner (legacy)
-                        const ownerId = b.ownerId || (island ? island.ownerId : null);
-                        if (ownerId) {
-                            this.spawnUnit(ownerId, item.unitType, island, b);
-                        }
-                        b.recruitmentQueue.shift();
-                    }
-                }
-            };
-
-            this.map.islands.forEach(island => {
-                // Process all buildings regardless of island ownership (for shared maps)
-                island.buildings.forEach(b => {
-                    if (b.ownerId) {
-                        processConstruction(b, island.x + (b.x || 0), island.y + (b.y || 0), b.ownerId);
-                        processRepair(b, island.x + (b.x || 0), island.y + (b.y || 0), b.ownerId);
-                        processRecruitment(b, island);
-                    }
-                });
-            });
-
-            // Process Mothership and Carrier Recruitment
-            this.units.forEach(u => {
-                if (u.type === 'mothership' || u.type === 'aircraft_carrier') {
-                    processRecruitment(u, null);
-                }
-            });
-
-            this.map.oilSpots.forEach(spot => {
-                const b = (spot as any).building;
-                if (b && (spot as any).ownerId) {
-                    processConstruction(b, spot.x, spot.y, (spot as any).ownerId);
-                    processRepair(b, spot.x, spot.y, (spot as any).ownerId);
-                }
-            });
+            this.advanceEconomy(deltaTime);
+            this.advanceConstructionRepairAndRecruitment(deltaTime);
 
             // Unit Movement Logic
             this.units.forEach(unit => {
@@ -3908,7 +5106,7 @@ export class GameState {
                                 let obstaclePoints: { x: number, y: number }[] | undefined = undefined;
                                 // Note: Flying units are handled by isValidPosition returning true usually, but if they are restricted by map bounds, they might hit this.
                                 // We treat 'aircraft_carrier' as water unit. 'mothership' is flying.
-                                const isWaterUnit = ['raft', 'scout_boat', 'gunship', 'destroyer', 'oil_tanker', 'construction_ship', 'aircraft_carrier'].includes(unit.type);
+                                const isWaterUnit = ['raft', 'scout_boat', 'gunship', 'destroyer', 'pirate_ship', 'oil_tanker', 'construction_ship', 'aircraft_carrier'].includes(unit.type);
 
                                 if (isWaterUnit) {
                                     // Water unit hitting land (Island)
@@ -3986,24 +5184,15 @@ export class GameState {
                             if (!blocked && this.map.bridges && !['light_plane', 'heavy_plane', 'aircraft_carrier', 'mothership'].includes(unit.type)) {
                                 for (const bridge of this.map.bridges) {
                                     if (bridge.type === 'gate') {
-                                        if (bridge.ownerId === unit.ownerId) continue; // Allow owner through gate
-                                    } else if (bridge.type !== 'wall') {
+                                        continue; // Gates are passable openings in the wall loop
+                                    }
+                                    if (bridge.type !== 'wall') {
                                         continue; // Bridges don't block
                                     }
 
-                                    // Get wall endpoints
-                                    const iA = this.map.islands.find(i => i.id === bridge.islandAId);
-                                    const iB = this.map.islands.find(i => i.id === bridge.islandBId);
-                                    if (!iA || !iB) continue;
-
-                                    const nA = iA.buildings.find(b => b.id === bridge.nodeAId);
-                                    const nB = iB.buildings.find(b => b.id === bridge.nodeBId);
-                                    if (!nA || !nB) continue;
-
-                                    const ax = iA.x + (nA.x || 0);
-                                    const ay = iA.y + (nA.y || 0);
-                                    const bx = iB.x + (nB.x || 0);
-                                    const by = iB.y + (nB.y || 0);
+                                    const endpoints = this.getBridgeEndpoints(bridge);
+                                    if (!endpoints) continue;
+                                    const { ax, ay, bx, by } = endpoints;
 
                                     // Intersection check (Segment-Segment)
                                     if (MapGenerator.segmentsIntersect(unit.x, unit.y, nextX, nextY, ax, ay, bx, by)) {
@@ -4026,30 +5215,17 @@ export class GameState {
 
 
             this.applyUnitSeparation();
+            this.processNavalMineTriggers(now);
             this.resolveCombat(io, roomId);
+            this.processDamageOverTime(deltaTime, now);
+            this.processPlayerAssetCollapse(now);
             this.cleanupDeadEntities(); // Ensure stale bots are removed
             this.checkIslandCapture();
 
             // Increment tick counter for split emission
             this.tickCounter++;
 
-            const simplifiedUnits = this.units.map(u => ({
-                id: u.id,
-                ownerId: u.ownerId,
-                type: u.type,
-                x: Math.round(u.x),
-                y: Math.round(u.y),
-                status: u.status,
-                health: Math.round(u.health),
-                maxHealth: u.maxHealth,
-                speed: u.speed,
-                damage: u.damage,
-                range: u.range,
-                fireRate: u.fireRate,
-                facingAngle: u.facingAngle ?? 0,
-                cargo: u.cargo ? u.cargo.map(c => ({ type: c.type })) : [],
-                recruitmentQueue: u.recruitmentQueue
-            }));
+            const simplifiedUnits = this.getSimplifiedUnitsSnapshot();
 
             // Split Emission Strategy:
             // Even Ticks: Broadcast to EVERYONE (Slow update ~15Hz)
@@ -4057,8 +5233,17 @@ export class GameState {
 
             if (this.tickCounter % 2 === 0) {
                 // Slow Update (Base Room)
-                io.to(roomId).emit('playersData', Array.from(this.players.values()));
                 io.to(roomId).emit('unitsData', simplifiedUnits);
+
+                if (now - this.lastPlayerEmitTime >= PLAYER_SNAPSHOT_INTERVAL_MS) {
+                    const playersSnapshot = this.getPlayersSnapshot();
+                    const nextPlayerSnapshotSignature = this.getPlayersSnapshotSignature(playersSnapshot);
+                    if (nextPlayerSnapshotSignature !== this.lastPlayerSnapshotSignature) {
+                        io.to(roomId).emit('playersData', playersSnapshot);
+                        this.lastPlayerSnapshotSignature = nextPlayerSnapshotSignature;
+                    }
+                    this.lastPlayerEmitTime = now;
+                }
 
                 // Flush Projectiles (Batch) - Only on slow ticks to save bandwidth
                 if (this.pendingProjectiles.length > 0) {
@@ -4072,7 +5257,8 @@ export class GameState {
 
             // Throttle map data (heavy) - Emit every 500ms -> 1000ms
             if (now - this.lastMapEmitTime > 1000) {
-                io.to(roomId).emit('mapData', this.map);
+                this.emitVisibleMapData(io, roomId);
+                io.to(roomId).emit('buildingHitboxes', this.getBuildingHitboxSnapshot());
                 this.emitHumanHqStatuses(io);
                 this.lastMapEmitTime = now;
             }
@@ -4087,7 +5273,7 @@ export class GameState {
 
             this.checkMatchEnd();
 
-            if (this.matchState === 'ENDED') {
+            if (this.matchState === 'ENDED' && this.playerCollapseStates.size === 0) {
                 this.stopGameLoop();
             }
         }, 33); // ~30Hz (33ms) -> Remote gets 15Hz, Local gets 30Hz
@@ -4121,7 +5307,7 @@ export class GameState {
                 }
             }
 
-            this.io.to(this.roomId).emit('buildingDamaged', {
+            const payload = {
                 entityId: building.id,
                 entityType: building.type,
                 ownerId: building.ownerId,
@@ -4130,7 +5316,13 @@ export class GameState {
                 damageAmount: damage,
                 hpAfter: building.health,
                 timestamp: Date.now()
-            });
+            };
+
+            if (this.isOwnerOnlyBuilding(building)) {
+                this.io.to(building.ownerId).emit('buildingDamaged', payload);
+            } else {
+                this.io.to(this.roomId).emit('buildingDamaged', payload);
+            }
         }
     }
 

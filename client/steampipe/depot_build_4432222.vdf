@@ -3,7 +3,7 @@
 	"DepotID" "4432222"
 	"FileMapping"
 	{
-		"LocalPath" "releases/steam/microsoft-windows/*"
+		"LocalPath" "releases/steam/macos/*"
 		"DepotPath" "."
 		"recursive" "1"
 	}
