@@ -318,7 +318,7 @@ jobs:
       - name: Reset Steam BuildOutput after Demo (TOTP)
         if: steps.steam-auth.outputs.mode == 'totp' && !cancelled()
         shell: bash
-        run: rm -rf BuildOutput client/BuildOutput
+        run: sudo rm -rf BuildOutput client/BuildOutput
 
       - name: Steam Deploy Main (TOTP)
         id: steam-deploy-main-totp
@@ -358,7 +358,7 @@ jobs:
       - name: Reset Steam BuildOutput after Demo (config.vdf)
         if: steps.steam-auth.outputs.mode == 'config' && !cancelled()
         shell: bash
-        run: rm -rf BuildOutput client/BuildOutput
+        run: sudo rm -rf BuildOutput client/BuildOutput
 
       - name: Steam Deploy Main (config.vdf)
         id: steam-deploy-main-config
