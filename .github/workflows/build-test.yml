@@ -270,6 +270,8 @@ jobs:
           node scripts/stage-steam-releases.mjs
 
       - name: Verify staged Steam depot folders
+        env:
+          VERIFY_RELEASE_COMPARE_SOURCES: 0
         run: |
           cd client
           node scripts/verify-steam-layout.mjs

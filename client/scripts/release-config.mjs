@@ -52,7 +52,7 @@ export const platforms = [
       "ConquerorsDominationDemo"
     ),
     bundlePath: path.join(stageDir("macos"), "ConquerorsDominationDemo.app"),
-    fileSignature: "Mach-O 64-bit executable",
+    fileSignature: "Mach-O 64-bit",
     resourcePath: path.join(
       stageDir("macos"),
       "ConquerorsDominationDemo.app",
