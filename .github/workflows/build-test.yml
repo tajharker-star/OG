@@ -249,6 +249,11 @@ jobs:
           flatten_if_nested client/dist_electron/mac
           flatten_if_nested client/dist_electron/linux-unpacked
 
+          # The downloaded Linux artifact can lose its executable bit during the
+          # archive round-trip. Fix it after flattening so the real launch target
+          # is executable before depot staging/verification.
+          find client/dist_electron/linux-unpacked -maxdepth 1 -type f | xargs -I {} chmod +x {} || true
+
           test -f client/dist_electron/win-unpacked/ConquerorsDominationDemo.exe
           test -d client/dist_electron/mac/ConquerorsDominationDemo.app
           test -f client/dist_electron/mac/ConquerorsDominationDemo.app/Contents/MacOS/ConquerorsDominationDemo
