@@ -1,0 +1,312 @@
+.menu,
+.modal-container,
+.modal-content,
+.lobby-card,
+.chat-window,
+.build-menu-panel,
+.selection-panel,
+.recruit-panel,
+.stats-panel,
+.bridge-construction-panel,
+.transport-control-panel,
+.settings-modal,
+.settings-modal-content,
+.settings-section,
+.settings-sub-section,
+.settings-panel-card,
+.info-box,
+.connection-lost-modal,
+.end-game-content,
+.game-over-content,
+.patch-notes-modal,
+.patch-note-card,
+.patch-note-card__content,
+.tutorial-panel,
+.achievement-progress-card,
+.statistics-section,
+.statistics-metric,
+.statistics-note-card,
+.achievement-card,
+.action-guide-panel,
+.menu-feature-card,
+.campaign-card,
+.custom-game-panel {
+  border-radius: var(--radius-lg);
+  border-color: var(--border-subtle);
+  background: var(--panel-shell);
+  box-shadow: var(--panel-shadow);
+}
+
+.lobby-room-info-display,
+.lobby-room-id-row,
+.lobby-tunnel-password-display,
+.lobby-load-checklist,
+.lobby-load-check,
+.statistics-summary-strip > div,
+.statistics-metric,
+.statistics-note-card,
+.tutorial-panel__objective-callout,
+.tutorial-panel__lesson-card,
+.tutorial-panel__guide-card,
+.tutorial-panel__group,
+.tutorial-panel__objective-card,
+.settings-keybind-row,
+.settings-control-row,
+.settings-sfx-row,
+.settings-sfx-group-card,
+.patch-note-card__visual,
+.patch-note-card__visual-badge,
+.patch-note-card__visual-icon-hero {
+  border-radius: var(--radius-md);
+}
+
+button,
+input:not([type="range"]):not([type="checkbox"]):not([type="radio"]),
+select,
+textarea,
+.chat-input,
+.lobby-input,
+.game-id-input,
+.copy-btn,
+.lobby-btn,
+.lobby-copy-btn,
+.lobby-invite-btn,
+.lobby-btn-small,
+.menu-btn,
+.hud-btn,
+.game-id-copy-btn,
+.build-category-btn,
+.build-item-btn,
+.recruit-option-btn,
+.bridge-btn,
+.transport-btn,
+.selection-toggle-btn,
+.selection-btn-delete,
+.selection-btn-close,
+.recruit-close-btn,
+.settings-tab-btn,
+.settings-close-btn,
+.settings-sfx-dropdown__summary,
+.settings-sfx-preview-btn,
+.key-bind-btn,
+.reset-btn,
+.retry-btn,
+.main-menu-btn,
+.end-game-btn,
+.game-over-btn,
+.statistics-section-toggle,
+.tutorial-panel__tab,
+.tutorial-panel__close,
+.patch-notes-float-btn,
+.wishlist-float-btn {
+  border-radius: var(--radius-md);
+}
+
+button,
+.lobby-btn,
+.menu-btn,
+.hud-btn,
+.lobby-copy-btn,
+.lobby-invite-btn,
+.lobby-btn-small,
+.game-id-copy-btn,
+.build-category-btn,
+.build-item-btn,
+.recruit-option-btn,
+.bridge-btn,
+.transport-btn,
+.selection-toggle-btn,
+.selection-btn-delete,
+.selection-btn-close,
+.recruit-close-btn,
+.settings-tab-btn,
+.settings-close-btn,
+.settings-sfx-dropdown__summary,
+.settings-sfx-preview-btn,
+.key-bind-btn,
+.reset-btn,
+.retry-btn,
+.main-menu-btn,
+.end-game-btn,
+.game-over-btn,
+.statistics-section-toggle,
+.tutorial-panel__tab,
+.tutorial-panel__close {
+  background: var(--btn-neutral-bg);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  box-shadow: inset 0 1px 0 rgba(255, 244, 219, 0.05), 0 10px 22px rgba(0, 0, 0, 0.16);
+}
+
+button:hover,
+.lobby-btn:hover,
+.menu-btn:hover,
+.hud-btn:hover,
+.lobby-copy-btn:hover,
+.lobby-invite-btn:hover,
+.lobby-btn-small:hover,
+.game-id-copy-btn:hover,
+.build-category-btn:hover,
+.build-item-btn:hover,
+.recruit-option-btn:hover,
+.bridge-btn:hover,
+.transport-btn:hover,
+.selection-toggle-btn:hover,
+.selection-btn-delete:hover,
+.selection-btn-close:hover,
+.recruit-close-btn:hover,
+.settings-tab-btn:hover,
+.settings-close-btn:hover,
+.settings-sfx-dropdown__summary:hover,
+.settings-sfx-preview-btn:hover,
+.key-bind-btn:hover,
+.reset-btn:hover,
+.retry-btn:hover,
+.main-menu-btn:hover,
+.end-game-btn:hover,
+.game-over-btn:hover,
+.statistics-section-toggle:hover,
+.tutorial-panel__tab:hover,
+.tutorial-panel__close:hover {
+  background: var(--btn-neutral-hover);
+  border-color: var(--border-strong);
+}
+
+.menu-btn.primary,
+.menu-btn.success,
+.lobby-btn-primary,
+.lobby-start-btn,
+.bridge-btn-build,
+.chat-send-btn,
+.end-game-btn.primary,
+.game-over-btn.restart,
+.settings-sfx-preview-btn,
+.hud-btn-add-bot,
+.upgrade-btn.can-afford,
+.scanner-btn.active,
+.settings-tab-btn.active,
+.tutorial-panel__tab.active {
+  background: linear-gradient(180deg, var(--primary-hover), var(--primary-active));
+  color: #2a1406;
+  border: 1px solid rgba(255, 238, 187, 0.28);
+  box-shadow: 0 12px 26px rgba(201, 109, 27, 0.3), inset 0 1px 0 rgba(255, 247, 218, 0.32);
+}
+
+.menu-btn.secondary,
+.lobby-btn-secondary,
+.bridge-btn-upgrade,
+.transport-btn-unload,
+.end-game-btn.secondary,
+.game-over-btn.return,
+.main-menu-btn,
+.statistics-section-toggle,
+.tutorial-panel__close,
+.settings-close-btn {
+  background: linear-gradient(180deg, rgba(255, 223, 152, 0.08), rgba(73, 31, 10, 0.18)), rgba(255, 255, 255, 0.03);
+  color: var(--text-primary);
+}
+
+.menu-btn.danger,
+.delete-entity-btn,
+.selection-btn-delete,
+.end-game-overlay.defeat .end-game-btn.primary {
+  border-radius: var(--radius-md);
+}
+
+.chat-window,
+.build-menu-panel,
+.selection-panel,
+.recruit-panel,
+.stats-panel,
+.bridge-construction-panel,
+.transport-control-panel,
+.lobby-card,
+.settings-modal-content,
+.connection-lost-modal,
+.end-game-content,
+.game-over-content {
+  border: 1px solid rgba(255, 203, 110, 0.18);
+}
+
+.game-over-title,
+.lobby-title,
+.settings-header h2,
+.connection-lost-title,
+.end-game-title,
+.statistics-mode-title,
+.menu-section-title {
+  color: var(--accent-soft);
+}
+
+.lobby-load-progress-fill,
+.achievement-progress-fill,
+.tutorial-panel__progress-fill {
+  background: linear-gradient(90deg, #ffdf88, #ff9f39);
+  box-shadow: 0 0 18px rgba(255, 184, 75, 0.3);
+}
+
+.settings-warning-text,
+.retry-text,
+.statistics-metric--good .statistics-metric-value,
+.winner-name {
+  color: #ffd27d;
+}
+
+.chat-global-toggle-btn,
+.build-global-toggle-btn,
+.settings-float-btn {
+  background: linear-gradient(180deg, rgba(255, 216, 132, 0.16), rgba(104, 40, 11, 0.3)), rgba(7, 10, 14, 0.92);
+  border-color: rgba(255, 205, 110, 0.24);
+  box-shadow: 0 14px 26px rgba(0, 0, 0, 0.26);
+}
+
+.build-menu-panel,
+.tutorial-panel {
+  background:
+    linear-gradient(180deg, rgba(255, 207, 112, 0.08), rgba(128, 46, 10, 0.08)),
+    rgba(5, 7, 10, 0.975);
+  border-color: rgba(255, 203, 110, 0.24);
+  box-shadow:
+    0 22px 48px rgba(0, 0, 0, 0.42),
+    inset 0 1px 0 rgba(255, 241, 207, 0.05);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+.build-category-btn,
+.build-item-btn,
+.build-category-hero,
+.build-menu-hint,
+.tutorial-panel__objective-callout,
+.tutorial-panel__lesson-card,
+.tutorial-panel__guide-card,
+.tutorial-panel__group,
+.tutorial-panel__objective-card,
+.tutorial-panel__tab,
+.tutorial-panel__close {
+  background:
+    linear-gradient(180deg, rgba(255, 214, 126, 0.06), rgba(92, 33, 8, 0.1)),
+    rgba(8, 10, 14, 0.94);
+}
+
+.tutorial-panel__objective-card.done {
+  border-color: rgba(115, 219, 125, 0.34);
+  background:
+    linear-gradient(180deg, rgba(109, 211, 118, 0.18), rgba(24, 79, 34, 0.18)),
+    rgba(7, 14, 10, 0.96);
+}
+
+.tutorial-panel__objective-state {
+  background: rgba(255, 214, 102, 0.12);
+  color: rgba(255, 243, 214, 0.94);
+  border: 1px solid rgba(255, 214, 102, 0.12);
+}
+
+.tutorial-panel__objective-card.done .tutorial-panel__objective-state {
+  background: linear-gradient(180deg, #8fe388, #3da45c);
+  color: #07130a;
+  border-color: rgba(214, 255, 205, 0.28);
+  box-shadow:
+    0 10px 20px rgba(27, 100, 46, 0.28),
+    inset 0 1px 0 rgba(235, 255, 231, 0.28);
+}

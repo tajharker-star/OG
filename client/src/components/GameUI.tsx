@@ -3,7 +3,11 @@ import { socket, connectionManager } from '../services/socket';
 import { steamService } from '../services/steam';
 import type { ConnectionState } from '../services/socket';
 import type { Player, GameMap, Unit } from '../types/game';
+import type { MatchResult, MatchSource, MatchStatisticsSummary } from '../utils/playerStatistics';
 import { SettingsModal } from './SettingsModal';
+import { ActionGuidePanel } from './ActionGuidePanel';
+import { TutorialPanel } from './TutorialPanel';
+import { BUILDING_ACTION_GUIDES, UNIT_ACTION_GUIDES, type ActionGuide } from '../data/actionGuides';
 import { settingsManager } from '../game/SettingsManager';
 import { Confetti } from './Confetti';
 import { EndGameOverlay } from './EndGameOverlay';
@@ -244,7 +248,9 @@ const RecruitButton: React.FC<{
     label: string;
     queueCount: number;
     onClick: () => void;
-}> = ({ type, label, queueCount, onClick }) => {
+    onPreviewStart?: () => void;
+    onPreviewEnd?: () => void;
+}> = ({ type, label, queueCount, onClick, onPreviewStart, onPreviewEnd }) => {
     const btnRef = useRef<HTMLButtonElement>(null);
 
     // Debug overflow check (Step 6)
@@ -262,6 +268,10 @@ const RecruitButton: React.FC<{
             ref={btnRef}
             key={type}
             onMouseDown={(e) => e.stopPropagation()}
+            onMouseEnter={onPreviewStart}
+            onMouseLeave={onPreviewEnd}
+            onFocus={onPreviewStart}
+            onBlur={onPreviewEnd}
             onClick={(e) => {
                 e.stopPropagation();
                 onClick();
@@ -282,9 +292,13 @@ const RecruitButton: React.FC<{
 interface GameUIProps {
     onLeave: () => void;
     roomId: string | null;
+    steamLobbyId?: string | null;
     initialGameStatus?: 'waiting' | 'voting' | 'playing';
     isLocalMode?: boolean;
     isDevBypass?: boolean;
+    tutorialMode?: boolean;
+    matchStatsSource?: MatchSource;
+    onMatchResolved?: (summary: MatchStatisticsSummary) => void;
 }
 
 type LoadingCheckItem = {
@@ -306,6 +320,7 @@ const getIconForType = (type: string) => {
         case 'sniper': return '🎯';
         case 'rocketeer': return '🚀';
         case 'destroyer': return '🚢';
+        case 'pirate_ship': return '🏴‍☠️';
         case 'construction_ship': return '🏗️';
         case 'ferry': return '⛴️';
         case 'builder': return '🛠️';
@@ -318,11 +333,14 @@ const getIconForType = (type: string) => {
         case 'wall': return '🧱';
         case 'bridge_node': return '🌉';
         case 'wall_node': return '🏰';
+        case 'naval_mine': return '💣';
         case 'tank_factory': return '🏭';
         case 'tank': return '🚜';
         case 'humvee': return '🚙';
         case 'missile_launcher': return '🚚';
         case 'air_base': return '🛫';
+        case 'hospital': return '🏥';
+        case 'repair_dock': return '🛠️';
         case 'light_plane': return '🛩️';
         case 'heavy_plane': return '✈️';
         case 'aircraft_carrier': return '🛳️';
@@ -331,7 +349,17 @@ const getIconForType = (type: string) => {
     }
 };
 
-export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStatus, isLocalMode = false, isDevBypass = false }) => {
+export const GameUI: React.FC<GameUIProps> = ({
+    onLeave,
+    roomId,
+    steamLobbyId = null,
+    initialGameStatus,
+    isLocalMode = false,
+    isDevBypass = false,
+    tutorialMode = false,
+    matchStatsSource = 'lan',
+    onMatchResolved,
+}) => {
     const [player, setPlayer] = useState<Player | null>(null);
     const [hoverInfo, setHoverInfo] = useState<any>(null);
     const [selectedIslandId, setSelectedIslandId] = useState<string | null>(null);
@@ -348,6 +376,7 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
     const [activeCategory, setActiveCategory] = useState<string | null>(null);
     const [isScannerActive, setIsScannerActive] = useState(false);
     const [isChatVisible, setIsChatVisible] = useState(true);
+    const [menuGuideState, setMenuGuideState] = useState<{ guide: ActionGuide; source: 'build' | 'recruit' } | null>(null);
 
     // Chat Drag State
     const [chatPos, setChatPos] = useState({ x: 20, y: window.innerHeight - 380 });
@@ -414,6 +443,8 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
     // Client-Side Gate (Anti-Bounce)
     const clientMatchState = useRef<'LOBBY' | 'STARTING' | 'IN_MATCH'>('LOBBY');
     const activeMatchId = useRef<string | null>(null);
+    const matchStatsReportedRef = useRef(false);
+    const matchReadySignalSentRef = useRef(false);
 
     // Debug State
     const [showDebug, setShowDebug] = useState(false);
@@ -427,6 +458,28 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
             setGameStatus(initialGameStatus);
         }
     }, [initialGameStatus]);
+
+    useEffect(() => {
+        if (gameStatus !== 'playing') {
+            matchReadySignalSentRef.current = false;
+        }
+    }, [gameStatus]);
+
+    useEffect(() => {
+        playerSnapshotRef.current = player;
+    }, [player]);
+
+    useEffect(() => {
+        allPlayersSnapshotRef.current = allPlayers;
+    }, [allPlayers]);
+
+    useEffect(() => {
+        onMatchResolvedRef.current = onMatchResolved;
+    }, [onMatchResolved]);
+
+    useEffect(() => {
+        matchStatsSourceRef.current = matchStatsSource;
+    }, [matchStatsSource]);
 
     // Reset stats minimization when selection changes
     useEffect(() => {
@@ -447,7 +500,7 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
         const h = window.innerHeight;
         setMinimapPos(p => ({ x: clamp(p.x, 0, Math.max(0, w - 200)), y: clamp(p.y, 0, Math.max(0, h - 150)) }));
         setChatPos(p => ({ x: clamp(p.x, 0, Math.max(0, w - 300)), y: clamp(p.y, 0, Math.max(0, h - 220)) }));
-        setBuildMenuPos(p => ({ x: clamp(p.x, 0, Math.max(0, w - 160)), y: clamp(p.y, 0, Math.max(0, h - 300)) }));
+        setBuildMenuPos(p => ({ x: clamp(p.x, 0, Math.max(0, w - 360)), y: clamp(p.y, 0, Math.max(0, h - 540)) }));
         if (statsPanelPos) {
             const nx = clamp(statsPanelPos.x, 0, Math.max(0, w - 260));
             const ny = clamp(statsPanelPos.y, 0, Math.max(0, h - 240));
@@ -460,7 +513,7 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
             const h2 = window.innerHeight;
             setMinimapPos(p => ({ x: clamp(p.x, 0, Math.max(0, w2 - 200)), y: clamp(p.y, 0, Math.max(0, h2 - 150)) }));
             setChatPos(p => ({ x: clamp(p.x, 0, Math.max(0, w2 - 300)), y: clamp(p.y, 0, Math.max(0, h2 - 220)) }));
-            setBuildMenuPos(p => ({ x: clamp(p.x, 0, Math.max(0, w2 - 160)), y: clamp(p.y, 0, Math.max(0, h2 - 300)) }));
+            setBuildMenuPos(p => ({ x: clamp(p.x, 0, Math.max(0, w2 - 360)), y: clamp(p.y, 0, Math.max(0, h2 - 540)) }));
             if (statsPanelPos) {
                 const nx2 = clamp(statsPanelPos.x, 0, Math.max(0, w2 - 260));
                 const ny2 = clamp(statsPanelPos.y, 0, Math.max(0, h2 - 240));
@@ -490,17 +543,39 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
     const [socketHandlersReady, setSocketHandlersReady] = useState(false);
 
     const canvasRef = useRef<HTMLCanvasElement>(null);
+    const playerSnapshotRef = useRef<Player | null>(null);
+    const allPlayersSnapshotRef = useRef<Map<string, Player>>(new Map());
+    const onMatchResolvedRef = useRef<GameUIProps['onMatchResolved']>(onMatchResolved);
+    const matchStatsSourceRef = useRef<MatchSource>(matchStatsSource);
+
+    const reportMatchResult = (result: MatchResult) => {
+        if (matchStatsReportedRef.current || !onMatchResolvedRef.current) {
+            return;
+        }
+
+        const roster = Array.from(allPlayersSnapshotRef.current.values());
+        const humanPlayers = Math.max(
+            roster.filter(candidate => !candidate.isBot).length,
+            playerSnapshotRef.current && !playerSnapshotRef.current.isBot ? 1 : 0
+        );
+        const botPlayers = roster.filter(candidate => candidate.isBot).length;
+        const source = matchStatsSourceRef.current;
+
+        matchStatsReportedRef.current = true;
+        onMatchResolvedRef.current({
+            result,
+            source,
+            humanPlayers,
+            botPlayers,
+            coop: botPlayers > 0,
+            ranked: source === 'steam' && humanPlayers >= 2 && botPlayers === 0,
+        });
+    };
 
     useEffect(() => {
         const unsubscribe = connectionManager.subscribe(setConnectionState);
         return unsubscribe;
     }, []);
-
-    useEffect(() => {
-        if (connectionState.phase === 'IDLE') {
-            connectionManager.connect(connectionState.url);
-        }
-    }, [connectionState.phase]);
 
     useEffect(() => {
         // Request game state only after socket listeners are attached,
@@ -537,6 +612,7 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
         const enteredLobby = (gameStatus === 'waiting' || gameStatus === 'voting') && (firstRun || prevStatus === 'playing');
 
         if (enteredMatch) {
+            matchStatsReportedRef.current = false;
             pingSamplesRef.current = [];
             fpsSamplesRef.current = [];
             setHasUnitsSnapshot(false);
@@ -733,6 +809,13 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
     }, [isMatchLoading, matchLoadChecks]);
 
     useEffect(() => {
+        if (gameStatus !== 'playing' || isMatchLoading || !socket.connected) return;
+        if (matchReadySignalSentRef.current) return;
+        matchReadySignalSentRef.current = true;
+        socket.emit('player_match_ready');
+    }, [gameStatus, isMatchLoading, socket]);
+
+    useEffect(() => {
         const shouldLockMatchInput = gameStatus === 'playing' && isMatchLoading;
         if ((window as any).gameMenuMode === shouldLockMatchInput) return;
         (window as any).gameMenuMode = shouldLockMatchInput;
@@ -819,6 +902,7 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
             setLocalBaseVisible(false);
             setLocalHqConfirmed(false);
             setMatchLoadTimedOut(false);
+            matchReadySignalSentRef.current = false;
             setMatchLoadChecks({
                 map: false,
                 units: false,
@@ -857,12 +941,23 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
                     mode: isMe ? 'VICTORY' : 'DEFEAT',
                     canSpectate: !isMe
                 });
+
+                reportMatchResult(isMe ? 'win' : 'loss');
             }
         };
 
         const handleMatchEnded = (data: { winnerPlayerId: string | null, eliminatedPlayerIds: string[], endReason: string, timestamp: number }) => {
-            const isMe = data.winnerPlayerId === socket.id;
-            console.log(`MATCH_ENDED received. Winner: ${data.winnerPlayerId}, Local: ${socket.id}, DidWin: ${isMe}`);
+            const localPlayerId = socket.id || playerSnapshotRef.current?.id || null;
+            const isMe = !!localPlayerId && data.winnerPlayerId === localPlayerId;
+            const wasEliminated = !!localPlayerId && data.eliminatedPlayerIds.includes(localPlayerId);
+            const result: MatchResult = isMe
+                ? 'win'
+                : (data.winnerPlayerId && data.winnerPlayerId !== localPlayerId)
+                    ? 'loss'
+                    : wasEliminated
+                        ? 'loss'
+                        : 'draw';
+            console.log(`MATCH_ENDED received. Winner: ${data.winnerPlayerId}, Local: ${localPlayerId}, Result: ${result}`);
 
             setWinnerId(data.winnerPlayerId);
             setGameOverReason(data.endReason);
@@ -877,8 +972,10 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
                 steamService.activateAchievement('WIN_GAME');
             }
 
+            reportMatchResult(result);
+
             // If we are in eliminated list and not already marked
-            if (socket.id && data.eliminatedPlayerIds.includes(socket.id)) {
+            if (wasEliminated) {
                 setEliminated(true);
                 setSpectating(true);
             }
@@ -893,6 +990,7 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
                     canSpectate: true,
                     reason: data.reason
                 });
+                reportMatchResult('loss');
             }
         };
 
@@ -962,11 +1060,20 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
         const handleUnitSelection = (e: CustomEvent) => {
             const detail = e.detail || {};
             setSelectedUnitIds(detail.unitIds || []);
+            if ((detail.unitIds || []).length > 0) {
+                setSelectedIslandId(null);
+                setSelectedBuildingId(null);
+                setSelectedBuildingType(null);
+                setSelectedBuildingIds([]);
+            }
         };
 
         const handleBuildingSelection = (e: CustomEvent) => {
             const detail = e.detail || {};
             setSelectedBuildingIds(detail.buildingIds || []);
+            if ((detail.buildingIds || []).length > 0) {
+                setSelectedUnitIds([]);
+            }
         };
 
         const handleMinimapUpdate = (e: CustomEvent) => {
@@ -1472,38 +1579,65 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
         window.dispatchEvent(event);
     };
 
+    const showActionGuide = React.useCallback((guide: ActionGuide | undefined, source: 'build' | 'recruit') => {
+        if (!guide) return;
+        setMenuGuideState({ guide, source });
+    }, []);
+
+    const clearActionGuide = React.useCallback((id?: string) => {
+        setMenuGuideState((current) => {
+            if (!current) return null;
+            if (id && current.guide.id !== id) return current;
+            return null;
+        });
+    }, []);
+
     const categories = React.useMemo(() => [
         {
             id: 'economy',
             label: 'Economy',
+            icon: '🪙',
+            summary: 'Income first: lock down gold, oil, and safe scaling.',
             buildings: [
-                { type: 'mine', label: 'Gold Mine (30g)', icon: '⛏️' },
-                { type: 'oil_rig', label: 'Oil Rig (200g)', icon: '🛢️' },
-                { type: 'oil_well', label: 'Oil Well (200g)', icon: '⛽' },
-                { type: 'farm', label: 'Farm (50g)', icon: '🌾' },
+                { type: 'mine', label: 'Gold Mine', cost: '30g', icon: '⛏️', blurb: 'Fast early gold from deposit nodes.' },
+                { type: 'oil_rig', label: 'Oil Rig', cost: '200g', icon: '🛢️', blurb: 'Sea oil for ships and aircraft tech.' },
+                { type: 'oil_well', label: 'Oil Well', cost: '200g', icon: '⛽', blurb: 'Land oil for vehicles and missiles.' },
+                { type: 'farm', label: 'Farm', cost: '50g', icon: '🌾', blurb: 'Safe backline income on grassland.' },
             ]
         },
         {
             id: 'military',
             label: 'Military',
+            icon: '⚔️',
+            summary: 'Production structures that unlock your army power spikes.',
             buildings: [
-                { type: 'barracks', label: 'Barracks (50g)', icon: '⚔️' },
-                { type: 'tank_factory', label: 'Tank Factory (500g)', icon: '🏭' },
-                { type: 'air_base', label: 'Air Base (400g, 100o)', icon: '🛫' },
-                { type: 'dock', label: 'Dock (100g)', icon: '⚓' }
+                { type: 'barracks', label: 'Barracks', cost: '50g', icon: '⚔️', blurb: 'Infantry, builders, and early map control.' },
+                { type: 'tank_factory', label: 'Tank Factory', cost: '500g', icon: '🏭', blurb: 'Armor, humvees, and siege pressure.' },
+                { type: 'air_base', label: 'Air Base', cost: '400g, 100o', icon: '🛫', blurb: 'Air superiority and backline strikes.' },
+                { type: 'dock', label: 'Dock', cost: '100g', icon: '⚓', blurb: 'Ships, ferries, and offshore expansion.' }
             ]
         },
         {
             id: 'defenses',
             label: 'Defenses',
+            icon: '🛡️',
+            summary: 'Hold ground, stall pushes, and reshape chokepoints.',
             buildings: [
-                { type: 'tower', label: 'Tower (40g)', icon: '🏰' },
-                { type: 'wall', label: 'Wall (10g)', icon: '🧱' },
-                { type: 'wall_node', label: 'Wall Node (20g)', icon: '🏰' },
-                { type: 'bridge_node', label: 'Bridge Node (50g)', icon: '🌉' }
+                { type: 'tower', label: 'Tower', cost: '40g', icon: '🏰', blurb: 'Static firepower for key lanes and HQs.' },
+                { type: 'hospital', label: 'Hospital', cost: '150g, 20o', icon: '🏥', blurb: 'Keeps infantry fights efficient.' },
+                { type: 'repair_dock', label: 'Repair Dock', cost: '220g, 40o', icon: '🛠️', blurb: 'Repairs expensive vehicles and fleets.' },
+                { type: 'naval_mine', label: 'Naval Mine', cost: '120g, 20o', icon: '💣', blurb: 'Punishes predictable sea routes.' },
+                { type: 'wall', label: 'Wall', cost: '10g', icon: '🧱', blurb: 'Cheap blockers for funneling attacks.' },
+                { type: 'wall_node', label: 'Wall Node', cost: '20g', icon: '🏰', blurb: 'Anchor points for stronger wall lines.' },
+                { type: 'bridge_node', label: 'Bridge Node', cost: '50g', icon: '🌉', blurb: 'Connect islands and open new routes.' }
             ]
         }
     ], [mapData?.mapType]);
+
+    const activeCategoryConfig = React.useMemo(
+        () => categories.find(category => category.id === activeCategory) || null,
+        [activeCategory, categories]
+    );
 
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
@@ -1528,9 +1662,8 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
                     }
                 } else {
                     // Select Building
-                    const cat = categories.find(c => c.id === activeCategory);
-                    if (cat && cat.buildings[num - 1]) {
-                        const bType = cat.buildings[num - 1].type;
+                    if (activeCategoryConfig && activeCategoryConfig.buildings[num - 1]) {
+                        const bType = activeCategoryConfig.buildings[num - 1].type;
                         if (bType === 'oil') {
                             build(mapData?.mapType === 'desert' ? 'oil_pump' : 'oil_rig');
                         } else {
@@ -1556,17 +1689,16 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
 
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [activeCategory, categories, mapData]);
+    }, [activeCategory, activeCategoryConfig, categories, mapData]);
 
     const recruit = (type: string) => {
+        if (selectedUnitItem && (selectedUnitItem.type === 'mothership' || selectedUnitItem.type === 'aircraft_carrier')) {
+            socket.emit('recruit', { islandId: null, buildingId: selectedUnitItem.id, type });
+            return;
+        }
+
         if (selectedIslandId && selectedBuildingId && selectedBuildingType) {
             socket.emit('recruit', { islandId: selectedIslandId, buildingId: selectedBuildingId, type });
-        } else if (selectedUnitIds.length > 0) {
-            // Check if selected unit is a Mothership
-            const unit = units.find(u => u.id === selectedUnitIds[0]);
-            if (unit && (unit.type === 'mothership' || unit.type === 'aircraft_carrier')) {
-                socket.emit('recruit', { islandId: null, buildingId: unit.id, type });
-            }
         }
     };
 
@@ -1617,6 +1749,93 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
         }
         return null;
     }, [selectedUnitItem]);
+
+    let recruitTitle = '';
+    let recruitOptions: { type: string; label: string }[] = [];
+
+    if (isBuildingMine) {
+        if (selectedBuildingType === 'barracks') {
+            recruitTitle = 'Barracks Recruitment';
+            recruitOptions = [
+                { type: 'soldier', label: '💂 Soldier (10g)' },
+                { type: 'sniper', label: '🎯 Sniper (20g)' },
+                { type: 'rocketeer', label: '🚀 Rocketeer (30g, 5o)' },
+                { type: 'builder', label: '🛠️ Builder (15g)' },
+                { type: 'oil_seeker', label: '🚙 Oil Seeker (1000g)' }
+            ];
+        } else if (selectedBuildingType === 'tank_factory') {
+            recruitTitle = 'Tank Factory Recruitment';
+            recruitOptions = [
+                { type: 'tank', label: '🚜 Tank (150g, 20o)' },
+                { type: 'humvee', label: '🚙 Humvee (100g, 10o)' },
+                { type: 'missile_launcher', label: '🚚 Missile Launcher (200g, 50o)' }
+            ];
+        } else if (selectedBuildingType === 'air_base') {
+            recruitTitle = 'Air Base Recruitment';
+            recruitOptions = [
+                { type: 'light_plane', label: '🛩️ Light Plane (100g, 20o)' },
+                { type: 'heavy_plane', label: '✈️ Heavy Plane (250g, 100o)' },
+                { type: 'mothership', label: '🛸 Mothership (2000g, 1000o)' }
+            ];
+        } else if (selectedBuildingType === 'dock') {
+            recruitTitle = 'Dock Recruitment';
+            recruitOptions = [
+                { type: 'pirate_ship', label: '🏴‍☠️ Pirate Ship (200g)' },
+                { type: 'destroyer', label: '🚢 Destroyer (50g, 10o)' },
+                { type: 'construction_ship', label: '🏗️ Construction Ship (100g)' },
+                { type: 'ferry', label: '⛴️ Ferry (100g, 50o)' },
+                { type: 'aircraft_carrier', label: '🛳️ Aircraft Carrier (1500g, 500o)' }
+            ];
+        } else if (selectedBuildingType === 'base') {
+            recruitTitle = 'Base Recruitment';
+            recruitOptions = [
+                { type: 'builder', label: '🛠️ Builder (15g)' }
+            ];
+        }
+    } else if (isUnitMine && selectedUnitItem?.type === 'mothership') {
+        recruitTitle = 'Mothership Recruitment';
+        recruitOptions = [
+            { type: 'alien_scout', label: '👽 Alien Scout (150g, 50o)' },
+            { type: 'heavy_alien', label: '🛸 Heavy Alien (800g, 400o)' },
+            { type: 'light_plane', label: '🛩️ Light Plane (100g, 20o)' },
+            { type: 'heavy_plane', label: '✈️ Heavy Plane (250g, 100o)' }
+        ];
+    } else if (isUnitMine && selectedUnitItem?.type === 'aircraft_carrier') {
+        recruitTitle = 'Aircraft Carrier Recruitment';
+        recruitOptions = [
+            { type: 'light_plane', label: '🛩️ Light Plane (100g, 20o)' },
+            { type: 'heavy_plane', label: '✈️ Heavy Plane (250g, 100o)' }
+        ];
+    }
+
+    useEffect(() => {
+        if (!activeCategory) {
+            setMenuGuideState((current) => current?.source === 'build' ? null : current);
+        }
+    }, [activeCategory]);
+
+    useEffect(() => {
+        if (recruitOptions.length === 0) {
+            setMenuGuideState((current) => current?.source === 'recruit' ? null : current);
+        }
+    }, [recruitOptions.length]);
+
+    const menuGuideStyle = React.useMemo(() => {
+        if (!menuGuideState) return undefined;
+
+        if (menuGuideState.source === 'build') {
+            const viewportWidth = window.innerWidth;
+            const viewportHeight = window.innerHeight;
+            const guideWidth = Math.min(340, viewportWidth - 32);
+
+            return {
+                left: Math.max(20, Math.min(viewportWidth - guideWidth - 20, buildMenuPos.x + 356)),
+                top: Math.max(76, Math.min(viewportHeight - 470, buildMenuPos.y))
+            };
+        }
+
+        return { right: 20, bottom: 170 };
+    }, [buildMenuPos.x, buildMenuPos.y, menuGuideState]);
 
     const isVoting = gameStatus === 'voting';
     const renderLoadingScreen = (title: string, subtitle: string, checks: LoadingCheckItem[]) => {
@@ -1879,6 +2098,20 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
 
                     {roomId && (
                         <div className="lobby-invite-content">
+                            {steamLobbyId && steamService.isInitialized && (
+                                <button
+                                    onClick={async () => {
+                                        const result = await steamService.openInviteDialog(steamLobbyId);
+                                        if (!result.success) {
+                                            alert(`Failed to open Steam invite dialog: ${result.error || 'Unknown error'}`);
+                                        }
+                                    }}
+                                    className="lobby-invite-btn"
+                                >
+                                    Invite via Steam
+                                </button>
+                            )}
+
                             {/* Game ID & Password Display */}
                             <div className="lobby-room-info-display">
                                 <div className="lobby-room-id-row">
@@ -1986,70 +2219,101 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
 
     const connectNodes = () => {
         if (selectedNodeIds.length >= 2) {
-            // Connect nodes in a chain (0-1, 1-2, 2-3, etc.)
-            for (let i = 0; i < selectedNodeIds.length - 1; i++) {
-                socket.emit('connect_nodes', { nodeAId: selectedNodeIds[i], nodeBId: selectedNodeIds[i + 1] });
+            const orderedNodeIds = selectedNodesAreBridgeChain
+                ? getOrderedBridgeChainNodeIds(selectedNodeIds)
+                : selectedNodeIds;
+
+            for (let i = 0; i < orderedNodeIds.length - 1; i++) {
+                socket.emit('connect_nodes', { nodeAId: orderedNodeIds[i], nodeBId: orderedNodeIds[i + 1] });
             }
             setSelectedNodeIds([]);
         }
     };
 
-    let recruitTitle = '';
-    let recruitOptions: { type: string; label: string }[] = [];
-
-    if (isBuildingMine) {
-        if (selectedBuildingType === 'barracks') {
-            recruitTitle = 'Barracks Recruitment';
-            recruitOptions = [
-                { type: 'soldier', label: '💂 Soldier (10g)' },
-                { type: 'sniper', label: '🎯 Sniper (20g)' },
-                { type: 'rocketeer', label: '🚀 Rocketeer (30g, 5o)' },
-                { type: 'builder', label: '🛠️ Builder (15g)' },
-                { type: 'oil_seeker', label: '🚙 Oil Seeker (1000g)' }
-            ];
-        } else if (selectedBuildingType === 'tank_factory') {
-            recruitTitle = 'Tank Factory Recruitment';
-            recruitOptions = [
-                { type: 'tank', label: '🚜 Tank (150g, 20o)' },
-                { type: 'humvee', label: '🚙 Humvee (100g, 10o)' },
-                { type: 'missile_launcher', label: '🚚 Missile Launcher (200g, 50o)' }
-            ];
-        } else if (selectedBuildingType === 'air_base') {
-            recruitTitle = 'Air Base Recruitment';
-            recruitOptions = [
-                { type: 'light_plane', label: '🛩️ Light Plane (100g, 20o)' },
-                { type: 'heavy_plane', label: '✈️ Heavy Plane (250g, 100o)' },
-                { type: 'mothership', label: '🛸 Mothership (2000g, 1000o)' }
-            ];
-        } else if (selectedBuildingType === 'dock') {
-            recruitTitle = 'Dock Recruitment';
-            recruitOptions = [
-                { type: 'destroyer', label: '🚢 Destroyer (50g, 10o)' },
-                { type: 'construction_ship', label: '🏗️ Construction Ship (100g)' },
-                { type: 'ferry', label: '⛴️ Ferry (100g, 50o)' },
-                { type: 'aircraft_carrier', label: '🛳️ Aircraft Carrier (1500g, 500o)' }
-            ];
-        } else if (selectedBuildingType === 'base') {
-            recruitTitle = 'Base Recruitment';
-            recruitOptions = [
-                { type: 'builder', label: '🛠️ Builder (15g)' }
-            ];
+    const getNodePosition = (nodeId: string): { x: number; y: number } | null => {
+        for (const island of mapData?.islands || []) {
+            const node = island.buildings.find(building => building.id === nodeId);
+            if (node) {
+                return {
+                    x: island.x + (node.x || 0),
+                    y: island.y + (node.y || 0)
+                };
+            }
         }
-    } else if (isUnitMine && selectedUnitItem?.type === 'mothership') {
-        recruitTitle = 'Mothership Recruitment';
-        recruitOptions = [
-            { type: 'alien_scout', label: '👽 Alien Scout (150g, 50o)' },
-            { type: 'heavy_alien', label: '🛸 Heavy Alien (800g, 400o)' },
-            { type: 'light_plane', label: '🛩️ Light Plane (100g, 20o)' },
-            { type: 'heavy_plane', label: '✈️ Heavy Plane (250g, 100o)' }
-        ];
-    } else if (isUnitMine && selectedUnitItem?.type === 'aircraft_carrier') {
-        recruitTitle = 'Aircraft Carrier Recruitment';
-        recruitOptions = [
-            { type: 'light_plane', label: '🛩️ Light Plane (100g, 20o)' },
-            { type: 'heavy_plane', label: '✈️ Heavy Plane (250g, 100o)' }
-        ];
-    }
+
+        for (const building of mapData?.waterBuildings || []) {
+            if (building.id === nodeId) {
+                return {
+                    x: building.x || 0,
+                    y: building.y || 0
+                };
+            }
+        }
+
+        return null;
+    };
+
+    const getOrderedBridgeChainNodeIds = (nodeIds: string[]): string[] => {
+        const positionedNodes = nodeIds
+            .map(id => {
+                const position = getNodePosition(id);
+                return position ? { id, ...position } : null;
+            })
+            .filter((node): node is { id: string; x: number; y: number } => !!node);
+
+        if (positionedNodes.length <= 2) {
+            return positionedNodes.map(node => node.id);
+        }
+
+        let startNode = positionedNodes[0];
+        let endNode = positionedNodes[1];
+        let maxDistance = -1;
+
+        for (let i = 0; i < positionedNodes.length - 1; i += 1) {
+            for (let j = i + 1; j < positionedNodes.length; j += 1) {
+                const distance = Math.hypot(
+                    positionedNodes[j].x - positionedNodes[i].x,
+                    positionedNodes[j].y - positionedNodes[i].y
+                );
+                if (distance > maxDistance) {
+                    maxDistance = distance;
+                    startNode = positionedNodes[i];
+                    endNode = positionedNodes[j];
+                }
+            }
+        }
+
+        const dx = endNode.x - startNode.x;
+        const dy = endNode.y - startNode.y;
+        const lengthSq = dx * dx + dy * dy;
+        if (lengthSq <= 1) {
+            return positionedNodes.map(node => node.id);
+        }
+
+        return [...positionedNodes]
+            .sort((left, right) => {
+                const leftProjection = ((left.x - startNode.x) * dx + (left.y - startNode.y) * dy) / lengthSq;
+                const rightProjection = ((right.x - startNode.x) * dx + (right.y - startNode.y) * dy) / lengthSq;
+                return leftProjection - rightProjection;
+            })
+            .map(node => node.id);
+    };
+
+    const getSelectedNodeType = (nodeId: string) => {
+        for (const island of mapData?.islands || []) {
+            const node = island.buildings.find(building => building.id === nodeId);
+            if (node) return node.type;
+        }
+        for (const building of mapData?.waterBuildings || []) {
+            if (building.id === nodeId) return building.type;
+        }
+        return null;
+    };
+
+    const selectedNodeTypes = selectedNodeIds.map(getSelectedNodeType).filter(Boolean);
+    const selectedNodesAreBridgeChain =
+        selectedNodeTypes.length > 0 &&
+        selectedNodeTypes.every(type => type === 'bridge_node');
 
     const handleLoadNearby = () => {
         if (selectedTransport) {
@@ -2125,11 +2389,11 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
             'Starting Match',
             matchLoadTimedOut
                 ? (waitingForHq
-                    ? 'Waiting for your headquarters to be confirmed before gameplay can begin.'
-                    : 'Network is still syncing. Entering game view as soon as core data is ready.')
+                    ? 'Waiting for your headquarters to be confirmed before gameplay can begin. Bots stay paused until every human commander is ready.'
+                    : 'Network is still syncing. Bots stay paused until every human commander is ready to begin.')
                 : (waitingForHq
-                    ? 'Verifying your headquarters and syncing the opening map state.'
-                    : 'Loading map, units, and stabilizing ping/FPS'),
+                    ? 'Verifying your headquarters and syncing the opening map state before the start gate opens for everyone.'
+                    : 'Loading map, units, and stabilizing ping/FPS while bots wait for every human commander to finish loading.'),
             matchLoadItems
         );
     }
@@ -2269,6 +2533,22 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
 
             {showSettings && <SettingsModal onClose={() => setShowSettings(false)} mapData={mapData} />}
 
+            {menuGuideState && (
+                <ActionGuidePanel
+                    guide={menuGuideState.guide}
+                    source={menuGuideState.source}
+                    style={menuGuideStyle}
+                />
+            )}
+
+            {tutorialMode && player && !spectating && !matchEnded && (
+                <TutorialPanel
+                    player={player}
+                    mapData={mapData}
+                    units={units}
+                />
+            )}
+
             {/* Spectating Banner */}
             {spectating && (
                 <div className="spectating-banner">
@@ -2303,8 +2583,12 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
                                     onMouseDown={handleBuildMenuDragStart}
                                     style={{ cursor: 'move' }}
                                 >
-                                    <h3 className="build-header-title">Construction</h3>
-                                    <div className="build-header-controls" style={{ display: 'flex', gap: '5px' }}>
+                                    <div className="build-header-copy">
+                                        <div className="build-header-kicker">Field Command</div>
+                                        <h3 className="build-header-title">Construction</h3>
+                                        <p className="build-header-subtitle">Build economy, unlock production, and shape the battlefield.</p>
+                                    </div>
+                                    <div className="build-header-controls" style={{ display: 'flex', gap: '8px' }}>
                                         {activeCategory && (
                                             <button
                                                 onClick={() => setActiveCategory(null)}
@@ -2317,31 +2601,65 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
                                 </div>
 
                                 {!activeCategory ? (
-                                    <div className="build-group">
+                                    <div className="build-group build-group--categories">
                                         {categories.map((cat, index) => (
                                             <button
                                                 key={cat.id}
                                                 className="build-category-btn"
                                                 onClick={() => setActiveCategory(cat.id)}
                                             >
-                                                {index + 1}. {cat.label}
+                                                <span className="build-category-btn__hotkey">{index + 1}</span>
+                                                <span className="build-category-btn__icon">{cat.icon}</span>
+                                                <span className="build-category-btn__body">
+                                                    <span className="build-category-btn__title">{cat.label}</span>
+                                                    <span className="build-category-btn__summary">{cat.summary}</span>
+                                                </span>
+                                                <span className="build-category-btn__count">{cat.buildings.length}</span>
                                             </button>
                                         ))}
+                                        <div className="build-menu-hint">
+                                            Pick a category, then hover any build card to preview placement.
+                                        </div>
                                     </div>
                                 ) : (
-                                    <div className="build-group">
-                                        <p className="build-category-label">
-                                            {categories.find(c => c.id === activeCategory)?.label}:
-                                        </p>
-                                        {categories.find(c => c.id === activeCategory)?.buildings.map((b, index) => (
+                                    <div className="build-group build-group--items">
+                                        <div className="build-category-hero">
+                                            <div>
+                                                <div className="build-category-kicker">Active Category</div>
+                                                <p className="build-category-label">
+                                                    {activeCategoryConfig?.icon} {activeCategoryConfig?.label}
+                                                </p>
+                                            </div>
+                                            <div className="build-category-hero__copy">
+                                                {activeCategoryConfig?.summary}
+                                            </div>
+                                        </div>
+                                        {activeCategoryConfig?.buildings.map((b, index) => (
                                             <button
                                                 key={b.type}
                                                 className="build-item-btn"
+                                                onMouseEnter={() => showActionGuide(BUILDING_ACTION_GUIDES[b.type], 'build')}
+                                                onMouseLeave={() => clearActionGuide(b.type)}
+                                                onFocus={() => showActionGuide(BUILDING_ACTION_GUIDES[b.type], 'build')}
+                                                onBlur={() => clearActionGuide(b.type)}
                                                 onClick={() => build(b.type)}
                                             >
-                                                {index + 1}. {b.icon} {b.label}
+                                                <span className="build-item-hotkey">{index + 1}</span>
+                                                <span className="build-item-icon-wrap">
+                                                    <span className="build-item-icon">{b.icon}</span>
+                                                </span>
+                                                <span className="build-item-body">
+                                                    <span className="build-item-title-row">
+                                                        <span className="build-item-title">{b.label}</span>
+                                                        <span className="build-item-cost">{b.cost}</span>
+                                                    </span>
+                                                    <span className="build-item-summary">{b.blurb}</span>
+                                                </span>
                                             </button>
                                         ))}
+                                        <div className="build-menu-hint">
+                                            Hover for placement guidance • Press 1-9 to build fast • Esc to go back
+                                        </div>
                                     </div>
                                 )}
                             </div>
@@ -2435,9 +2753,9 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
                                     onClick={connectNodes}
                                     className="bridge-btn bridge-btn-connect"
                                 >
-                                    Connect Chain
+                                    {selectedNodesAreBridgeChain ? 'Connect Bridge Chain' : 'Connect Chain'}
                                 </button>
-                                {selectedNodeIds.length > 2 && (
+                                {selectedNodeIds.length > 2 && !selectedNodesAreBridgeChain && (
                                     <button
                                         onClick={() => {
                                             if (selectedNodeIds.length >= 2) {
@@ -2591,6 +2909,8 @@ export const GameUI: React.FC<GameUIProps> = ({ onLeave, roomId, initialGameStat
                                         type={opt.type}
                                         label={opt.label}
                                         queueCount={queueCount}
+                                        onPreviewStart={() => showActionGuide(UNIT_ACTION_GUIDES[opt.type], 'recruit')}
+                                        onPreviewEnd={() => clearActionGuide(opt.type)}
                                         onClick={() => recruit(opt.type)}
                                     />
                                 );

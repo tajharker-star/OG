@@ -1,5 +1,5 @@
 :root {
-  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
+  font-family: "Trebuchet MS", "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
   line-height: 1.5;
   font-weight: 400;
 
@@ -12,45 +12,58 @@
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 
-  /* Core Palette - Clean, Darker, Modern */
-  --bg-main: #050505; /* Deepest black */
-  --bg-panel: rgba(10, 10, 12, 0.8); /* Very dark, transparent for glass effect */
-  --bg-modal: rgba(0, 0, 0, 0.85); /* Dark transparency for modals */
+  /* Core Palette - Logo Matched Ember + Gold */
+  --bg-main: #080503;
+  --bg-panel: rgba(17, 10, 6, 0.84);
+  --bg-modal: rgba(6, 3, 1, 0.9);
   --bg-dark-overlay: rgba(0, 0, 0, 0.7);
   --bg-darker-overlay: rgba(0, 0, 0, 0.9);
 
-  --border-subtle: rgba(255, 255, 255, 0.08); /* Very subtle borders */
-  --border-color: rgba(255, 255, 255, 0.08); /* Legacy support */
+  --border-subtle: rgba(255, 203, 110, 0.16);
+  --border-color: rgba(255, 203, 110, 0.16);
+  --border-strong: rgba(255, 190, 92, 0.3);
 
   /* Text */
-  --text-primary: #F0F2F5; /* Almost white */
-  --text-secondary: #A0A5B0; /* Muted gray */
-  --text-muted: #6B7280; /* Darker gray */
+  --text-primary: #fff3de;
+  --text-secondary: #d2c0a7;
+  --text-muted: #947f66;
   --text-disabled: #374151;
 
-  /* Primary Action (Green) - Vibrant but clean */
-  --primary-color: #10B981; /* Emerald 500 */
-  --primary-hover: #34D399; /* Emerald 400 */
-  --primary-active: #059669; /* Emerald 600 */
-  --primary-disabled: #064E3B;
+  /* Primary Action (Gold/Ember) */
+  --primary-color: #f0b54f;
+  --primary-hover: #ffd26f;
+  --primary-active: #c96d1b;
+  --primary-disabled: #5b2f11;
   
   /* Legacy Accent Mapping */
-  --accent-color: #10B981;
+  --accent-color: #ff962f;
+  --accent-soft: #ffe1a5;
+  --accent-ember: #d96f1f;
+  --panel-tint: linear-gradient(180deg, rgba(255, 209, 118, 0.14), rgba(176, 72, 14, 0.08));
+  --panel-shell: linear-gradient(180deg, rgba(255, 209, 118, 0.1), rgba(255, 140, 56, 0.06)), rgba(255, 255, 255, 0.03);
+  --panel-shadow: 0 18px 42px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 245, 224, 0.06);
+  --focus-ring: 0 0 0 2px rgba(255, 187, 76, 0.24);
 
   /* Neutral Buttons */
-  --btn-neutral-bg: rgba(255, 255, 255, 0.05);
-  --btn-neutral-hover: rgba(16, 185, 129, 0.3);
-  --btn-neutral-active: rgba(16, 185, 129, 0.5);
+  --btn-neutral-bg: linear-gradient(180deg, rgba(255, 216, 132, 0.14), rgba(123, 49, 10, 0.16)), rgba(255, 255, 255, 0.03);
+  --btn-neutral-hover: linear-gradient(180deg, rgba(255, 222, 148, 0.22), rgba(163, 65, 14, 0.2)), rgba(255, 255, 255, 0.04);
+  --btn-neutral-active: linear-gradient(180deg, rgba(255, 196, 104, 0.2), rgba(133, 50, 9, 0.22)), rgba(255, 255, 255, 0.02);
 
   /* Status Colors */
   --danger-color: #EF4444; /* Red 500 */
   --warning-color: #F59E0B; /* Amber 500 */
   --info-color: #3B82F6; /* Blue 500 */
-  --success-color: #10B981; /* Emerald 500 */
+  --success-color: #f0b54f;
 
   /* Item Backgrounds */
-  --item-bg: rgba(255, 255, 255, 0.03);
-  --item-bg-hover: rgba(16, 185, 129, 0.3);
+  --item-bg: rgba(255, 207, 112, 0.06);
+  --item-bg-hover: rgba(255, 192, 89, 0.14);
+
+  /* Radii */
+  --radius-sm: 14px;
+  --radius-md: 18px;
+  --radius-lg: 24px;
+  --radius-xl: 30px;
   
   /* Spacing */
   --spacing-xs: 4px;
@@ -87,7 +100,10 @@ body {
   width: 100vw;
   height: 100vh;
   overflow: hidden;
-  background-color: var(--bg-main);
+  background:
+    radial-gradient(circle at top, rgba(255, 171, 64, 0.12), transparent 38%),
+    radial-gradient(circle at bottom, rgba(151, 58, 10, 0.16), transparent 34%),
+    var(--bg-main);
   color: var(--text-primary);
 }
 

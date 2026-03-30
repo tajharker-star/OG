@@ -10,6 +10,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: resolve(__dirname, 'index.html'),
+        logoPreview: resolve(__dirname, 'logo-preview.html'),
         unitPreview: resolve(__dirname, 'unit-preview.html'),
         buildingPreview: resolve(__dirname, 'building-preview.html')
       }
