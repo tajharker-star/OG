@@ -135,14 +135,11 @@ export class BaseDefenseBuilder {
         }
 
         // Opening defence targets (fast, light)
-        let openingTowerTarget = 1;
-        let openingNodeTarget = 4;
+        let openingTowerTarget = Math.max(1, Math.min(2, this.debugState.towersTarget));
+        let openingNodeTarget = Math.max(4, Math.min(6, this.debugState.wallNodesTarget));
         if (gameState.mapType === 'islands') {
-            openingTowerTarget = 0;
+            openingTowerTarget = Math.max(1, Math.min(2, this.debugState.towersTarget));
             openingNodeTarget = this.debugState.wallNodesTarget;
-        } else if (difficulty >= 5) {
-            openingTowerTarget = 2;
-            openingNodeTarget = 6;
         }
 
         // 3b. Compute defence budget reserve (bounded so spendableGold is never negative)
@@ -155,26 +152,14 @@ export class BaseDefenseBuilder {
             ? nodeCostStats.cost
             : (nodeCostStats.cost as any).gold ?? nodeCostStats.cost.gold;
 
-        const towersCurrent = baseIsland.buildings.filter(b => b.type === 'tower').length;
-        const nodesCurrent = baseIsland.buildings.filter(b => b.type === 'wall_node').length;
+        const towersCurrent = baseIsland.buildings.filter(
+            b => b.type === 'tower' && b.ownerId === this.bot.playerId
+        ).length;
+        const nodesCurrent = baseIsland.buildings.filter(
+            b => b.type === 'wall_node' && b.ownerId === this.bot.playerId
+        ).length;
         this.debugState.towersBuilt = towersCurrent;
         this.debugState.wallNodesPlaced = nodesCurrent;
-
-        let neededTowers = 0;
-        let neededNodes = 0;
-        if (this.bot.difficulty <= 3) {
-            neededTowers = 2;
-            neededNodes = 6;
-        } else if (this.bot.difficulty <= 6) {
-            neededTowers = 3;
-            neededNodes = 8;
-        } else if (this.bot.difficulty <= 8) {
-            neededTowers = 5;
-            neededNodes = 10;
-        } else {
-            neededTowers = 6;
-            neededNodes = 12;
-        }
 
         const openingRemainingTowers = Math.max(0, openingTowerTarget - towersCurrent);
         const openingRemainingNodes = Math.max(0, openingNodeTarget - nodesCurrent);
@@ -220,6 +205,7 @@ export class BaseDefenseBuilder {
                 if (this.debugState.wallConnectionsMade > 0) {
                     this.debugState.openingState = 'UPGRADE_GATE_OPENING';
                 } else {
+                    this.phase = 'CONNECT_WALLS';
                     this.debugState.openingState = 'DONE';
                 }
             }
@@ -247,7 +233,7 @@ export class BaseDefenseBuilder {
                 if (this.buildWallNodes(gameState, player, baseIsland, budgetPerc)) return;
                 const phaseNodeTarget = gameState.mapType === 'islands'
                     ? Math.max(3, this.debugState.wallNodesTarget)
-                    : Math.max(4, this.debugState.wallNodesTarget);
+                    : this.getWallConnectNodeThreshold();
                 if (this.debugState.wallNodesPlaced >= phaseNodeTarget) {
                     this.phase = 'CONNECT_WALLS';
                 }
@@ -355,24 +341,15 @@ export class BaseDefenseBuilder {
     }
 
     private updateTargets(difficulty: number, mapType?: string) {
-        // Towers
-        if (mapType === 'islands') this.debugState.towersTarget = 0;
-        else if (difficulty <= 2) this.debugState.towersTarget = 2;
-        else if (difficulty <= 4) this.debugState.towersTarget = 3;
-        else if (difficulty <= 6) this.debugState.towersTarget = 4;
-        else if (difficulty <= 8) this.debugState.towersTarget = 6;
-        else if (difficulty <= 9) this.debugState.towersTarget = 7;
-        else this.debugState.towersTarget = 8;
-
-        // Wall Nodes
-        if (difficulty <= 2) this.debugState.wallNodesTarget = 4;
-        else if (difficulty <= 4) this.debugState.wallNodesTarget = 6;
-        else if (difficulty <= 6) this.debugState.wallNodesTarget = 8;
-        else if (difficulty <= 8) this.debugState.wallNodesTarget = 10;
-        else if (difficulty <= 9) this.debugState.wallNodesTarget = 12;
-        else this.debugState.wallNodesTarget = 14;
+        const profileTargets = this.bot.getDefenceTargets(mapType);
+        this.debugState.towersTarget = profileTargets.towers;
+        this.debugState.wallNodesTarget = profileTargets.wallNodes;
 
         this.debugState.wallConnectionsExpected = this.debugState.wallNodesTarget;
+    }
+
+    private getWallConnectNodeThreshold(): number {
+        return Math.max(4, Math.min(this.debugState.wallNodesTarget, 6));
     }
 
     private getRingRadius(hqRadius: number, structureType: 'tower' | 'wall_node'): { ringMin: number; ringMax: number; ringRadius: number } {
@@ -419,6 +396,7 @@ export class BaseDefenseBuilder {
     }
 
     private sampleIslandCoastline(
+        gameState: GameState,
         island: Island,
         insideOffset: number,
         sampleSpacing: number = 18
@@ -492,17 +470,11 @@ export class BaseDefenseBuilder {
         }
 
         if (island.points) {
-            if (!MapGenerator.isPointInPolygon(absX, absY, island.points)) {
-                return false;
-            }
-
-            const closest = MapGenerator.getClosestPointOnPolygon(absX, absY, island.points);
-            if (Math.hypot(absX - closest.x, absY - closest.y) > 20) {
+            if (!gameState.isPointOnExposedIslandShoreline(island, absX, absY)) {
                 return false;
             }
         } else {
-            const distance = Math.hypot(absX - island.x, absY - island.y);
-            if (distance < Math.max(0, island.radius - 24) || distance > island.radius + 2) {
+            if (!gameState.isPointOnExposedIslandShoreline(island, absX, absY)) {
                 return false;
             }
         }
@@ -524,7 +496,7 @@ export class BaseDefenseBuilder {
             };
         }
 
-        const shorelineSamples = this.sampleIslandCoastline(island, 14, 14);
+        const shorelineSamples = this.sampleIslandCoastline(gameState, island, 14, 14);
         if (shorelineSamples.length === 0) {
             return null;
         }
@@ -608,6 +580,7 @@ export class BaseDefenseBuilder {
         const gapHalfAngle = this.getIslandGateHalfAngle(island);
         const nodeSpacing = this.getFootprintRadius('wall_node') * 2 + 4;
         const shorelineSamples = this.sampleIslandCoastline(
+            gameState,
             island,
             this.getFootprintRadius('wall_node') + 6,
             16

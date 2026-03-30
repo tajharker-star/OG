@@ -6,6 +6,7 @@ import { DestroyerStats } from './units/Destroyer';
 import { BuilderStats } from './units/Builder';
 import { ConstructionShipStats } from './units/ConstructionShip';
 import { FerryStats } from './units/Ferry';
+import { PirateShipStats } from './units/PirateShip';
 import { TankStats } from './units/Tank';
 import { HumveeStats } from './units/Humvee';
 import { MissileLauncherStats } from './units/MissileLauncher';
@@ -30,6 +31,9 @@ import { WallNodeStats } from './buildings/WallNode';
 import { FarmStats } from './buildings/Farm';
 import { TankFactoryStats } from './buildings/TankFactory';
 import { AirBaseStats } from './buildings/AirBase';
+import { HospitalStats } from './buildings/Hospital';
+import { RepairDockStats } from './buildings/RepairDock';
+import { NavalMineStats } from './buildings/NavalMine';
 
 export const UnitData: Record<string, UnitStats> = {
     soldier: SoldierStats,
@@ -39,6 +43,7 @@ export const UnitData: Record<string, UnitStats> = {
     builder: BuilderStats,
     construction_ship: ConstructionShipStats,
     ferry: FerryStats,
+    pirate_ship: PirateShipStats,
     tank: TankStats,
     humvee: HumveeStats,
     missile_launcher: MissileLauncherStats,
@@ -64,5 +69,8 @@ export const BuildingData: Record<string, BuildingStats> = {
     wall_node: WallNodeStats,
     farm: FarmStats,
     tank_factory: TankFactoryStats,
-    air_base: AirBaseStats
+    air_base: AirBaseStats,
+    hospital: HospitalStats,
+    repair_dock: RepairDockStats,
+    naval_mine: NavalMineStats
 };
