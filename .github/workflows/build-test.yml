@@ -341,6 +341,12 @@ jobs:
           cd client
           node scripts/steam-set-live.mjs demo "$build_id" public
 
+      - name: Reset Steam deploy workspace for main (TOTP)
+        if: steps.steam-auth.outputs.mode == 'totp'
+        shell: bash
+        run: |
+          rm -rf BuildOutput client/BuildOutput
+
       - name: Steam Deploy Main (TOTP)
         if: steps.steam-auth.outputs.mode == 'totp'
         uses: game-ci/steam-deploy@v3
@@ -403,6 +409,12 @@ jobs:
           test -n "$build_id"
           cd client
           node scripts/steam-set-live.mjs demo "$build_id" public
+
+      - name: Reset Steam deploy workspace for main (config.vdf)
+        if: steps.steam-auth.outputs.mode == 'config'
+        shell: bash
+        run: |
+          rm -rf BuildOutput client/BuildOutput
 
       - name: Steam Deploy Main (config.vdf)
         if: steps.steam-auth.outputs.mode == 'config'
