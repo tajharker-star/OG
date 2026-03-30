@@ -41,7 +41,7 @@ function countFilesRecursively(rootDir) {
   return total;
 }
 
-function listRelativeFiles(rootDir) {
+function listRelativeFiles(rootDir, ignoredPaths = new Set()) {
   const files = [];
   const pending = [rootDir];
 
@@ -56,7 +56,10 @@ function listRelativeFiles(rootDir) {
       if (entry.isDirectory()) {
         pending.push(entryPath);
       } else if (entry.isFile()) {
-        files.push(path.relative(rootDir, entryPath));
+        const relativePath = path.relative(rootDir, entryPath);
+        if (!ignoredPaths.has(relativePath)) {
+          files.push(relativePath);
+        }
       }
     }
   }
@@ -68,7 +71,7 @@ function hashFile(filePath) {
   return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
 }
 
-function compareDirectoryContents(expectedDir, actualDir, label) {
+function compareDirectoryContents(expectedDir, actualDir, label, ignoredPaths = new Set()) {
   check(fs.existsSync(expectedDir), `${label} expected directory is missing at ${path.relative(clientDir, expectedDir)}`);
   check(fs.existsSync(actualDir), `${label} packaged directory is missing at ${path.relative(clientDir, actualDir)}`);
 
@@ -76,8 +79,8 @@ function compareDirectoryContents(expectedDir, actualDir, label) {
     return;
   }
 
-  const expectedFiles = listRelativeFiles(expectedDir);
-  const actualFiles = listRelativeFiles(actualDir);
+  const expectedFiles = listRelativeFiles(expectedDir, ignoredPaths);
+  const actualFiles = listRelativeFiles(actualDir, ignoredPaths);
 
   check(
     JSON.stringify(expectedFiles) === JSON.stringify(actualFiles),
@@ -95,10 +98,24 @@ function compareDirectoryContents(expectedDir, actualDir, label) {
   }
 }
 
+function getIgnoredSourcePaths(platform) {
+  const ignoredPaths = new Set(["steam_appid.txt"]);
+
+  if (platform.key === "macos") {
+    ignoredPaths.add(path.join("ConquerorsDominationDemo.app", "Contents", "MacOS", "steam_appid.txt"));
+    ignoredPaths.add(path.join("ConquerorsDominationDemo.app", "Contents", "Resources", "steam_appid.txt"));
+  }
+
+  return ignoredPaths;
+}
+
 const selectedPlatforms = getSelectedPlatforms();
 
 for (const platform of selectedPlatforms) {
   const fileCount = countFilesRecursively(platform.stageDir);
+  const ignoredSourcePaths = getIgnoredSourcePaths(platform);
+  const comparableSourceFileCount = listRelativeFiles(platform.sourceDir, ignoredSourcePaths).length;
+  const effectiveMinimumFileCount = Math.min(platform.minimumFileCount, comparableSourceFileCount);
   const rootSteamAppIdPath = path.join(platform.stageDir, "steam_appid.txt");
 
   check(
@@ -118,8 +135,8 @@ for (const platform of selectedPlatforms) {
     `${platform.label} packaged server entry is missing at ${path.relative(clientDir, platform.serverEntryPath)}`
   );
   check(
-    fileCount >= platform.minimumFileCount,
-    `${platform.label} staged release looks incomplete. Expected at least ${platform.minimumFileCount} files, found ${fileCount}`
+    fileCount >= effectiveMinimumFileCount,
+    `${platform.label} staged release looks incomplete. Expected at least ${effectiveMinimumFileCount} files, found ${fileCount}`
   );
   check(
     !fs.existsSync(rootSteamAppIdPath),
@@ -138,6 +155,7 @@ for (const platform of selectedPlatforms) {
   }
 
   if (shouldCompareSourceOutputs) {
+    compareDirectoryContents(platform.sourceDir, platform.stageDir, `${platform.label} staged release`, ignoredSourcePaths);
     compareDirectoryContents(currentRendererDistDir, platform.rendererDir, `${platform.label} renderer dist`);
     compareDirectoryContents(currentServerDistDir, platform.serverDistDir, `${platform.label} packaged server dist`);
   }
