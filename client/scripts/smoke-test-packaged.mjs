@@ -2,7 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { platforms } from "./release-config.mjs";
+import { getPlatformTestOutputDir, platforms } from "./release-config.mjs";
 
 const hostPlatformMap = {
   darwin: "macos",
@@ -68,6 +68,10 @@ function resolvePackagedTarget(platform) {
     binaryPath: path.join(platform.sourceDir, platform.launchExecutable),
     cwd: platform.sourceDir,
   };
+}
+
+function isUsingStagedBinary(packagedTarget) {
+  return path.resolve(packagedTarget.binaryPath) === path.resolve(target.binaryPath);
 }
 
 function inspectOutput(chunk, state) {
@@ -144,6 +148,14 @@ function failWithOutput(message, stdout, stderr, extraLog = "") {
   process.exit(1);
 }
 
+function writeSmokeReport(platformKey, lines) {
+  const smokeOutputDir = getPlatformTestOutputDir(platformKey);
+  fs.mkdirSync(smokeOutputDir, { recursive: true });
+  const reportPath = path.join(smokeOutputDir, "packaged-smoke.txt");
+  fs.writeFileSync(reportPath, `${lines.join("\n")}\n`);
+  return reportPath;
+}
+
 async function runMacSmokeTest(packagedTarget) {
   fs.rmSync(mainLogPath, { force: true });
   terminateMacApp(packagedTarget.binaryPath);
@@ -198,7 +210,15 @@ async function runMacSmokeTest(packagedTarget) {
 
     if (pid && getMacVisibleWindowCount(pid) > 0) {
       terminateMacApp(packagedTarget.binaryPath);
+      const reportPath = writeSmokeReport(target.key, [
+        `platform=${target.key}`,
+        `binary=${packagedTarget.binaryPath}`,
+        `cwd=${packagedTarget.cwd}`,
+        `result=passed`,
+        `visible_window_count=>0`,
+      ]);
       console.log(`Packaged ${target.label} smoke test passed.`);
+      console.log(`Smoke report: ${reportPath}`);
       return;
     }
   }
@@ -217,9 +237,9 @@ async function runDirectSmokeTest(packagedTarget) {
   const launchArgs = isLinuxTarget
     ? ["--no-sandbox", "--disable-setuid-sandbox", "--disable-gpu"]
     : [];
-  const smokeCaptureDir = path.join(process.cwd(), "tests", "output");
+  const smokeCaptureDir = getPlatformTestOutputDir(target.key);
   fs.mkdirSync(smokeCaptureDir, { recursive: true });
-  const smokeCapturePath = path.join(smokeCaptureDir, `packaged-smoke-${target.key}.png`);
+  const smokeCapturePath = path.join(smokeCaptureDir, "packaged-smoke.png");
   fs.rmSync(smokeCapturePath, { force: true });
 
   const child = spawn(packagedTarget.binaryPath, launchArgs, {
@@ -328,14 +348,35 @@ async function runDirectSmokeTest(packagedTarget) {
     );
   }
 
+  const reportPath = writeSmokeReport(target.key, [
+    `platform=${target.key}`,
+    `binary=${packagedTarget.binaryPath}`,
+    `cwd=${packagedTarget.cwd}`,
+    `result=passed`,
+    `screenshot=${smokeCapturePath}`,
+    `screenshot_size=${screenshotSize}`,
+  ]);
   console.log(`Packaged ${target.label} smoke test passed.`);
   console.log(`Smoke screenshot: ${smokeCapturePath}`);
+  console.log(`Smoke report: ${reportPath}`);
   if (stdout.trim()) {
     console.log(stdout.trim());
   }
 }
 
 const packagedTarget = resolvePackagedTarget(target);
+const usingStagedBinary = isUsingStagedBinary(packagedTarget);
+
+if (process.env.REQUIRE_STAGED_BINARY === "1" && !usingStagedBinary) {
+  console.error(
+    `Packaged ${target.label} smoke test expected the staged depot binary at ${target.binaryPath}, got ${packagedTarget.binaryPath}`
+  );
+  process.exit(1);
+}
+
+console.log(`[SmokeTest] Launch target: ${packagedTarget.binaryPath}`);
+console.log(`[SmokeTest] Launch cwd: ${packagedTarget.cwd}`);
+console.log(`[SmokeTest] Using staged depot binary: ${usingStagedBinary}`);
 
 if (target.key === "macos") {
   await runMacSmokeTest(packagedTarget);

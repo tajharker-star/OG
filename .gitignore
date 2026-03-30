@@ -19,13 +19,28 @@ Thumbs.db
 # Environment
 .env
 .env.local
+client/.steam-secrets
+client/test-results/
+server/test-results/
+.codex/
+.steam-test/
+tmp/
 
 # Electron packaged server copy
 client/server/
+client/steampipe/output/
+client/steampipe/*.bak
+client/steampipe/*nolive*.vdf
 
 # Test output
 client/tests/output/
 test-electron/
+client/logo-preview-check.png
+client/logo-preview.gif
+
+# Generated Steam/store assets
+client/steam-store-assets/
+client/steam-achievements/
 
 # Binary tools
 playit

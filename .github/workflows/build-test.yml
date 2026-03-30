@@ -5,6 +5,7 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -97,7 +98,39 @@ jobs:
           find client/dist_electron/linux-unpacked -maxdepth 1 -type f -executable -exec chmod +x {} + || true
           ls -R client/dist_electron/linux-unpacked
 
+      - name: Stage Windows Steam Depot
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          cd client
+          STEAM_PLATFORM_FILTER=windows node scripts/stage-steam-releases.mjs
+
+      - name: Verify Windows Steam Depot
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          cd client
+          STEAM_PLATFORM_FILTER=windows node scripts/verify-steam-layout.mjs
+          STEAM_PLATFORM_FILTER=windows node scripts/verify-release-binaries.mjs
+          echo "Windows staged depot file count: $(find releases/steam/microsoft-windows -type f | wc -l)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Export Windows Depot Layout Screenshot
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          Set-Location client
+          ./scripts/export-windows-depot-layout.ps1
+
+      - name: Run Packaged Smoke Test (Windows staged depot)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          cd client
+          SMOKE_TEST_FORCE_STEAM_BYPASS=1 REQUIRE_STAGED_BINARY=1 npm run smoke:packaged
+
       - name: Run Packaged Smoke Test
+        if: matrix.os != 'windows-latest'
+        continue-on-error: ${{ github.event_name == 'workflow_dispatch' && matrix.os == 'macos-latest' }}
         shell: bash
         run: |
           cd client
@@ -113,9 +146,24 @@ jobs:
         with:
           name: packaged-smoke-${{ matrix.os }}
           path: |
-            client/tests/output/packaged-smoke-windows.png
-            client/tests/output/packaged-smoke-linux.png
-            client/tests/output/packaged-smoke-macos.png
+            client/tests/output/platforms/windows/packaged-smoke.png
+            client/tests/output/platforms/windows/packaged-smoke.txt
+            client/tests/output/platforms/windows/backend-smoke.txt
+            client/tests/output/platforms/linux/packaged-smoke.png
+            client/tests/output/platforms/linux/packaged-smoke.txt
+            client/tests/output/platforms/linux/backend-smoke.txt
+            client/tests/output/platforms/macos/packaged-smoke.png
+            client/tests/output/platforms/macos/packaged-smoke.txt
+          if-no-files-found: ignore
+
+      - name: Upload Windows Depot Layout Artifact
+        uses: actions/upload-artifact@v4
+        if: always() && matrix.os == 'windows-latest'
+        with:
+          name: windows-depot-layout-${{ matrix.os }}
+          path: |
+            client/tests/output/platforms/windows/depot-layout.png
+            client/tests/output/platforms/windows/depot-layout.txt
           if-no-files-found: ignore
 
       - name: Upload Build Artifacts
@@ -153,6 +201,11 @@ jobs:
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     steps:
       - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
       - name: Download Windows Build
         uses: actions/download-artifact@v4
@@ -206,6 +259,24 @@ jobs:
           echo "- macOS launch:   client/dist_electron/mac/ConquerorsDominationDemo.app"
           echo "- Linux launch:   client/dist_electron/linux-unpacked/conquerors-domination-demo"
 
+      - name: Stage Steam depot folders
+        run: |
+          cd client
+          node scripts/stage-steam-releases.mjs
+
+      - name: Verify staged Steam depot folders
+        run: |
+          cd client
+          node scripts/verify-steam-layout.mjs
+          node scripts/verify-release-binaries.mjs
+
+      - name: Summarize staged depot file counts
+        run: |
+          echo "Steam staged depot file counts" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Windows: $(find client/releases/steam/microsoft-windows -type f | wc -l)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- macOS: $(find client/releases/steam/macos -type f | wc -l)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Linux: $(find client/releases/steam/linux -type f | wc -l)" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Select Steam auth mode
         id: steam-auth
         shell: bash
@@ -242,10 +313,26 @@ jobs:
           firstDepotIdOverride: 4432222
           buildDescription: "v${{ github.run_number }}"
           rootPath: client
-          depot1Path: dist_electron/mac
-          depot2Path: dist_electron/win-unpacked
-          depot3Path: dist_electron/linux-unpacked
-          releaseBranch: public
+          depot1Path: releases/steam/macos
+          depot2Path: releases/steam/microsoft-windows
+          depot3Path: releases/steam/linux
+
+      - name: Promote Demo Build Live (TOTP)
+        if: steps.steam-auth.outputs.mode == 'totp'
+        shell: bash
+        env:
+          STEAM_PARTNER_KEY: ${{ secrets.STEAM_PARTNER_KEY }}
+          STEAM_APPROVER_STEAMID: ${{ secrets.STEAM_APPROVER_STEAMID }}
+          STEAM_BRANCH: public
+        run: |
+          if [ -z "$STEAM_PARTNER_KEY" ]; then
+            echo "STEAM_PARTNER_KEY not set; skipping demo live promotion."
+            exit 0
+          fi
+          build_id="$(grep -o 'BuildID [0-9]\+' client/steampipe/output/app_build_4432220.log | tail -n1 | awk '{print $2}')"
+          test -n "$build_id"
+          cd client
+          node scripts/steam-set-live.mjs demo "$build_id" public
 
       - name: Steam Deploy (config.vdf)
         if: steps.steam-auth.outputs.mode == 'config'
@@ -257,10 +344,26 @@ jobs:
           firstDepotIdOverride: 4432222
           buildDescription: "v${{ github.run_number }}"
           rootPath: client
-          depot1Path: dist_electron/mac
-          depot2Path: dist_electron/win-unpacked
-          depot3Path: dist_electron/linux-unpacked
-          releaseBranch: public
+          depot1Path: releases/steam/macos
+          depot2Path: releases/steam/microsoft-windows
+          depot3Path: releases/steam/linux
+
+      - name: Promote Demo Build Live (config.vdf)
+        if: steps.steam-auth.outputs.mode == 'config'
+        shell: bash
+        env:
+          STEAM_PARTNER_KEY: ${{ secrets.STEAM_PARTNER_KEY }}
+          STEAM_APPROVER_STEAMID: ${{ secrets.STEAM_APPROVER_STEAMID }}
+          STEAM_BRANCH: public
+        run: |
+          if [ -z "$STEAM_PARTNER_KEY" ]; then
+            echo "STEAM_PARTNER_KEY not set; skipping demo live promotion."
+            exit 0
+          fi
+          build_id="$(grep -o 'BuildID [0-9]\+' client/steampipe/output/app_build_4432220.log | tail -n1 | awk '{print $2}')"
+          test -n "$build_id"
+          cd client
+          node scripts/steam-set-live.mjs demo "$build_id" public
 
       - name: Steam deploy hint (on failure)
         if: failure()

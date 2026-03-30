@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 import path from "node:path";
-import { platforms, clientDir } from "./release-config.mjs";
+import { platforms, clientDir, getPlatformTestOutputDir } from "./release-config.mjs";
 
 const smokeTargets = platforms.filter((platform) => platform.key === "windows" || platform.key === "linux");
 const nodePath = path.join(clientDir, "node_modules");
@@ -87,6 +88,14 @@ async function stopChild(child) {
   }
 }
 
+function writeBackendSmokeReport(platformKey, lines) {
+  const outputDir = getPlatformTestOutputDir(platformKey);
+  fs.mkdirSync(outputDir, { recursive: true });
+  const reportPath = path.join(outputDir, "backend-smoke.txt");
+  fs.writeFileSync(reportPath, `${lines.join("\n")}\n`);
+  return reportPath;
+}
+
 for (const [index, platform] of smokeTargets.entries()) {
   const port = 3911 + index;
   const serverCwd = path.join(platform.stageDir, "resources", "server");
@@ -104,7 +113,14 @@ for (const [index, platform] of smokeTargets.entries()) {
   try {
     await waitForServerReady(child, platform.label, port, 15000);
     await checkHttp(platform.label, port);
+    const reportPath = writeBackendSmokeReport(platform.key, [
+      `platform=${platform.key}`,
+      `cwd=${serverCwd}`,
+      `port=${port}`,
+      "result=passed",
+    ]);
     console.log(`Packaged ${platform.label} backend smoke test passed on port ${port}.`);
+    console.log(`Backend smoke report: ${reportPath}`);
   } finally {
     await stopChild(child);
   }

@@ -3,6 +3,7 @@ const { app, BrowserWindow, ipcMain, dialog, globalShortcut } = electron;
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const net = require('net');
 const { spawn } = require('child_process');
 
 const brokenStdIoErrorCodes = new Set(['EBADF', 'EINVAL', 'ENXIO']);
@@ -60,11 +61,96 @@ function writeMainLog(message) {
 let steamClient;
 let steamworksApi;
 let steamJoinRequestedHandle;
+let activeSteamLobby;
+let activeSteamLobbyId;
+let localtunnelFactory;
+let publicTunnel;
+let publicTunnelUrl;
+let publicTunnelPort;
 let serverProcess;
 let mainWindow;
 const isSmokeTest = process.env.SMOKE_TEST === '1';
+const forceSteamBypassForSmoke = process.env.SMOKE_TEST_FORCE_STEAM_BYPASS === '1';
+const runtimeDebugLogsEnabled =
+  process.env.ENABLE_RUNTIME_DEBUG_LOGS === '1' ||
+  process.env.NODE_ENV !== 'production' ||
+  isSmokeTest;
 const appIconPath = path.join(__dirname, 'icons', 'app-icon.png');
-const appCopyright = 'Copyright © 2026 Cody Harker';
+const appCopyright = 'Copyright © 2026 Thecoadstar';
+const defaultSteamAppId = 4432220;
+
+if (!runtimeDebugLogsEnabled) {
+  console.log = () => {};
+  console.info = () => {};
+  console.debug = () => {};
+}
+
+function parsePositiveIntEnv(name) {
+  const raw = process.env[name];
+  if (!raw) {
+    return null;
+  }
+
+  const parsed = Number.parseInt(String(raw).trim(), 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function parseSteamAppId(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  const parsed = Number.parseInt(String(value).trim(), 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function readSteamAppIdFile(filePath) {
+  try {
+    if (!filePath || !fs.existsSync(filePath)) {
+      return null;
+    }
+
+    return parseSteamAppId(fs.readFileSync(filePath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function resolveSteamAppId() {
+  const envCandidates = [
+    process.env.STEAM_APP_ID,
+    process.env.STEAM_APPID,
+    process.env.SteamAppId,
+    process.env.SteamGameId,
+  ];
+
+  for (const candidate of envCandidates) {
+    const parsed = parseSteamAppId(candidate);
+    if (parsed) {
+      return parsed;
+    }
+  }
+
+  const execDir = path.dirname(process.execPath);
+  const candidatePaths = [
+    path.join(process.cwd(), 'steam_appid.txt'),
+    path.join(__dirname, '..', 'steam_appid.txt'),
+    process.resourcesPath ? path.join(process.resourcesPath, 'steam_appid.txt') : null,
+    path.join(execDir, 'steam_appid.txt'),
+    path.join(execDir, '..', 'steam_appid.txt'),
+    path.join(execDir, '..', '..', 'steam_appid.txt'),
+    path.join(execDir, '..', '..', '..', 'steam_appid.txt'),
+  ];
+
+  for (const candidatePath of candidatePaths) {
+    const parsed = readSteamAppIdFile(candidatePath);
+    if (parsed) {
+      return parsed;
+    }
+  }
+
+  return defaultSteamAppId;
+}
 
 function stopServerProcess() {
   if (!serverProcess) {
@@ -96,6 +182,97 @@ function getBestLanAddress() {
   }
 
   return fallback;
+}
+
+function checkPort(port) {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host: '127.0.0.1', port: Number(port) }, () => {
+      socket.end();
+      resolve(true);
+    });
+
+    socket.on('error', () => resolve(false));
+    socket.setTimeout(750, () => {
+      socket.destroy();
+      resolve(false);
+    });
+  });
+}
+
+async function isServerReachable(port = '3001') {
+  return checkPort(port);
+}
+
+async function waitForServerReady(port = '3001', timeoutMs = 15000, pollMs = 250) {
+  const startedAt = Date.now();
+
+  while ((Date.now() - startedAt) < timeoutMs) {
+    if (await isServerReachable(port)) {
+      return true;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+
+  return false;
+}
+
+function registerCoreIpcHandlers() {
+  const saveFile = path.join(app.getPath('userData'), 'save.json');
+  console.log('[Persistence] Save file path:', saveFile);
+
+  ipcMain.removeHandler('save-data');
+  ipcMain.handle('save-data', async (_, data) => {
+    try {
+      let existing = {};
+      if (fs.existsSync(saveFile)) {
+        try {
+          const current = await fs.promises.readFile(saveFile, 'utf-8');
+          const parsed = JSON.parse(current);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            existing = parsed;
+          }
+        } catch (err) {
+          console.warn('[Persistence] Failed to parse existing save file, replacing with incoming data.', err);
+        }
+      }
+
+      const next = (data && typeof data === 'object' && !Array.isArray(data))
+        ? { ...existing, ...data }
+        : existing;
+
+      await fs.promises.writeFile(saveFile, JSON.stringify(next, null, 2));
+      return { success: true };
+    } catch (err) {
+      console.error('[Persistence] Save Error:', err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.removeHandler('load-data');
+  ipcMain.handle('load-data', async () => {
+    try {
+      if (!fs.existsSync(saveFile)) {
+        return { success: true, data: null };
+      }
+      const data = await fs.promises.readFile(saveFile, 'utf-8');
+      return { success: true, data: JSON.parse(data) };
+    } catch (err) {
+      console.error('[Persistence] Load Error:', err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.removeHandler('network:ensure-public-tunnel');
+  ipcMain.handle('network:ensure-public-tunnel', async (_, data) => {
+    return await ensurePublicTunnel(data?.port || process.env.PORT || '3001');
+  });
+
+  ipcMain.removeHandler('network:close-public-tunnel');
+  ipcMain.handle('network:close-public-tunnel', async () => {
+    closePublicTunnel('renderer requested tunnel close');
+    return { success: true };
+  });
 }
 
 function normalizeEndpointForLobby(rawValue, defaultPort = '3001') {
@@ -134,6 +311,190 @@ function normalizeEndpointForLobby(rawValue, defaultPort = '3001') {
   return null;
 }
 
+function parseSteamLobbyId(rawValue) {
+  if (rawValue === undefined || rawValue === null) {
+    return null;
+  }
+
+  if (typeof rawValue === 'bigint') {
+    return rawValue > 0n ? rawValue : null;
+  }
+
+  const normalized = String(rawValue).trim();
+  if (!normalized) {
+    return null;
+  }
+
+  try {
+    const parsed = BigInt(normalized);
+    return parsed > 0n ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function isLoopbackLobbyHost(hostname) {
+  if (!hostname) {
+    return false;
+  }
+
+  const normalized = String(hostname).trim().toLowerCase();
+  return normalized === 'localhost'
+    || normalized === '127.0.0.1'
+    || normalized === '0.0.0.0'
+    || normalized === '::1'
+    || normalized === '::';
+}
+
+function resolveAdvertisedLobbyEndpoint(rawValue, defaultPort = '3001') {
+  const normalized = normalizeEndpointForLobby(rawValue, defaultPort);
+  const fallback = normalizeEndpointForLobby(
+    `http://${getBestLanAddress()}:${defaultPort}`,
+    defaultPort
+  );
+
+  if (!normalized) {
+    return fallback;
+  }
+
+  try {
+    const parsed = new URL(normalized);
+    if (isLoopbackLobbyHost(parsed.hostname)) {
+      return fallback || normalized;
+    }
+  } catch {
+    return fallback || normalized;
+  }
+
+  return normalized;
+}
+
+function rememberActiveSteamLobby(lobby) {
+  activeSteamLobby = lobby || null;
+  activeSteamLobbyId = lobby?.id?.toString?.() || null;
+  return activeSteamLobbyId;
+}
+
+function leaveActiveSteamLobby(reason = 'unspecified') {
+  if (!activeSteamLobby) {
+    return false;
+  }
+
+  try {
+    activeSteamLobby.leave();
+    console.log(`[Steam] Left active lobby (${activeSteamLobbyId || 'unknown'}) reason=${reason}`);
+  } catch (err) {
+    console.warn('[Steam] Failed to leave active lobby cleanly:', err);
+  } finally {
+    activeSteamLobby = null;
+    activeSteamLobbyId = null;
+  }
+
+  return true;
+}
+
+function loadLocaltunnelFactory() {
+  if (!localtunnelFactory) {
+    localtunnelFactory = require('localtunnel');
+  }
+
+  return localtunnelFactory;
+}
+
+function closePublicTunnel(reason = 'unspecified') {
+  if (!publicTunnel) {
+    return false;
+  }
+
+  const tunnel = publicTunnel;
+  publicTunnel = null;
+  publicTunnelUrl = null;
+  publicTunnelPort = null;
+
+  try {
+    if (typeof tunnel.close === 'function') {
+      tunnel.close();
+    }
+    console.log(`[Network] Closed public tunnel reason=${reason}`);
+  } catch (err) {
+    console.warn('[Network] Failed to close public tunnel cleanly:', err);
+  }
+
+  return true;
+}
+
+async function ensurePublicTunnel(port = '3001') {
+  const requestedPort = String(port || '3001').trim() || '3001';
+  const parsedPort = Number.parseInt(requestedPort, 10);
+
+  if (!Number.isInteger(parsedPort) || parsedPort <= 0) {
+    return { success: false, error: `Invalid local port: ${requestedPort}` };
+  }
+
+  if (publicTunnel && publicTunnelUrl && publicTunnelPort === requestedPort) {
+    return { success: true, endpoint: publicTunnelUrl, reused: true };
+  }
+
+  closePublicTunnel('rotating public tunnel');
+
+  try {
+    const createTunnel = loadLocaltunnelFactory();
+    const tunnel = await createTunnel({
+      port: parsedPort,
+      local_host: '127.0.0.1',
+    });
+    const endpoint = normalizeEndpointForLobby(tunnel?.url, requestedPort);
+
+    if (!endpoint) {
+      if (typeof tunnel?.close === 'function') {
+        tunnel.close();
+      }
+      return { success: false, error: 'Tunnel provider did not return a usable public endpoint.' };
+    }
+
+    publicTunnel = tunnel;
+    publicTunnelUrl = endpoint;
+    publicTunnelPort = requestedPort;
+
+    if (typeof tunnel?.on === 'function') {
+      tunnel.on('close', () => {
+        if (publicTunnel === tunnel) {
+          console.log('[Network] Public tunnel closed by provider.');
+          publicTunnel = null;
+          publicTunnelUrl = null;
+          publicTunnelPort = null;
+        }
+      });
+
+      tunnel.on('error', (err) => {
+        console.error('[Network] Public tunnel error:', err);
+        if (publicTunnel === tunnel) {
+          publicTunnel = null;
+          publicTunnelUrl = null;
+          publicTunnelPort = null;
+        }
+      });
+    }
+
+    console.log('[Network] Public tunnel ready:', endpoint);
+    return { success: true, endpoint, reused: false };
+  } catch (err) {
+    console.error('[Network] Failed to create public tunnel:', err);
+    closePublicTunnel('public tunnel creation failed');
+    return { success: false, error: err?.message || 'Unable to create public tunnel.' };
+  }
+}
+
+const overlayDialogMap = {
+  Friends: 0,
+  Community: 1,
+  Players: 2,
+  Settings: 3,
+  OfficialGameGroup: 4,
+  Stats: 5,
+  Achievements: 6,
+};
+
 function emitSteamJoinLobby(lobbyId) {
   if (!lobbyId) return;
 
@@ -165,8 +526,14 @@ if (process.env.DISABLE_STEAM === '1') {
   console.log('[Steam] Disabled via DISABLE_STEAM=1');
 } else {
   try {
+    const steamAppId = resolveSteamAppId();
     steamworksApi = require('steamworks.js');
-    steamClient = steamworksApi.init(4432220);
+    if (typeof steamworksApi.electronEnableSteamOverlay === 'function') {
+      steamworksApi.electronEnableSteamOverlay();
+      console.log('[Steam] Electron overlay bridge enabled.');
+    }
+    steamClient = steamworksApi.init(steamAppId);
+    console.log(`[Steam] Initialized app ${steamAppId}.`);
   } catch (e) {
     console.error('[Steam] Failed to load or initialize:', e);
   }
@@ -210,7 +577,7 @@ app.setAboutPanelOptions({
   applicationName: 'ConquerorsDominationDemo',
   applicationVersion: app.getVersion(),
   copyright: appCopyright,
-  authors: ['Cody Harker'],
+  authors: ['Thecoadstar'],
 });
 
 function presentWindow(win, reason) {
@@ -268,36 +635,78 @@ function presentWindow(win, reason) {
 }
 
 function getProductionIndexCandidates() {
-  const candidates = [path.join(__dirname, '../dist/index.html')];
+  const candidates = [];
 
   if (app.isPackaged) {
     candidates.push(
-      path.join(process.resourcesPath, 'app.asar', 'dist', 'index.html'),
+      path.join(process.resourcesPath, 'dist', 'index.html'),
       path.join(process.resourcesPath, 'app', 'dist', 'index.html'),
-      path.join(process.resourcesPath, 'dist', 'index.html')
+      path.join(process.resourcesPath, 'app.asar', 'dist', 'index.html')
     );
   }
+
+  candidates.push(path.join(__dirname, '../dist/index.html'));
 
   return [...new Set(candidates)];
 }
 
-function loadProductionRenderer(win) {
-  const candidates = getProductionIndexCandidates();
+function getPreferredProductionDistPath() {
+  const distCandidates = getProductionIndexCandidates()
+    .map((indexPath) => path.dirname(indexPath));
+  return distCandidates.find((candidate) => fs.existsSync(path.join(candidate, 'index.html'))) || null;
+}
+
+function loadProductionRenderer(win, localServerUrl = null) {
+  const candidates = [];
+  if (localServerUrl) {
+    candidates.push({ kind: 'url', value: localServerUrl });
+  }
+  for (const indexPath of getProductionIndexCandidates()) {
+    candidates.push({ kind: 'file', value: indexPath });
+  }
 
   const tryLoadCandidate = (index) => {
     if (index >= candidates.length) {
       writeMainLog('[Electron] Exhausted all production renderer candidates.');
+      console.error('[Electron] Failed to load any production renderer candidate.');
       return;
     }
 
-    const indexPath = candidates[index];
-    const exists = fs.existsSync(indexPath);
-    writeMainLog(`[Electron] Loading Production File candidate ${index + 1}/${candidates.length}: ${indexPath} (exists=${exists})`);
-    console.log('[Electron] Loading Production File:', indexPath);
+    if (win.isDestroyed() || win.webContents.isDestroyed()) {
+      writeMainLog('[Electron] Stopping production renderer fallback because the window is already destroyed.');
+      return;
+    }
 
-    win.loadFile(indexPath).catch(err => {
-      writeMainLog(`[Electron] Failed to load Production file candidate ${indexPath}: ${err?.message || err}`);
-      console.error('[Electron] Failed to load Production file:', err);
+    const candidate = candidates[index];
+
+    if (candidate.kind === 'url') {
+      writeMainLog(`[Electron] Loading production renderer candidate ${index + 1}/${candidates.length}: ${candidate.value}`);
+      console.log('[Electron] Loading Production URL:', candidate.value);
+      win.loadURL(candidate.value).catch((err) => {
+        if (win.isDestroyed() || win.webContents.isDestroyed()) {
+          writeMainLog(`[Electron] Production renderer URL candidate was interrupted after window teardown: ${candidate.value}`);
+          return;
+        }
+        writeMainLog(`[Electron] Production renderer URL candidate failed ${candidate.value}: ${err?.message || err}`);
+        console.warn('[Electron] Production URL candidate failed:', candidate.value, err);
+        tryLoadCandidate(index + 1);
+      });
+      return;
+    }
+
+    const exists = fs.existsSync(candidate.value);
+    writeMainLog(
+      `[Electron] Loading production renderer candidate ${index + 1}/${candidates.length}: ${candidate.value} (exists=${exists})`
+    );
+    console.log('[Electron] Loading Production File:', candidate.value);
+
+    win.loadFile(candidate.value).catch((err) => {
+      if (win.isDestroyed() || win.webContents.isDestroyed()) {
+        writeMainLog(`[Electron] Production renderer file candidate was interrupted after window teardown: ${candidate.value}`);
+        return;
+      }
+      writeMainLog(`[Electron] Production renderer file candidate failed ${candidate.value}: ${err?.message || err}`);
+      console.warn('[Electron] Production file candidate failed:', candidate.value, err);
       tryLoadCandidate(index + 1);
     });
   };
@@ -305,7 +714,7 @@ function loadProductionRenderer(win) {
   tryLoadCandidate(0);
 }
 
-function createWindow() {
+async function createWindow() {
   if (mainWindow && !mainWindow.isDestroyed()) {
     writeMainLog('[Electron] Reusing existing main window.');
     presentWindow(mainWindow, 'reuse');
@@ -313,9 +722,23 @@ function createWindow() {
   }
 
   writeMainLog('[Electron] Creating main window.');
+  registerCoreIpcHandlers();
+  const localServerPort = process.env.PORT || '3001';
+  const contentWidth = parsePositiveIntEnv('ELECTRON_WINDOW_CONTENT_WIDTH');
+  const contentHeight = parsePositiveIntEnv('ELECTRON_WINDOW_CONTENT_HEIGHT');
+
+  ipcMain.removeHandler('local-server-status');
+  ipcMain.handle('local-server-status', async () => {
+    return {
+      ready: await isServerReachable(localServerPort),
+      port: localServerPort,
+    };
+  });
+
   const win = new BrowserWindow({
-    width: 1280,
-    height: 720,
+    width: contentWidth || 1280,
+    height: contentHeight || 720,
+    useContentSize: !!(contentWidth && contentHeight),
     backgroundColor: '#000000', // Black background to match game
     show: process.platform === 'win32', // Avoid hidden-window issues under Wine/compat layers.
     icon: fs.existsSync(appIconPath) ? appIconPath : undefined,
@@ -326,6 +749,10 @@ function createWindow() {
   });
 
   mainWindow = win;
+
+  win.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    writeMainLog(`[Renderer Console][${level}] ${message} (${sourceId}:${line})`);
+  });
 
   // Show window only when content is ready
   win.once('ready-to-show', () => {
@@ -353,7 +780,7 @@ function createWindow() {
         win.destroy();
       }
       app.exit(0);
-    }, 12000);
+    }, 25000);
 
     win.webContents.once('did-finish-load', async () => {
       const smokeCapturePath = process.env.SMOKE_CAPTURE_PATH;
@@ -414,7 +841,7 @@ function createWindow() {
         if (isDev) {
           win.loadURL('http://localhost:5173');
         } else {
-          win.loadFile(path.join(__dirname, '../dist/index.html'));
+          loadProductionRenderer(win, `http://127.0.0.1:${localServerPort}`);
         }
       }
     }
@@ -422,16 +849,6 @@ function createWindow() {
 
   // Check if we are in dev mode
   const isDev = process.env.NODE_ENV === 'development';
-
-  if (isDev) {
-    win.loadURL('http://localhost:5173').catch(err => {
-      writeMainLog(`[Electron] Failed to load Dev URL: ${err?.message || err}`);
-      console.error('[Electron] Failed to load Dev URL:', err);
-    });
-  } else {
-    // Load the first valid production renderer path and fallback when a candidate fails.
-    loadProductionRenderer(win);
-  }
 
   const forceShowTimer = setTimeout(() => {
     if (!win.isDestroyed() && !win.isVisible()) {
@@ -503,11 +920,14 @@ function createWindow() {
   log(`[Electron] Server CWD: ${serverCwd}`);
   log(`[Electron] NODE_ENV: ${process.env.NODE_ENV}`);
 
-  if (fs.existsSync(serverPath)) {
+  if (await isServerReachable(localServerPort)) {
+    log(`[Electron] Reusing existing local backend on port ${localServerPort}.`);
+  } else if (fs.existsSync(serverPath)) {
     // Use Electron's embedded Node runtime so Steam users do not need Node installed.
     const useEmbeddedNode = process.execPath.toLowerCase().includes('electron') || isPackaged;
     const serverCommand = useEmbeddedNode ? process.execPath : 'node';
-    const serverEnv = { ...process.env, PORT: process.env.PORT || '3001', NODE_ENV: 'production' };
+    const serverEnv = { ...process.env, PORT: localServerPort, NODE_ENV: 'production' };
+    const preferredDistPath = isPackaged ? getPreferredProductionDistPath() : path.join(__dirname, '../dist');
     if (useEmbeddedNode) {
       serverEnv.ELECTRON_RUN_AS_NODE = '1';
 
@@ -529,6 +949,11 @@ function createWindow() {
       }
     }
 
+    if (preferredDistPath && fs.existsSync(path.join(preferredDistPath, 'index.html'))) {
+      serverEnv.CLIENT_DIST_DIR = preferredDistPath;
+      log(`[Electron] CLIENT_DIST_DIR: ${serverEnv.CLIENT_DIST_DIR}`);
+    }
+
     log(`[Electron] Launch Command: ${serverCommand} ${serverPath}`);
     serverProcess = spawn(serverCommand, [serverPath], {
       cwd: serverCwd,
@@ -542,6 +967,17 @@ function createWindow() {
 
     serverProcess.on('close', (code) => {
       log(`[Server] Process exited with code ${code}`);
+      if (code === 1) {
+        setTimeout(() => {
+          isServerReachable(process.env.PORT || '3001').then((reachable) => {
+            if (reachable) {
+              log(`[Electron] Detected healthy server on port ${process.env.PORT || '3001'} after child exit; continuing with existing backend.`);
+            }
+          }).catch((err) => {
+            log(`[Electron] Server reachability check failed after child exit: ${err.message}`);
+          });
+        }, 300);
+      }
     });
 
     serverProcess.on('error', (err) => {
@@ -552,8 +988,29 @@ function createWindow() {
     console.warn('[Electron] Local server not found at:', serverPath);
   }
 
+  if (await waitForServerReady(localServerPort, isPackaged ? 25000 : 10000)) {
+    log(`[Electron] Local backend reachable on port ${localServerPort}.`);
+  } else {
+    log(`[Electron] Local backend did not become reachable on port ${localServerPort} before renderer startup.`);
+  }
+
+  if (isDev) {
+    win.loadURL('http://localhost:5173').catch(err => {
+      writeMainLog(`[Electron] Failed to load Dev URL: ${err?.message || err}`);
+      console.error('[Electron] Failed to load Dev URL:', err);
+    });
+  } else {
+    // Prefer the packaged local HTTP origin because it avoids fragile file:// loading
+    // from asar bundles on Windows compatibility layers.
+    loadProductionRenderer(win, `http://127.0.0.1:${localServerPort}`);
+  }
+
   // Log load failures to help diagnose black screens
   win.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) {
+      writeMainLog(`[Electron] Ignoring did-fail-load after window teardown for ${validatedURL}`);
+      return;
+    }
     writeMainLog(`[Electron] did-fail-load ${validatedURL} code=${errorCode} description=${errorDescription}`);
     console.error(`[Electron] Failed to load: ${validatedURL}`);
     console.error(`  Error Code: ${errorCode}`);
@@ -589,11 +1046,21 @@ function createWindow() {
     });
 
     // Handle Overlay
+    ipcMain.removeAllListeners('steam:activate-overlay');
     ipcMain.on('steam:activate-overlay', (_, dialog) => {
-      steamClient.overlay.activate(dialog || 'Friends');
+      const dialogId = overlayDialogMap[dialog] ?? overlayDialogMap.Friends;
+      if (typeof steamClient.overlay.activateDialog === 'function') {
+        steamClient.overlay.activateDialog(dialogId);
+        return;
+      }
+
+      if (typeof steamClient.overlay.activate === 'function') {
+        steamClient.overlay.activate(dialog || 'Friends');
+      }
     });
 
     // Handle Rich Presence
+    ipcMain.removeAllListeners('steam:set-rich-presence');
     ipcMain.on('steam:set-rich-presence', (_, data) => {
       for (const [key, value] of Object.entries(data)) {
         steamClient.localplayer.setRichPresence(key, value);
@@ -601,18 +1068,18 @@ function createWindow() {
     });
 
     // Handle Lobby Creation
+    ipcMain.removeHandler('steam:create-lobby');
     ipcMain.handle('steam:create-lobby', async (_, data) => {
       try {
-        const lobby = await steamClient.matchmaking.createLobby(2, 10);
-        if (lobby) {
-          const localSteamId = steamClient.localplayer.getSteamId().steamId64.toString();
-          const endpointFromRequest = normalizeEndpointForLobby(data?.endpoint, process.env.PORT || '3001');
-          const fallbackEndpoint = normalizeEndpointForLobby(
-            `http://${getBestLanAddress()}:${process.env.PORT || '3001'}`,
-            process.env.PORT || '3001'
-          );
-          const endpoint = endpointFromRequest || fallbackEndpoint;
+        leaveActiveSteamLobby('hosting a new steam lobby');
 
+        const lobby = await steamClient.matchmaking.createLobby(1, 10);
+        if (lobby) {
+          rememberActiveSteamLobby(lobby);
+          const localSteamId = steamClient.localplayer.getSteamId().steamId64.toString();
+          const endpoint = resolveAdvertisedLobbyEndpoint(data?.endpoint, process.env.PORT || '3001');
+
+          lobby.setJoinable(true);
           lobby.setData('ag_room', data.roomId);
           lobby.setData('map', data.map || 'Unknown');
           lobby.setData('mode', data.mode || 'Standard');
@@ -623,7 +1090,7 @@ function createWindow() {
 
           console.log('[Steam] Created Lobby:', lobby.id, 'for Room:', data.roomId);
           console.log('[Steam] Lobby Endpoint:', endpoint || 'none');
-          return { success: true, lobbyId: lobby.id };
+          return { success: true, lobbyId: lobby.id.toString(), endpoint };
         }
         return { success: false };
       } catch (err) {
@@ -633,10 +1100,21 @@ function createWindow() {
     });
 
     // Handle Getting Current Lobby Data
+    ipcMain.removeHandler('steam:get-lobby-data');
     ipcMain.handle('steam:get-lobby-data', async (_, lobbyId) => {
       try {
+        const parsedLobbyId = parseSteamLobbyId(lobbyId);
+        if (!parsedLobbyId) {
+          return { success: false, error: 'Invalid Steam lobby ID.' };
+        }
+
+        if (activeSteamLobbyId && activeSteamLobbyId !== parsedLobbyId.toString()) {
+          leaveActiveSteamLobby('switching to another steam lobby');
+        }
+
         console.log('[Steam] Joining lobby to read data:', lobbyId);
-        const lobby = await steamClient.matchmaking.joinLobby(lobbyId);
+        const lobby = await steamClient.matchmaking.joinLobby(parsedLobbyId);
+        rememberActiveSteamLobby(lobby);
         const roomId = lobby.getData('ag_room');
         const endpoint = lobby.getData('ag_endpoint');
         const hostSteamId = lobby.getData('ag_host_steam_id');
@@ -646,6 +1124,7 @@ function createWindow() {
         console.log('[Steam] Got Lobby Data:', { roomId, endpoint, hostSteamId, map, mode });
         return {
           success: true,
+          lobbyId: lobby.id.toString(),
           roomId,
           endpoint,
           hostSteamId,
@@ -658,7 +1137,47 @@ function createWindow() {
       }
     });
 
+    ipcMain.removeHandler('steam:open-invite-dialog');
+    ipcMain.handle('steam:open-invite-dialog', async (_, lobbyId) => {
+      try {
+        let targetLobby = activeSteamLobby;
+        const parsedLobbyId = parseSteamLobbyId(lobbyId);
+
+        if (!targetLobby || (parsedLobbyId && activeSteamLobbyId !== parsedLobbyId.toString())) {
+          if (!parsedLobbyId) {
+            return { success: false, error: 'No active Steam lobby is available to invite from.' };
+          }
+          targetLobby = await steamClient.matchmaking.joinLobby(parsedLobbyId);
+          rememberActiveSteamLobby(targetLobby);
+        }
+
+        if (!targetLobby) {
+          return { success: false, error: 'No active Steam lobby is available to invite from.' };
+        }
+
+        targetLobby.openInviteDialog();
+        return { success: true };
+      } catch (err) {
+        console.error('[Steam] Open Invite Dialog Error:', err);
+        return { success: false, error: err.message };
+      }
+    });
+
+    ipcMain.removeHandler('steam:leave-lobby');
+    ipcMain.handle('steam:leave-lobby', async (_, lobbyId) => {
+      const requestedLobbyId = parseSteamLobbyId(lobbyId);
+
+      if (requestedLobbyId && activeSteamLobbyId && activeSteamLobbyId !== requestedLobbyId.toString()) {
+        return { success: false, error: 'Requested Steam lobby is not the active lobby.' };
+      }
+
+      leaveActiveSteamLobby('renderer requested lobby leave');
+      closePublicTunnel('renderer requested steam lobby leave');
+      return { success: true };
+    });
+
     // Handle Achievements
+    ipcMain.removeAllListeners('steam:activate-achievement');
     ipcMain.on('steam:activate-achievement', (_, achievementId) => {
       try {
         if (steamClient.achievement.activate(achievementId)) {
@@ -668,39 +1187,78 @@ function createWindow() {
         console.error('[Steam] Failed to activate achievement:', err);
       }
     });
+
+    ipcMain.removeHandler('steam:get-stats');
+    ipcMain.handle('steam:get-stats', async (_, statNames) => {
+      try {
+        if (!steamClient?.stats) {
+          return { success: false, stats: {}, error: 'Steam stats interface unavailable.' };
+        }
+
+        const stats = {};
+        const requested = Array.isArray(statNames) ? statNames : [];
+        for (const name of requested) {
+          if (typeof name !== 'string' || !name.trim()) continue;
+          stats[name] = steamClient.stats.getInt(name);
+        }
+
+        return { success: true, stats };
+      } catch (err) {
+        console.error('[Steam] Failed to read stats:', err);
+        return { success: false, stats: {}, error: err.message };
+      }
+    });
+
+    ipcMain.removeHandler('steam:set-stats');
+    ipcMain.handle('steam:set-stats', async (_, statMap) => {
+      try {
+        if (!steamClient?.stats) {
+          return { success: false, stored: false, rejected: [], error: 'Steam stats interface unavailable.' };
+        }
+
+        const rejected = [];
+        const entries = Object.entries(statMap || {});
+        for (const [name, value] of entries) {
+          if (typeof name !== 'string' || !name.trim()) continue;
+          const normalized = Number(value);
+          if (!Number.isFinite(normalized)) {
+            rejected.push(name);
+            continue;
+          }
+
+          const ok = steamClient.stats.setInt(name, Math.trunc(normalized));
+          if (!ok) {
+            rejected.push(name);
+          }
+        }
+
+        const stored = steamClient.stats.store();
+        return {
+          success: rejected.length === 0 && stored,
+          stored,
+          rejected,
+          error: rejected.length > 0 ? `Steam rejected stat keys: ${rejected.join(', ')}` : (!stored ? 'Steam did not confirm StoreStats.' : undefined)
+        };
+      } catch (err) {
+        console.error('[Steam] Failed to store stats:', err);
+        return { success: false, stored: false, rejected: Object.keys(statMap || {}), error: err.message };
+      }
+    });
   } else {
     console.log('[Steam] Initialization failed or not running.');
     win.webContents.on('did-finish-load', () => {
       win.webContents.send('steam:init-error', 'Steam is not running or AppID is missing.');
+      if (isSmokeTest && forceSteamBypassForSmoke && !win.isDestroyed() && !win.webContents.isDestroyed()) {
+        setTimeout(() => {
+          if (win.isDestroyed() || win.webContents.isDestroyed()) {
+            return;
+          }
+          console.log('[SmokeTest] Auto-bypassing Steam gate for smoke capture.');
+          win.webContents.send('steam:bypass-error');
+        }, 150);
+      }
     });
   }
-
-  // --- Persistence Handlers (Save/Load) ---
-  const SAVE_FILE = path.join(app.getPath('userData'), 'save.json');
-  console.log('[Persistence] Save file path:', SAVE_FILE);
-
-  ipcMain.handle('save-data', async (_, data) => {
-    try {
-      await fs.promises.writeFile(SAVE_FILE, JSON.stringify(data, null, 2));
-      return { success: true };
-    } catch (err) {
-      console.error('[Persistence] Save Error:', err);
-      return { success: false, error: err.message };
-    }
-  });
-
-  ipcMain.handle('load-data', async () => {
-    try {
-      if (!fs.existsSync(SAVE_FILE)) {
-        return { success: true, data: null };
-      }
-      const data = await fs.promises.readFile(SAVE_FILE, 'utf-8');
-      return { success: true, data: JSON.parse(data) };
-    } catch (err) {
-      console.error('[Persistence] Load Error:', err);
-      return { success: false, error: err.message };
-    }
-  });
 
   return win;
 }
@@ -750,6 +1308,8 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  closePublicTunnel('app quitting');
+  leaveActiveSteamLobby('app quitting');
   if (steamJoinRequestedHandle?.disconnect) {
     steamJoinRequestedHandle.disconnect();
     steamJoinRequestedHandle = null;

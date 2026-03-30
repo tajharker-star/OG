@@ -1,11 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
-import { clientDir, installFolder, platforms, releaseRoot } from "./release-config.mjs";
+import { clientDir, getSelectedPlatforms, installFolder, platforms, releaseRoot } from "./release-config.mjs";
 
 const appBuildPath = path.join(clientDir, "steampipe", "app_build_4432220.vdf");
 const appBuild = fs.readFileSync(appBuildPath, "utf8");
 const packageJson = JSON.parse(fs.readFileSync(path.join(clientDir, "package.json"), "utf8"));
 const errors = [];
+const selectedPlatforms = getSelectedPlatforms();
+const depotIdsInAppBuild = [...appBuild.matchAll(/"(\d+)"\s+"depot_build_[^"]+\.vdf"/g)].map((match) => match[1]);
+const expectedDepotIds = platforms.map((platform) => platform.depotId).sort();
 
 function vdfValue(contents, key) {
   const match = contents.match(new RegExp(`"${key}"\\s+"([^"]+)"`));
@@ -15,6 +18,41 @@ function vdfValue(contents, key) {
 function check(condition, message) {
   if (!condition) {
     errors.push(message);
+  }
+}
+
+function verifyBundleSymlinksStayInternal(bundlePath, label) {
+  const pending = [bundlePath];
+
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (!current || !fs.existsSync(current)) {
+      continue;
+    }
+
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const entryPath = path.join(current, entry.name);
+      const stats = fs.lstatSync(entryPath);
+
+      if (stats.isSymbolicLink()) {
+        const linkTarget = fs.readlinkSync(entryPath);
+        check(
+          !path.isAbsolute(linkTarget),
+          `${label} contains absolute symlink ${path.relative(clientDir, entryPath)} -> ${linkTarget}`
+        );
+
+        const resolvedTarget = path.resolve(path.dirname(entryPath), linkTarget);
+        check(
+          resolvedTarget === bundlePath || resolvedTarget.startsWith(`${bundlePath}${path.sep}`),
+          `${label} symlink escapes the app bundle ${path.relative(clientDir, entryPath)} -> ${linkTarget}`
+        );
+        continue;
+      }
+
+      if (stats.isDirectory()) {
+        pending.push(entryPath);
+      }
+    }
   }
 }
 
@@ -39,8 +77,16 @@ check(
   fs.existsSync(path.join(releaseRoot, "platform-manifest.json")),
   `Missing platform manifest at ${path.relative(clientDir, path.join(releaseRoot, "platform-manifest.json"))}`
 );
+check(
+  JSON.stringify([...depotIdsInAppBuild].sort()) === JSON.stringify(expectedDepotIds),
+  `app_build_4432220.vdf should contain only demo platform depots ${expectedDepotIds.join(", ")}, found ${depotIdsInAppBuild.join(", ") || "(none)"}`
+);
+check(
+  !appBuild.includes('"4432221" "depot_build_4432221.vdf"'),
+  "app_build_4432220.vdf must not include the placeholder shared-base depot 4432221"
+);
 
-for (const platform of platforms) {
+for (const platform of selectedPlatforms) {
   const depotBuildPath = path.join(clientDir, "steampipe", `depot_build_${platform.depotId}.vdf`);
   const depotBuild = fs.readFileSync(depotBuildPath, "utf8");
   const localPath = vdfValue(depotBuild, "LocalPath");
@@ -67,6 +113,10 @@ for (const platform of platforms) {
       fs.existsSync(platform.bundlePath),
       `Missing staged ${platform.label} app bundle at ${path.relative(clientDir, platform.bundlePath)}`
     );
+
+    if (fs.existsSync(platform.bundlePath)) {
+      verifyBundleSymlinksStayInternal(platform.bundlePath, platform.label);
+    }
   }
 
   if (platform.requiresExecutableBit && fs.existsSync(platform.binaryPath)) {
@@ -87,6 +137,6 @@ if (errors.length > 0) {
 }
 
 console.log(`Steam layout verified for install folder: ${installFolder}`);
-for (const platform of platforms) {
+for (const platform of selectedPlatforms) {
   console.log(`- ${platform.label}: ${platform.launchExecutable}`);
 }
