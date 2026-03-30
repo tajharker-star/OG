@@ -754,15 +754,18 @@ input[type=range]::-webkit-slider-thumb:hover {
 /* Floating Settings Button */
 .settings-float-btn {
     position: fixed;
-    bottom: 24px;
-    left: 24px;
     background: var(--bg-panel);
     border: 1px solid var(--border-subtle);
-    border-radius: 50%;
+    border-radius: 999px;
     width: 56px;
+    min-width: 56px;
     height: 56px;
+    min-height: 56px;
+    padding: 0;
+    aspect-ratio: 1 / 1;
+    box-sizing: border-box;
     font-size: 24px;
-    cursor: pointer;
+    cursor: grab;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -771,6 +774,8 @@ input[type=range]::-webkit-slider-thumb:hover {
     z-index: 1000;
     transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     backdrop-filter: blur(8px);
+    user-select: none;
+    touch-action: none;
 }
 
 .settings-float-btn:hover {
@@ -778,6 +783,11 @@ input[type=range]::-webkit-slider-thumb:hover {
     background-color: var(--item-bg-hover);
     color: var(--text-primary);
     border-color: var(--text-primary);
+}
+
+.settings-float-btn.dragging {
+    cursor: grabbing;
+    transform: scale(1.04);
 }
 
 .patch-notes-float-btn {

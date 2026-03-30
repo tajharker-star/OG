@@ -159,28 +159,49 @@
 /* Global Chat Toggle Button */
 .chat-global-toggle-btn {
     position: fixed;
-    bottom: 20px;
-    left: 20px;
     z-index: var(--z-hud);
     pointer-events: auto;
     background: var(--bg-modal);
     color: var(--primary-color);
     border: 2px solid var(--border-subtle);
-    border-radius: 50%;
-    width: 50px;
-    height: 50px;
+    border-radius: 999px;
+    width: 56px;
+    min-width: 56px;
+    height: 56px;
+    min-height: 56px;
+    padding: 0;
+    aspect-ratio: 1 / 1;
+    box-sizing: border-box;
     display: flex;
     align-items: center;
     justify-content: center;
-    cursor: pointer;
+    cursor: grab;
     transition: all 0.2s;
     box-shadow: 0 4px 8px rgba(0,0,0,0.6);
+    user-select: none;
+    touch-action: none;
 }
 
 .chat-global-toggle-btn:hover {
     background: var(--btn-neutral-hover);
     transform: scale(1.1);
     border-color: var(--primary-hover);
+}
+
+.chat-global-toggle-btn.dragging {
+    cursor: grabbing;
+    transform: scale(1.04);
+}
+
+.chat-global-toggle-btn__emoji {
+    font-size: 24px;
+    line-height: 1;
+    transform: translateY(-1px);
+    pointer-events: none;
+}
+
+.chat-global-toggle-btn svg {
+    pointer-events: none;
 }
 
 /* Game Over Screen */
@@ -734,7 +755,7 @@
 .game-id-copy-btn {
     background: none;
     border: none;
-    cursor: pointer;
+    cursor: grab;
     font-size: 16px;
     padding: 4px;
     transition: transform 0.2s;
@@ -770,8 +791,6 @@
 /* Build Menu Toggle Button (Standalone) */
 .build-global-toggle-btn {
     position: fixed;
-    top: 60px;
-    left: 20px;
     z-index: 99999;
     pointer-events: auto;
     background:
@@ -781,13 +800,20 @@
     border: 1px solid rgba(255, 205, 110, 0.26);
     border-radius: 50%;
     width: 56px;
+    min-width: 56px;
     height: 56px;
+    min-height: 56px;
+    padding: 0;
+    aspect-ratio: 1 / 1;
+    box-sizing: border-box;
     display: flex;
     align-items: center;
     justify-content: center;
-    cursor: pointer;
+    cursor: grab;
     transition: all 0.2s;
     box-shadow: 0 14px 30px rgba(0, 0, 0, 0.34);
+    user-select: none;
+    touch-action: none;
 }
 
 .build-global-toggle-btn:hover {
@@ -796,6 +822,11 @@
       rgba(10, 8, 10, 0.96);
     transform: translateY(-2px) scale(1.03);
     border-color: rgba(255, 223, 148, 0.4);
+}
+
+.build-global-toggle-btn.dragging {
+    cursor: grabbing;
+    transform: scale(1.04);
 }
 
 .build-menu-container {

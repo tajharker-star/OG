@@ -677,19 +677,41 @@ io.on('connection', (socket) => {
 
     socket.on('addBot', (difficulty: number = 5) => {
         const gs = rooms.get(currentRoom);
-        if (gs && gs.status === 'waiting') {
-            const botCount = Array.from(gs.players.values()).filter(p => p.isBot).length;
-            if (botCount < 10) {
-                const botId = `bot_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
-                // Add bot with provided difficulty
-                gs.addPlayer(botId, true, undefined, difficulty);
+        if (!gs) return;
 
-                io.to(currentRoom).emit('playersData', gs.getPlayersSnapshot(true));
-                gs.checkVotingStart(io, currentRoom);
-            } else {
-                socket.emit('info', { message: 'Bot limit reached (10).' });
-            }
+        const normalizedDifficulty = Math.min(10, Math.max(1, Math.floor(difficulty || 5)));
+        const botCount = Array.from(gs.players.values()).filter(p => p.isBot).length;
+        const canAddDuringSetup = gs.status === 'waiting';
+        const canAddMidMatch = gs.status === 'playing' && currentRoom.startsWith('custom_');
+
+        if (botCount >= 10) {
+            return;
         }
+
+        if (!canAddDuringSetup && !canAddMidMatch) {
+            console.warn(`[Bots] Ignoring addBot in room ${currentRoom} with status ${gs.status}`);
+            return;
+        }
+
+        const botId = `bot_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+        const botPlayer = gs.addPlayer(botId, true, undefined, normalizedDifficulty);
+        if (!botPlayer) {
+            return;
+        }
+
+        botPlayer.difficulty = normalizedDifficulty;
+
+        io.to(currentRoom).emit('playersData', gs.getPlayersSnapshot(true));
+
+        if (canAddMidMatch) {
+            gs.emitVisibleMapData(io, currentRoom);
+            io.to(currentRoom).emit('unitsData', gs.getSimplifiedUnitsSnapshot());
+            io.to(currentRoom).emit('gameStatus', gs.status);
+            console.log(`[Bots] Added bot mid-match to ${currentRoom} at difficulty ${normalizedDifficulty}`);
+            return;
+        }
+
+        gs.checkVotingStart(io, currentRoom);
     });
 
     socket.on('force_start_match', () => {

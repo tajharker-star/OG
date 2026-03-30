@@ -39,6 +39,8 @@ const ChatOverlay: React.FC<{
 }> = ({ messages, onSend, myId, players, visible, onClose, position, onDragStart }) => {
     const [input, setInput] = useState('');
     const [isMinimized, setIsMinimized] = useState(false);
+    const chatWindowRef = useRef<HTMLDivElement>(null);
+    const chatInputRef = useRef<HTMLInputElement>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
@@ -46,6 +48,31 @@ const ChatOverlay: React.FC<{
             messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
         }
     }, [messages, visible, isMinimized]);
+
+    useEffect(() => {
+        if (visible && !isMinimized) {
+            return;
+        }
+
+        chatInputRef.current?.blur();
+    }, [visible, isMinimized]);
+
+    useEffect(() => {
+        const handlePointerDown = (event: PointerEvent) => {
+            if (!visible || isMinimized) return;
+            const chatWindow = chatWindowRef.current;
+            const chatInput = chatInputRef.current;
+            if (!chatWindow || !chatInput) return;
+            if (!(event.target instanceof Node)) return;
+
+            if (!chatWindow.contains(event.target)) {
+                chatInput.blur();
+            }
+        };
+
+        window.addEventListener('pointerdown', handlePointerDown, true);
+        return () => window.removeEventListener('pointerdown', handlePointerDown, true);
+    }, [visible, isMinimized]);
 
     const handleSend = (e: React.FormEvent) => {
         e.preventDefault();
@@ -57,6 +84,7 @@ const ChatOverlay: React.FC<{
 
     return (
         <div
+            ref={chatWindowRef}
             className={`chat-window ${isMinimized ? 'minimized' : ''} ${!visible ? 'hidden' : ''}`}
             style={{ left: position.x, top: position.y, bottom: 'auto', right: 'auto' }}
         >
@@ -72,7 +100,12 @@ const ChatOverlay: React.FC<{
                 <div className="chat-header-controls">
                     <button
                         onMouseDown={(e) => e.stopPropagation()}
-                        onClick={() => setIsMinimized(!isMinimized)}
+                        onClick={() => {
+                            if (!isMinimized) {
+                                chatInputRef.current?.blur();
+                            }
+                            setIsMinimized(!isMinimized);
+                        }}
                         className="stats-control-btn"
                         title={isMinimized ? "Expand" : "Minimize"}
                     >
@@ -80,7 +113,10 @@ const ChatOverlay: React.FC<{
                     </button>
                     <button
                         onMouseDown={(e) => e.stopPropagation()}
-                        onClick={onClose}
+                        onClick={() => {
+                            chatInputRef.current?.blur();
+                            onClose();
+                        }}
                         className="stats-control-btn stats-close-btn"
                         title="Hide Chat Window"
                     >
@@ -110,6 +146,7 @@ const ChatOverlay: React.FC<{
                     </div>
                     <form onSubmit={handleSend} className="chat-input-form">
                         <input
+                            ref={chatInputRef}
                             onMouseDown={(e) => e.stopPropagation()}
                             value={input}
                             onChange={e => setInput(e.target.value)}
@@ -289,6 +326,10 @@ const RecruitButton: React.FC<{
     );
 };
 
+const ChatToggleIcon: React.FC = () => (
+    <span className="chat-global-toggle-btn__emoji" aria-hidden="true">💬</span>
+);
+
 interface GameUIProps {
     onLeave: () => void;
     roomId: string | null;
@@ -313,6 +354,57 @@ const LOBBY_MIN_WARMUP_MS = 1200;
 const LOBBY_MAX_WARMUP_MS = 9000;
 const MATCH_MIN_WARMUP_MS = 1800;
 const MATCH_MAX_WARMUP_MS = 14000;
+const ROUND_GUI_BUTTON_SIZE = 56;
+const ROUND_GUI_BUTTON_ROW_TOP = 60;
+const ROUND_GUI_BUTTON_ROW_LEFT = 20;
+const ROUND_GUI_BUTTON_GAP = 12;
+const ROUND_GUI_BUTTON_STORAGE_KEY = 'ag_round_gui_button_positions_v1';
+
+type RoundGuiButtonKey = 'build' | 'chat';
+
+const getDefaultRoundGuiButtonPositions = () => ({
+    build: { x: ROUND_GUI_BUTTON_ROW_LEFT, y: ROUND_GUI_BUTTON_ROW_TOP },
+    chat: { x: ROUND_GUI_BUTTON_ROW_LEFT + ROUND_GUI_BUTTON_SIZE + ROUND_GUI_BUTTON_GAP, y: ROUND_GUI_BUTTON_ROW_TOP }
+});
+
+const readSavedRoundGuiButtonPositions = () => {
+    const defaults = getDefaultRoundGuiButtonPositions();
+
+    if (typeof window === 'undefined') {
+        return defaults;
+    }
+
+    try {
+        const raw = window.localStorage.getItem(ROUND_GUI_BUTTON_STORAGE_KEY);
+        if (!raw) return defaults;
+
+        const parsed = JSON.parse(raw) as Partial<Record<RoundGuiButtonKey, { x: number; y: number }>>;
+        return {
+            build: {
+                x: Number.isFinite(parsed.build?.x) ? parsed.build!.x : defaults.build.x,
+                y: Number.isFinite(parsed.build?.y) ? parsed.build!.y : defaults.build.y
+            },
+            chat: {
+                x: Number.isFinite(parsed.chat?.x) ? parsed.chat!.x : defaults.chat.x,
+                y: Number.isFinite(parsed.chat?.y) ? parsed.chat!.y : defaults.chat.y
+            }
+        };
+    } catch {
+        return defaults;
+    }
+};
+
+const isKeyboardEditableTarget = (target: EventTarget | null): boolean => {
+    if (!(target instanceof HTMLElement)) {
+        return false;
+    }
+
+    const tagName = target.tagName;
+    return tagName === 'INPUT'
+        || tagName === 'TEXTAREA'
+        || tagName === 'SELECT'
+        || target.isContentEditable;
+};
 
 const getIconForType = (type: string) => {
     switch (type) {
@@ -377,11 +469,20 @@ export const GameUI: React.FC<GameUIProps> = ({
     const [isScannerActive, setIsScannerActive] = useState(false);
     const [isChatVisible, setIsChatVisible] = useState(true);
     const [menuGuideState, setMenuGuideState] = useState<{ guide: ActionGuide; source: 'build' | 'recruit' } | null>(null);
+    const [roundGuiButtonPositions, setRoundGuiButtonPositions] = useState(readSavedRoundGuiButtonPositions);
+    const [draggingRoundGuiButton, setDraggingRoundGuiButton] = useState<RoundGuiButtonKey | null>(null);
 
     // Chat Drag State
     const [chatPos, setChatPos] = useState({ x: 20, y: window.innerHeight - 380 });
     const [isDraggingChat, setIsDraggingChat] = useState(false);
     const chatDragOffset = useRef({ x: 0, y: 0 });
+    const roundGuiButtonDragOffset = useRef({ x: 0, y: 0 });
+    const roundGuiButtonMouseDownOrigin = useRef({ x: 0, y: 0 });
+    const roundGuiButtonMovedRef = useRef(false);
+    const suppressRoundGuiButtonClickRef = useRef<Record<RoundGuiButtonKey, boolean>>({
+        build: false,
+        chat: false
+    });
 
     // Minimap State
     const [allPlayers, setAllPlayers] = useState<Map<string, Player>>(new Map());
@@ -454,6 +555,36 @@ export const GameUI: React.FC<GameUIProps> = ({
     }, [showDebug]);
 
     useEffect(() => {
+        const handleCapturedKeyDown = (event: KeyboardEvent) => {
+            if (event.key === 'Tab' && !isKeyboardEditableTarget(event.target)) {
+                event.preventDefault();
+            }
+        };
+
+        const handleFocusIn = (event: FocusEvent) => {
+            const focusTarget = event.target;
+            if (!(focusTarget instanceof HTMLButtonElement)) {
+                return;
+            }
+
+            // Keep keyboard focus on the battlefield instead of trapping it on HUD buttons.
+            requestAnimationFrame(() => {
+                if (document.activeElement === focusTarget) {
+                    focusTarget.blur();
+                }
+            });
+        };
+
+        window.addEventListener('keydown', handleCapturedKeyDown, { capture: true });
+        window.addEventListener('focusin', handleFocusIn);
+
+        return () => {
+            window.removeEventListener('keydown', handleCapturedKeyDown, { capture: true });
+            window.removeEventListener('focusin', handleFocusIn);
+        };
+    }, []);
+
+    useEffect(() => {
         if (initialGameStatus) {
             setGameStatus(initialGameStatus);
         }
@@ -464,6 +595,36 @@ export const GameUI: React.FC<GameUIProps> = ({
             matchReadySignalSentRef.current = false;
         }
     }, [gameStatus]);
+
+    const botDisplayNameById = React.useMemo(() => {
+        const labels = new Map<string, string>();
+        let botIndex = 1;
+
+        Array.from(allPlayers.values()).forEach((candidate) => {
+            if (!candidate.isBot) return;
+            labels.set(candidate.id, `Bot ${botIndex}`);
+            botIndex += 1;
+        });
+
+        return labels;
+    }, [allPlayers]);
+
+    const getOwnerDisplayName = React.useCallback((owner?: Player | null) => {
+        if (!owner) {
+            return 'Neutral';
+        }
+
+        if (owner.isBot) {
+            return botDisplayNameById.get(owner.id) || owner.name || 'Bot';
+        }
+
+        const trimmedName = owner.name?.trim();
+        if (trimmedName) {
+            return trimmedName;
+        }
+
+        return `Player ${owner.id.slice(0, 4)}`;
+    }, [botDisplayNameById]);
 
     useEffect(() => {
         playerSnapshotRef.current = player;
@@ -487,6 +648,15 @@ export const GameUI: React.FC<GameUIProps> = ({
     }, [selectedUnitIds, selectedBuildingIds, selectedNodeIds]);
 
     const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
+    const clampRoundGuiButtonPosition = React.useCallback((position: { x: number; y: number }) => {
+        const viewportWidth = window.innerWidth;
+        const viewportHeight = window.innerHeight;
+
+        return {
+            x: clamp(position.x, 0, Math.max(0, viewportWidth - ROUND_GUI_BUTTON_SIZE)),
+            y: clamp(position.y, 0, Math.max(0, viewportHeight - ROUND_GUI_BUTTON_SIZE))
+        };
+    }, []);
     const resetDefaults = () => {
         const w = window.innerWidth;
         const h = window.innerHeight;
@@ -498,6 +668,10 @@ export const GameUI: React.FC<GameUIProps> = ({
     useEffect(() => {
         const w = window.innerWidth;
         const h = window.innerHeight;
+        setRoundGuiButtonPositions((current) => ({
+            build: clampRoundGuiButtonPosition(current.build),
+            chat: clampRoundGuiButtonPosition(current.chat)
+        }));
         setMinimapPos(p => ({ x: clamp(p.x, 0, Math.max(0, w - 200)), y: clamp(p.y, 0, Math.max(0, h - 150)) }));
         setChatPos(p => ({ x: clamp(p.x, 0, Math.max(0, w - 300)), y: clamp(p.y, 0, Math.max(0, h - 220)) }));
         setBuildMenuPos(p => ({ x: clamp(p.x, 0, Math.max(0, w - 360)), y: clamp(p.y, 0, Math.max(0, h - 540)) }));
@@ -511,6 +685,10 @@ export const GameUI: React.FC<GameUIProps> = ({
         const onResize = () => {
             const w2 = window.innerWidth;
             const h2 = window.innerHeight;
+            setRoundGuiButtonPositions((current) => ({
+                build: clampRoundGuiButtonPosition(current.build),
+                chat: clampRoundGuiButtonPosition(current.chat)
+            }));
             setMinimapPos(p => ({ x: clamp(p.x, 0, Math.max(0, w2 - 200)), y: clamp(p.y, 0, Math.max(0, h2 - 150)) }));
             setChatPos(p => ({ x: clamp(p.x, 0, Math.max(0, w2 - 300)), y: clamp(p.y, 0, Math.max(0, h2 - 220)) }));
             setBuildMenuPos(p => ({ x: clamp(p.x, 0, Math.max(0, w2 - 360)), y: clamp(p.y, 0, Math.max(0, h2 - 540)) }));
@@ -522,7 +700,7 @@ export const GameUI: React.FC<GameUIProps> = ({
         };
         window.addEventListener('resize', onResize);
         return () => window.removeEventListener('resize', onResize);
-    }, [statsPanelPos]);
+    }, [clampRoundGuiButtonPosition, statsPanelPos]);
     useEffect(() => {
         if (gameStatus !== 'playing') {
             resetDefaults();
@@ -1573,6 +1751,84 @@ export const GameUI: React.FC<GameUIProps> = ({
         };
     }, [isDraggingBuildMenu]);
 
+    const handleRoundGuiButtonMouseDown = (button: RoundGuiButtonKey) => (e: React.MouseEvent<HTMLButtonElement>) => {
+        if (e.button !== 0) return;
+
+        const rect = e.currentTarget.getBoundingClientRect();
+        setDraggingRoundGuiButton(button);
+        roundGuiButtonDragOffset.current = {
+            x: e.clientX - rect.left,
+            y: e.clientY - rect.top
+        };
+        roundGuiButtonMouseDownOrigin.current = {
+            x: e.clientX,
+            y: e.clientY
+        };
+        roundGuiButtonMovedRef.current = false;
+    };
+
+    const handleRoundGuiButtonClick = (button: RoundGuiButtonKey, action: () => void) => (e: React.MouseEvent<HTMLButtonElement>) => {
+        if (suppressRoundGuiButtonClickRef.current[button]) {
+            suppressRoundGuiButtonClickRef.current[button] = false;
+            e.preventDefault();
+            return;
+        }
+
+        action();
+    };
+
+    useEffect(() => {
+        if (!draggingRoundGuiButton) return;
+
+        const handleWindowMouseMove = (e: MouseEvent) => {
+            const distance = Math.hypot(
+                e.clientX - roundGuiButtonMouseDownOrigin.current.x,
+                e.clientY - roundGuiButtonMouseDownOrigin.current.y
+            );
+
+            if (distance > 4) {
+                roundGuiButtonMovedRef.current = true;
+            }
+
+            if (!roundGuiButtonMovedRef.current) {
+                return;
+            }
+
+            const nextPosition = clampRoundGuiButtonPosition({
+                x: e.clientX - roundGuiButtonDragOffset.current.x,
+                y: e.clientY - roundGuiButtonDragOffset.current.y
+            });
+
+            setRoundGuiButtonPositions((current) => ({
+                ...current,
+                [draggingRoundGuiButton]: nextPosition
+            }));
+        };
+
+        const handleWindowMouseUp = () => {
+            if (roundGuiButtonMovedRef.current) {
+                suppressRoundGuiButtonClickRef.current[draggingRoundGuiButton] = true;
+            }
+            setDraggingRoundGuiButton(null);
+        };
+
+        window.addEventListener('mousemove', handleWindowMouseMove);
+        window.addEventListener('mouseup', handleWindowMouseUp);
+
+        return () => {
+            window.removeEventListener('mousemove', handleWindowMouseMove);
+            window.removeEventListener('mouseup', handleWindowMouseUp);
+        };
+    }, [clampRoundGuiButtonPosition, draggingRoundGuiButton]);
+
+    useEffect(() => {
+        try {
+            window.localStorage.setItem(ROUND_GUI_BUTTON_STORAGE_KEY, JSON.stringify(roundGuiButtonPositions));
+        } catch {
+            // Ignore storage failures and keep runtime positions working.
+        }
+    }, [roundGuiButtonPositions]);
+
     const build = (type: string) => {
         // Unified placement mode for all buildings
         const event = new CustomEvent('enter-placement-mode', { detail: { type } });
@@ -2193,13 +2449,13 @@ export const GameUI: React.FC<GameUIProps> = ({
 
                 {/* Chat Toggle Button (Consistent with Game) */}
                 <button
-                    onClick={() => setIsChatVisible(!isChatVisible)}
-                    title={isChatVisible ? "Hide Chat" : "Show Chat"}
-                    className="chat-global-toggle-btn"
+                    onMouseDown={handleRoundGuiButtonMouseDown('chat')}
+                    onClick={handleRoundGuiButtonClick('chat', () => setIsChatVisible(!isChatVisible))}
+                    title={`${isChatVisible ? 'Hide Chat' : 'Show Chat'} • drag to move`}
+                    className={`chat-global-toggle-btn ${draggingRoundGuiButton === 'chat' ? 'dragging' : ''}`}
+                    style={{ left: roundGuiButtonPositions.chat.x, top: roundGuiButtonPositions.chat.y }}
                 >
-                    <svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor">
-                        <path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z" />
-                    </svg>
+                    <ChatToggleIcon />
                 </button>
 
                 {/* Chat Overlay in Lobby */}
@@ -2421,13 +2677,13 @@ export const GameUI: React.FC<GameUIProps> = ({
 
                 {/* Chat Toggle Button (Consistent with Game) */}
                 <button
-                    onClick={() => setIsChatVisible(!isChatVisible)}
-                    title={isChatVisible ? "Hide Chat" : "Show Chat"}
-                    className="chat-global-toggle-btn"
+                    onMouseDown={handleRoundGuiButtonMouseDown('chat')}
+                    onClick={handleRoundGuiButtonClick('chat', () => setIsChatVisible(!isChatVisible))}
+                    title={`${isChatVisible ? 'Hide Chat' : 'Show Chat'} • drag to move`}
+                    className={`chat-global-toggle-btn ${draggingRoundGuiButton === 'chat' ? 'dragging' : ''}`}
+                    style={{ left: roundGuiButtonPositions.chat.x, top: roundGuiButtonPositions.chat.y }}
                 >
-                    <svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor">
-                        <path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z" />
-                    </svg>
+                    <ChatToggleIcon />
                 </button>
 
                 <ChatOverlay
@@ -2561,9 +2817,11 @@ export const GameUI: React.FC<GameUIProps> = ({
                 <>
                     {/* Toggle Button (Always Visible) */}
                     <button
-                        onClick={() => setIsConstructionMinimized(!isConstructionMinimized)}
-                        title={isConstructionMinimized ? "Show Construction" : "Hide Construction"}
-                        className="build-global-toggle-btn"
+                        onMouseDown={handleRoundGuiButtonMouseDown('build')}
+                        onClick={handleRoundGuiButtonClick('build', () => setIsConstructionMinimized(!isConstructionMinimized))}
+                        title={`${isConstructionMinimized ? 'Show Construction' : 'Hide Construction'} • drag to move`}
+                        className={`build-global-toggle-btn ${draggingRoundGuiButton === 'build' ? 'dragging' : ''}`}
+                        style={{ left: roundGuiButtonPositions.build.x, top: roundGuiButtonPositions.build.y }}
                     >
                         <span style={{ fontSize: '24px' }}>🔨</span>
                     </button>
@@ -3012,7 +3270,7 @@ export const GameUI: React.FC<GameUIProps> = ({
                                     <div className="stats-row">
                                         <span className="stats-label">Owner:</span>
                                         <span className="stats-value stats-owner-value">
-                                            {owner ? (owner.name || (owner.id === socket.id ? 'You' : `Player ${owner.id.slice(0, 4)}`)) : 'Neutral'}
+                                            {getOwnerDisplayName(owner)}
                                         </span>
                                     </div>
 
@@ -3104,13 +3362,13 @@ export const GameUI: React.FC<GameUIProps> = ({
 
             {/* Chat Toggle Button */}
             <button
-                onClick={() => setIsChatVisible(!isChatVisible)}
-                title={isChatVisible ? "Hide Chat" : "Show Chat"}
-                className="chat-global-toggle-btn"
+                onMouseDown={handleRoundGuiButtonMouseDown('chat')}
+                onClick={handleRoundGuiButtonClick('chat', () => setIsChatVisible(!isChatVisible))}
+                title={`${isChatVisible ? 'Hide Chat' : 'Show Chat'} • drag to move`}
+                className={`chat-global-toggle-btn ${draggingRoundGuiButton === 'chat' ? 'dragging' : ''}`}
+                style={{ left: roundGuiButtonPositions.chat.x, top: roundGuiButtonPositions.chat.y }}
             >
-                <svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor">
-                    <path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z" />
-                </svg>
+                <ChatToggleIcon />
             </button>
 
             {/* Game Over Screen */}

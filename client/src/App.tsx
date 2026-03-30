@@ -39,6 +39,38 @@ const INTERACTIVE_LOCAL_ENGINE_BOOT_BUDGET_MS = 30000;
 const MAIN_GAME_STEAM_APP_ID = '4432210';
 const MAIN_GAME_STEAM_STORE_URL = `https://store.steampowered.com/app/${MAIN_GAME_STEAM_APP_ID}/`;
 const MAIN_GAME_STEAM_DEEP_LINK = `steam://store/${MAIN_GAME_STEAM_APP_ID}`;
+const SETTINGS_FLOAT_BUTTON_SIZE = 56;
+const SETTINGS_FLOAT_BUTTON_MARGIN = 24;
+const SETTINGS_FLOAT_BUTTON_STORAGE_KEY = 'ag_settings_float_button_position_v1';
+
+const getDefaultSettingsButtonPosition = () => ({
+    x: SETTINGS_FLOAT_BUTTON_MARGIN,
+    y: Math.max(
+        SETTINGS_FLOAT_BUTTON_MARGIN,
+        window.innerHeight - SETTINGS_FLOAT_BUTTON_SIZE - SETTINGS_FLOAT_BUTTON_MARGIN
+    )
+});
+
+const readSavedSettingsButtonPosition = () => {
+    const defaults = getDefaultSettingsButtonPosition();
+
+    if (typeof window === 'undefined') {
+        return defaults;
+    }
+
+    try {
+        const raw = window.localStorage.getItem(SETTINGS_FLOAT_BUTTON_STORAGE_KEY);
+        if (!raw) return defaults;
+
+        const parsed = JSON.parse(raw) as { x?: number; y?: number };
+        return {
+            x: Number.isFinite(parsed.x) ? parsed.x! : defaults.x,
+            y: Number.isFinite(parsed.y) ? parsed.y! : defaults.y
+        };
+    } catch {
+        return defaults;
+    }
+};
 
 const emitBootStatus = (status: string, detail: string) => {
     window.dispatchEvent(new CustomEvent('ag:boot-status', { detail: { status, detail } }));
@@ -336,11 +368,17 @@ function App() {
     const [menuView, setMenuView] = useState<'main' | 'campaign' | 'multiplayer' | 'host_public' | 'statistics'>('main');
     const [showPatchNotes, setShowPatchNotes] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
+    const [settingsButtonPos, setSettingsButtonPos] = useState(readSavedSettingsButtonPosition);
+    const [isDraggingSettingsButton, setIsDraggingSettingsButton] = useState(false);
     const [customConfig, setCustomConfig] = useState({
         mapType: 'islands',
         botCount: 5,
         difficulty: 5
     });
+    const settingsButtonDragOffset = useRef({ x: 0, y: 0 });
+    const settingsButtonMouseDownOrigin = useRef({ x: 0, y: 0 });
+    const settingsButtonMovedRef = useRef(false);
+    const suppressSettingsButtonClickRef = useRef(false);
 
     const clientMatchState = useRef<'LOBBY' | 'STARTING' | 'IN_MATCH'>('LOBBY');
 
@@ -357,6 +395,94 @@ function App() {
     const [isLocalEngineReady, setIsLocalEngineReady] = useState(false);
     const [isLocalEngineBooting, setIsLocalEngineBooting] = useState(true);
     const [localEngineBootError, setLocalEngineBootError] = useState<string | null>(null);
+
+    const clampSettingsButtonPosition = (position: { x: number; y: number }) => ({
+        x: Math.max(0, Math.min(position.x, window.innerWidth - SETTINGS_FLOAT_BUTTON_SIZE)),
+        y: Math.max(0, Math.min(position.y, window.innerHeight - SETTINGS_FLOAT_BUTTON_SIZE))
+    });
+
+    useEffect(() => {
+        const handleResize = () => {
+            setSettingsButtonPos((current) => clampSettingsButtonPosition(current));
+        };
+
+        window.addEventListener('resize', handleResize);
+        handleResize();
+
+        return () => window.removeEventListener('resize', handleResize);
+    }, []);
+
+    const handleSettingsButtonMouseDown = (e: React.MouseEvent<HTMLButtonElement>) => {
+        if (e.button !== 0) return;
+
+        const rect = e.currentTarget.getBoundingClientRect();
+        setIsDraggingSettingsButton(true);
+        settingsButtonDragOffset.current = {
+            x: e.clientX - rect.left,
+            y: e.clientY - rect.top
+        };
+        settingsButtonMouseDownOrigin.current = {
+            x: e.clientX,
+            y: e.clientY
+        };
+        settingsButtonMovedRef.current = false;
+    };
+
+    const handleSettingsButtonClick = () => {
+        if (suppressSettingsButtonClickRef.current) {
+            suppressSettingsButtonClickRef.current = false;
+            return;
+        }
+
+        setShowSettings(true);
+    };
+
+    useEffect(() => {
+        if (!isDraggingSettingsButton) return;
+
+        const handleMouseMove = (e: MouseEvent) => {
+            const distance = Math.hypot(
+                e.clientX - settingsButtonMouseDownOrigin.current.x,
+                e.clientY - settingsButtonMouseDownOrigin.current.y
+            );
+
+            if (distance > 4) {
+                settingsButtonMovedRef.current = true;
+            }
+
+            if (!settingsButtonMovedRef.current) {
+                return;
+            }
+
+            setSettingsButtonPos(clampSettingsButtonPosition({
+                x: e.clientX - settingsButtonDragOffset.current.x,
+                y: e.clientY - settingsButtonDragOffset.current.y
+            }));
+        };
+
+        const handleMouseUp = () => {
+            if (settingsButtonMovedRef.current) {
+                suppressSettingsButtonClickRef.current = true;
+            }
+            setIsDraggingSettingsButton(false);
+        };
+
+        window.addEventListener('mousemove', handleMouseMove);
+        window.addEventListener('mouseup', handleMouseUp);
+
+        return () => {
+            window.removeEventListener('mousemove', handleMouseMove);
+            window.removeEventListener('mouseup', handleMouseUp);
+        };
+    }, [isDraggingSettingsButton]);
+
+    useEffect(() => {
+        try {
+            window.localStorage.setItem(SETTINGS_FLOAT_BUTTON_STORAGE_KEY, JSON.stringify(settingsButtonPos));
+        } catch {
+            // Keep the runtime position even if persistence is unavailable.
+        }
+    }, [settingsButtonPos]);
 
     const waitForLocalServerReachability = async (maxWaitMs: number): Promise<boolean> => {
         const localEngineUrl = normalizeNetworkEndpoint(localEngineUrlRef.current);
@@ -1845,9 +1971,11 @@ function App() {
             {isUIVisible && (
                 <>
                     <button
-                        onClick={() => setShowSettings(true)}
-                        className="settings-float-btn"
-                        title="Settings"
+                        onMouseDown={handleSettingsButtonMouseDown}
+                        onClick={handleSettingsButtonClick}
+                        className={`settings-float-btn ${isDraggingSettingsButton ? 'dragging' : ''}`}
+                        title="Settings • drag to move"
+                        style={{ left: settingsButtonPos.x, top: settingsButtonPos.y }}
                     >
                         ⚙️
                     </button>

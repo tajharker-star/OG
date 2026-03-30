@@ -273,6 +273,51 @@ button:hover,
   -webkit-backdrop-filter: blur(18px);
 }
 
+.stats-panel {
+  background:
+    linear-gradient(180deg, rgba(255, 205, 108, 0.08), rgba(122, 42, 10, 0.08)),
+    rgba(3, 5, 8, 0.985);
+  border-color: rgba(255, 203, 110, 0.28);
+  box-shadow:
+    0 24px 54px rgba(0, 0, 0, 0.5),
+    inset 0 1px 0 rgba(255, 244, 214, 0.04);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+.stats-header-inner,
+.stats-grid,
+.stats-status,
+.stats-note {
+  background:
+    linear-gradient(180deg, rgba(255, 209, 118, 0.04), rgba(110, 38, 9, 0.05)),
+    rgba(6, 9, 14, 0.8);
+  border: 1px solid rgba(255, 214, 136, 0.08);
+  border-radius: var(--radius-md);
+}
+
+.stats-header-inner {
+  padding: 12px;
+}
+
+.stats-status,
+.stats-note {
+  padding: 8px 10px;
+}
+
+.stats-label,
+.stats-subtitle,
+.stats-note {
+  color: rgba(232, 221, 196, 0.84);
+}
+
+.stats-value,
+.stats-grid-value,
+.stats-detail-value,
+.stats-status-value {
+  color: rgba(248, 244, 233, 0.98);
+}
+
 .build-category-btn,
 .build-item-btn,
 .build-category-hero,
