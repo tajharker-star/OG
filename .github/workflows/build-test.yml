@@ -322,13 +322,17 @@ jobs:
           sudo grep -q "Successfully finished AppID 4432220 build" BuildOutput/app_build_4432220.log
 
       - name: Promote Demo Build Live (TOTP)
-        if: steps.steam-auth.outputs.mode == 'totp' && steps['verify-steam-deploy-demo-totp'].outcome == 'success' && secrets.STEAM_PARTNER_KEY != ''
+        if: steps.steam-auth.outputs.mode == 'totp' && steps['verify-steam-deploy-demo-totp'].outcome == 'success'
         shell: bash
         env:
           STEAM_PARTNER_KEY: ${{ secrets.STEAM_PARTNER_KEY }}
           STEAM_APPROVER_STEAMID: ${{ secrets.STEAM_APPROVER_STEAMID }}
           STEAM_BRANCH: public
         run: |
+          if [ -z "$STEAM_PARTNER_KEY" ]; then
+            echo "STEAM_PARTNER_KEY not set; skipping demo live promotion."
+            exit 0
+          fi
           build_id="$(sudo grep -o 'BuildID [0-9]\+' BuildOutput/app_build_4432220.log | tail -n1 | awk '{print $2}')"
           test -n "$build_id"
           cd client
@@ -400,13 +404,17 @@ jobs:
           sudo grep -q "Successfully finished AppID 4432220 build" BuildOutput/app_build_4432220.log
 
       - name: Promote Demo Build Live (config.vdf)
-        if: steps.steam-auth.outputs.mode == 'config' && steps['verify-steam-deploy-demo-config'].outcome == 'success' && secrets.STEAM_PARTNER_KEY != ''
+        if: steps.steam-auth.outputs.mode == 'config' && steps['verify-steam-deploy-demo-config'].outcome == 'success'
         shell: bash
         env:
           STEAM_PARTNER_KEY: ${{ secrets.STEAM_PARTNER_KEY }}
           STEAM_APPROVER_STEAMID: ${{ secrets.STEAM_APPROVER_STEAMID }}
           STEAM_BRANCH: public
         run: |
+          if [ -z "$STEAM_PARTNER_KEY" ]; then
+            echo "STEAM_PARTNER_KEY not set; skipping demo live promotion."
+            exit 0
+          fi
           build_id="$(sudo grep -o 'BuildID [0-9]\+' BuildOutput/app_build_4432220.log | tail -n1 | awk '{print $2}')"
           test -n "$build_id"
           cd client
