@@ -345,7 +345,7 @@ jobs:
         if: steps.steam-auth.outputs.mode == 'totp'
         shell: bash
         run: |
-          rm -rf BuildOutput client/BuildOutput
+          sudo rm -rf BuildOutput client/BuildOutput
 
       - name: Steam Deploy Main (TOTP)
         if: steps.steam-auth.outputs.mode == 'totp'
@@ -414,7 +414,7 @@ jobs:
         if: steps.steam-auth.outputs.mode == 'config'
         shell: bash
         run: |
-          rm -rf BuildOutput client/BuildOutput
+          sudo rm -rf BuildOutput client/BuildOutput
 
       - name: Steam Deploy Main (config.vdf)
         if: steps.steam-auth.outputs.mode == 'config'
