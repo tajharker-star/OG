@@ -198,7 +198,7 @@ jobs:
   deploy-steam:
     needs: build
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     steps:
       - uses: actions/checkout@v4
 
@@ -334,6 +334,38 @@ jobs:
           cd client
           node scripts/steam-set-live.mjs demo "$build_id" public
 
+      - name: Steam Deploy Main (TOTP)
+        if: steps.steam-auth.outputs.mode == 'totp'
+        uses: game-ci/steam-deploy@v3
+        with:
+          username: ${{ secrets.STEAM_USERNAME }}
+          password: ${{ secrets.STEAM_PASSWORD }}
+          totp: ${{ steps.steam-totp.outputs.code }}
+          appId: 4432210
+          firstDepotIdOverride: 4432211
+          buildDescription: "v${{ github.run_number }}"
+          rootPath: client
+          depot1Path: releases/steam/microsoft-windows
+          depot2Path: releases/steam/macos
+          depot3Path: releases/steam/linux
+
+      - name: Promote Main Build Live (TOTP)
+        if: steps.steam-auth.outputs.mode == 'totp'
+        shell: bash
+        env:
+          STEAM_PARTNER_KEY: ${{ secrets.STEAM_PARTNER_KEY }}
+          STEAM_APPROVER_STEAMID: ${{ secrets.STEAM_APPROVER_STEAMID }}
+          STEAM_BRANCH: public
+        run: |
+          if [ -z "$STEAM_PARTNER_KEY" ]; then
+            echo "STEAM_PARTNER_KEY not set; skipping main live promotion."
+            exit 0
+          fi
+          build_id="$(grep -o 'BuildID [0-9]\+' client/steampipe/output/app_build_4432210.log | tail -n1 | awk '{print $2}')"
+          test -n "$build_id"
+          cd client
+          node scripts/steam-set-live.mjs main "$build_id" public
+
       - name: Steam Deploy (config.vdf)
         if: steps.steam-auth.outputs.mode == 'config'
         uses: game-ci/steam-deploy@v3
@@ -364,6 +396,37 @@ jobs:
           test -n "$build_id"
           cd client
           node scripts/steam-set-live.mjs demo "$build_id" public
+
+      - name: Steam Deploy Main (config.vdf)
+        if: steps.steam-auth.outputs.mode == 'config'
+        uses: game-ci/steam-deploy@v3
+        with:
+          username: ${{ secrets.STEAM_USERNAME }}
+          configVdf: ${{ secrets.STEAM_CONFIG_VDF }}
+          appId: 4432210
+          firstDepotIdOverride: 4432211
+          buildDescription: "v${{ github.run_number }}"
+          rootPath: client
+          depot1Path: releases/steam/microsoft-windows
+          depot2Path: releases/steam/macos
+          depot3Path: releases/steam/linux
+
+      - name: Promote Main Build Live (config.vdf)
+        if: steps.steam-auth.outputs.mode == 'config'
+        shell: bash
+        env:
+          STEAM_PARTNER_KEY: ${{ secrets.STEAM_PARTNER_KEY }}
+          STEAM_APPROVER_STEAMID: ${{ secrets.STEAM_APPROVER_STEAMID }}
+          STEAM_BRANCH: public
+        run: |
+          if [ -z "$STEAM_PARTNER_KEY" ]; then
+            echo "STEAM_PARTNER_KEY not set; skipping main live promotion."
+            exit 0
+          fi
+          build_id="$(grep -o 'BuildID [0-9]\+' client/steampipe/output/app_build_4432210.log | tail -n1 | awk '{print $2}')"
+          test -n "$build_id"
+          cd client
+          node scripts/steam-set-live.mjs main "$build_id" public
 
       - name: Steam deploy hint (on failure)
         if: failure()
