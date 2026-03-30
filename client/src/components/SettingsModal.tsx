@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { settingsManager } from '../game/SettingsManager';
+import { SFX_EFFECT_DEFINITIONS, SFX_GROUP_DEFINITIONS } from '../audio/sfxCatalog';
+import { soundEffectsManager } from '../audio/soundEffects';
 import { Modal } from './Modal';
 import type { Settings, Keybinds } from '../game/SettingsManager';
 import type { GameMap } from '../types/game';
@@ -9,6 +11,11 @@ interface SettingsModalProps {
     onClose: () => void;
     mapData?: GameMap | null;
 }
+
+const SFX_EFFECT_GROUPS = SFX_GROUP_DEFINITIONS.map(group => ({
+    ...group,
+    effects: SFX_EFFECT_DEFINITIONS.filter(effect => effect.group === group.id),
+}));
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose, mapData }) => {
     const [settings, setSettings] = useState<Settings>(settingsManager.getSettings());
@@ -77,7 +84,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose, mapData }
             {/* Content */}
             <div className="settings-content">
                     {activeTab === 'controls' && (
-                        <div>
+                        <div className="settings-tab-panel settings-tab-panel--controls">
                             {rebindAction && (
                                 <div className="rebind-overlay">
                                     <h3>Press any key to bind "{formatKeyName(rebindAction)}"</h3>
@@ -108,111 +115,172 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose, mapData }
                     )}
 
                     {activeTab === 'audio' && (
-                        <div className="settings-section">
-                            <VolumeSlider 
-                                label="Master Volume" 
-                                value={settings.audio.masterVolume} 
-                                onChange={(v) => settingsManager.setAudio('masterVolume', v)} 
-                            />
-                            <VolumeSlider 
-                                label="Music Volume" 
-                                value={settings.audio.musicVolume} 
-                                onChange={(v) => settingsManager.setAudio('musicVolume', v)} 
-                            />
-                            <VolumeSlider 
-                                label="SFX Volume" 
-                                value={settings.audio.sfxVolume} 
-                                onChange={(v) => settingsManager.setAudio('sfxVolume', v)} 
-                            />
+                        <div className="settings-section settings-section--audio">
+                            <div className="settings-section settings-section--cards">
+                                <VolumeSlider 
+                                    label="Master Volume" 
+                                    value={settings.audio.masterVolume} 
+                                    onChange={(v) => settingsManager.setAudio('masterVolume', v)} 
+                                    onCommit={() => soundEffectsManager.playSfxPreview()}
+                                />
+                                <VolumeSlider 
+                                    label="Music Volume" 
+                                    value={settings.audio.musicVolume} 
+                                    onChange={(v) => settingsManager.setAudio('musicVolume', v)} 
+                                />
+                                <VolumeSlider 
+                                    label="SFX Volume" 
+                                    value={settings.audio.sfxVolume} 
+                                    onChange={(v) => settingsManager.setAudio('sfxVolume', v)} 
+                                    onCommit={() => soundEffectsManager.playSfxPreview()}
+                                />
+                            </div>
+
+                            <details className="settings-sfx-dropdown">
+                                <summary className="settings-sfx-dropdown__summary">
+                                    <div className="settings-sfx-dropdown__summary-text">
+                                        <span className="settings-sfx-dropdown__title">Advanced SFX Mixer</span>
+                                        <span className="settings-sfx-dropdown__meta">{SFX_EFFECT_DEFINITIONS.length} individual sound controls</span>
+                                    </div>
+                                    <span className="settings-sfx-dropdown__chevron" aria-hidden="true">▾</span>
+                                </summary>
+
+                                <div className="settings-sfx-groups">
+                                    {SFX_EFFECT_GROUPS.map(group => (
+                                        <section key={group.id} className="settings-sfx-group-card">
+                                            <div className="settings-sfx-group-card__header">
+                                                <h4 className="settings-sfx-group-card__title">{group.label}</h4>
+                                                <span className="settings-sfx-group-card__count">{group.effects.length} sounds</span>
+                                            </div>
+
+                                            <div className="settings-sfx-rows">
+                                                {group.effects.map(effect => (
+                                                    <EffectVolumeRow
+                                                        key={effect.id}
+                                                        label={effect.label}
+                                                        value={settings.audio.sfxEffectLevels[effect.id]}
+                                                        onChange={(value) => settingsManager.setSfxEffectLevel(effect.id, value)}
+                                                        onPreview={() => soundEffectsManager.playSfxPreview(effect.id)}
+                                                    />
+                                                ))}
+                                            </div>
+                                        </section>
+                                    ))}
+                                </div>
+                            </details>
                         </div>
                     )}
 
                     {activeTab === 'graphics' && (
-                        <div className="settings-section">
-                            <Checkbox 
-                                label="Show FPS" 
-                                checked={settings.graphics.showFps} 
-                                onChange={(v) => settingsManager.setGraphics('showFps', v)} 
-                            />
-                            <Checkbox 
-                                label="High Quality" 
-                                checked={settings.graphics.highQuality} 
-                                onChange={(v) => settingsManager.setGraphics('highQuality', v)} 
-                            />
-                            <Checkbox 
-                                label="Show Particles" 
-                                checked={settings.graphics.showParticles} 
-                                onChange={(v) => settingsManager.setGraphics('showParticles', v)} 
-                            />
-                            <Checkbox 
-                                label="Show Weather (Rain/Tumbleweeds)" 
-                                checked={settings.graphics.showWeather} 
-                                onChange={(v) => settingsManager.setGraphics('showWeather', v)} 
-                            />
-                            
-                            <div className="settings-sub-section">
-                                <div className="slider-header">
-                                    <span>Target FPS</span>
-                                    <span>{settings.graphics.targetFps || 60}</span>
-                                </div>
-                                <input 
-                                    type="range" min="30" max="144" step="15" 
-                                    value={settings.graphics.targetFps || 60} 
-                                    onChange={(e) => settingsManager.setGraphics('targetFps', parseInt(e.target.value))}
-                                    className="settings-range"
+                        <div className="settings-section settings-section--two-column">
+                            <div className="settings-panel-card settings-panel-card--stack">
+                                <h4 className="settings-panel-card__title">Visual Toggles</h4>
+                                <Checkbox 
+                                    label="Show FPS" 
+                                    checked={settings.graphics.showFps} 
+                                    onChange={(v) => settingsManager.setGraphics('showFps', v)} 
+                                />
+                                <Checkbox 
+                                    label="High Quality" 
+                                    checked={settings.graphics.highQuality} 
+                                    onChange={(v) => settingsManager.setGraphics('highQuality', v)} 
+                                />
+                                <Checkbox 
+                                    label="Show Particles" 
+                                    checked={settings.graphics.showParticles} 
+                                    onChange={(v) => settingsManager.setGraphics('showParticles', v)} 
+                                />
+                                <Checkbox 
+                                    label="Show Weather (Rain/Tumbleweeds)" 
+                                    checked={settings.graphics.showWeather} 
+                                    onChange={(v) => settingsManager.setGraphics('showWeather', v)} 
                                 />
                             </div>
 
-                            <div className="settings-sub-section">
-                                <div className="slider-header">
-                                    <span>Menu Projectile Count</span>
-                                    <span>{Math.round(Math.max(0, Math.min(10000, settings.graphics.menuProjectileMultiplierPercent ?? 100)))}%</span>
-                                </div>
-                                <input 
-                                    type="range" min="0" max="10000" step="10" 
-                                    value={Math.max(0, Math.min(10000, settings.graphics.menuProjectileMultiplierPercent ?? 100))} 
-                                    onChange={(e) => settingsManager.setGraphics('menuProjectileMultiplierPercent', Math.max(0, Math.min(10000, parseInt(e.target.value))))}
-                                    className="settings-range"
-                                />
-                                {((settings.graphics.menuProjectileMultiplierPercent ?? 100) > 2000) && (
-                                    <div className="settings-warning-text">
-                                        May impact performance at very high values.
-                                    </div>
-                                )}
-                            </div>
-
-                            <div className="settings-sub-section">
-                                <div className="slider-header">
-                                    <span>Screen Shake Intensity</span>
-                                    <span>{Math.round((settings.graphics.screenShakeIntensity ?? 1.0) * 100)}%</span>
-                                </div>
-                                <input 
-                                    type="range" min="0" max="2" step="0.1" 
-                                    value={settings.graphics.screenShakeIntensity ?? 1.0} 
-                                    onChange={(e) => settingsManager.setGraphics('screenShakeIntensity', parseFloat(e.target.value))}
-                                    className="settings-range"
-                                />
-                            </div>
-
-                            {settings.graphics.showParticles && (
-                                <div className="settings-sub-section-indented">
+                            <div className="settings-panel-card settings-panel-card--stack">
+                                <h4 className="settings-panel-card__title">Performance & Camera</h4>
+                                <div className="settings-sub-section">
                                     <div className="slider-header">
-                                        <span>Max Particles</span>
-                                        <span>{settings.graphics.maxParticles}</span>
+                                        <span>Target FPS</span>
+                                        <span>{settings.graphics.targetFps || 60}</span>
                                     </div>
                                     <input 
-                                        type="range" min="0" max="2000" step="50" 
-                                        value={settings.graphics.maxParticles} 
-                                        onChange={(e) => settingsManager.setGraphics('maxParticles', parseInt(e.target.value))}
+                                        type="range" min="30" max="144" step="15" 
+                                        value={settings.graphics.targetFps || 60} 
+                                        onChange={(e) => settingsManager.setGraphics('targetFps', parseInt(e.target.value))}
                                         className="settings-range"
                                     />
                                 </div>
-                            )}
+
+                                <div className="settings-sub-section">
+                                    <div className="slider-header">
+                                        <span>Main Menu Bullets</span>
+                                        <span>{Math.round(Math.max(0, Math.min(10000, settings.graphics.menuProjectileMultiplierPercent ?? 100)))}%</span>
+                                    </div>
+                                    <input 
+                                        type="range" min="0" max="10000" step="10" 
+                                        value={Math.max(0, Math.min(10000, settings.graphics.menuProjectileMultiplierPercent ?? 100))} 
+                                        onChange={(e) => settingsManager.setGraphics('menuProjectileMultiplierPercent', Math.max(0, Math.min(10000, parseInt(e.target.value))))}
+                                        className="settings-range"
+                                    />
+                                    {((settings.graphics.menuProjectileMultiplierPercent ?? 100) > 2000) && (
+                                        <div className="settings-warning-text">
+                                            May impact performance at very high values.
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div className="settings-sub-section">
+                                    <div className="slider-header">
+                                        <span>Main Menu Explosions</span>
+                                        <span>{Math.round(Math.max(0, Math.min(200, (settings.graphics.menuExplosionDensity ?? 1) * 100)))}%</span>
+                                    </div>
+                                    <input
+                                        type="range" min="0" max="2" step="0.05"
+                                        value={Math.max(0, Math.min(2, settings.graphics.menuExplosionDensity ?? 1))}
+                                        onChange={(e) => settingsManager.setGraphics('menuExplosionDensity', Math.max(0, Math.min(2, parseFloat(e.target.value))))}
+                                        className="settings-range"
+                                    />
+                                    {((settings.graphics.menuExplosionDensity ?? 1) <= 0.01) && (
+                                        <div className="settings-warning-text">
+                                            Main menu explosion visuals are disabled.
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div className="settings-sub-section">
+                                    <div className="slider-header">
+                                        <span>Screen Shake Intensity</span>
+                                        <span>{Math.round((settings.graphics.screenShakeIntensity ?? 1.0) * 100)}%</span>
+                                    </div>
+                                    <input 
+                                        type="range" min="0" max="2" step="0.1" 
+                                        value={settings.graphics.screenShakeIntensity ?? 1.0} 
+                                        onChange={(e) => settingsManager.setGraphics('screenShakeIntensity', parseFloat(e.target.value))}
+                                        className="settings-range"
+                                    />
+                                </div>
+
+                                {settings.graphics.showParticles && (
+                                    <div className="settings-sub-section-indented">
+                                        <div className="slider-header">
+                                            <span>Max Particles</span>
+                                            <span>{settings.graphics.maxParticles}</span>
+                                        </div>
+                                        <input 
+                                            type="range" min="0" max="2000" step="50" 
+                                            value={settings.graphics.maxParticles} 
+                                            onChange={(e) => settingsManager.setGraphics('maxParticles', parseInt(e.target.value))}
+                                            className="settings-range"
+                                        />
+                                    </div>
+                                )}
+                            </div>
                         </div>
                     )}
 
                     {activeTab === 'server' && (
-                        <div className="settings-section">
+                        <div className="settings-section settings-section--cards">
                             <div className="info-box">
                                 <h4>Map Information</h4>
                                 <div className="info-grid">
@@ -242,7 +310,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose, mapData }
 };
 
 // Helper Components
-const VolumeSlider = ({ label, value, onChange }: { label: string, value: number, onChange: (v: number) => void }) => (
+const VolumeSlider = ({
+    label,
+    value,
+    onChange,
+    onCommit
+}: {
+    label: string;
+    value: number;
+    onChange: (v: number) => void;
+    onCommit?: () => void;
+}) => (
     <div className="slider-container">
         <div className="slider-header">
             <span>{label}</span>
@@ -252,6 +330,48 @@ const VolumeSlider = ({ label, value, onChange }: { label: string, value: number
             type="range" min="0" max="1" step="0.05" 
             value={value} 
             onChange={(e) => onChange(parseFloat(e.target.value))}
+            onPointerUp={onCommit}
+            onKeyUp={onCommit}
+            className="settings-range"
+        />
+    </div>
+);
+
+const EffectVolumeRow = ({
+    label,
+    value,
+    onChange,
+    onPreview
+}: {
+    label: string;
+    value: number;
+    onChange: (value: number) => void;
+    onPreview: () => void;
+}) => (
+    <div className="settings-sfx-row">
+        <div className="settings-sfx-row__header">
+            <span className="settings-sfx-row__label">{label}</span>
+            <div className="settings-sfx-row__tools">
+                <span className="settings-sfx-row__value">{Math.round(value * 100)}%</span>
+                <button
+                    type="button"
+                    className="settings-sfx-preview-btn"
+                    onClick={onPreview}
+                    data-sfx="off"
+                >
+                    Preview
+                </button>
+            </div>
+        </div>
+        <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.05"
+            value={value}
+            onChange={(e) => onChange(parseFloat(e.target.value))}
+            onPointerUp={onPreview}
+            onKeyUp={onPreview}
             className="settings-range"
         />
     </div>

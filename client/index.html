@@ -2,12 +2,367 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <link rel="icon" type="image/png" href="/app-icon.png" />
+    <meta name="author" content="Thecoadstar" />
+    <meta name="copyright" content="Copyright © 2026 Thecoadstar" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <title>Conquerors: Dominion</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background:
+          radial-gradient(circle at top, rgba(25, 40, 70, 0.65), transparent 40%),
+          linear-gradient(180deg, #0a0f1a 0%, #050608 100%);
+        color: #f3f5f7;
+        font-family: Avenir, Helvetica, Arial, sans-serif;
+      }
+
+      #root {
+        width: 100%;
+        height: 100%;
+      }
+
+      #boot-splash {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background:
+          radial-gradient(circle at top, rgba(25, 40, 70, 0.75), transparent 42%),
+          linear-gradient(180deg, rgba(6, 8, 14, 0.96) 0%, rgba(4, 5, 7, 0.98) 100%);
+        z-index: 2147483647;
+        transition: opacity 220ms ease;
+      }
+
+      #boot-splash.hidden {
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      .boot-card {
+        position: relative;
+        width: min(520px, calc(100vw - 48px));
+        padding: 32px 28px 26px;
+        border-radius: 18px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        background:
+          radial-gradient(circle at top, rgba(74, 121, 201, 0.22), transparent 42%),
+          rgba(7, 10, 16, 0.9);
+        box-shadow: 0 18px 60px rgba(0, 0, 0, 0.45);
+        overflow: hidden;
+        text-align: left;
+      }
+
+      .boot-hero {
+        position: relative;
+        height: 180px;
+        margin: -8px -6px 18px;
+        border-radius: 16px;
+        overflow: hidden;
+        background:
+          radial-gradient(circle at 20% 20%, rgba(119, 180, 255, 0.24), transparent 26%),
+          radial-gradient(circle at 78% 28%, rgba(255, 145, 84, 0.18), transparent 22%),
+          linear-gradient(180deg, rgba(10, 16, 30, 0.95) 0%, rgba(4, 6, 10, 0.95) 100%);
+        border: 1px solid rgba(255, 255, 255, 0.05);
+      }
+
+      .boot-stars,
+      .boot-stars::before,
+      .boot-stars::after {
+        position: absolute;
+        inset: 0;
+        background-image:
+          radial-gradient(circle at 12% 30%, rgba(255, 255, 255, 0.8) 0 1px, transparent 1.4px),
+          radial-gradient(circle at 28% 55%, rgba(255, 255, 255, 0.55) 0 1px, transparent 1.5px),
+          radial-gradient(circle at 41% 18%, rgba(124, 228, 179, 0.8) 0 1.2px, transparent 1.7px),
+          radial-gradient(circle at 63% 62%, rgba(255, 255, 255, 0.7) 0 1px, transparent 1.5px),
+          radial-gradient(circle at 84% 26%, rgba(255, 255, 255, 0.65) 0 1px, transparent 1.6px),
+          radial-gradient(circle at 74% 78%, rgba(255, 185, 117, 0.8) 0 1.1px, transparent 1.6px);
+        content: "";
+      }
+
+      .boot-stars::before {
+        transform: translateX(-18px);
+        opacity: 0.55;
+      }
+
+      .boot-stars::after {
+        transform: translateX(28px);
+        opacity: 0.35;
+      }
+
+      .boot-planet {
+        position: absolute;
+        right: -22px;
+        top: -38px;
+        width: 170px;
+        height: 170px;
+        border-radius: 50%;
+        background:
+          radial-gradient(circle at 32% 32%, #ffdd9a 0%, #d67c48 28%, #6f2337 62%, rgba(14, 18, 25, 0) 72%);
+        opacity: 0.68;
+        filter: blur(0.2px);
+      }
+
+      .boot-ship {
+        position: absolute;
+        left: 52px;
+        top: 86px;
+        width: 210px;
+        height: 58px;
+        transform-origin: center;
+        animation: boot-drift 5.6s ease-in-out infinite;
+      }
+
+      .boot-ship-body {
+        position: absolute;
+        inset: 0;
+        clip-path: polygon(0 58%, 14% 34%, 58% 24%, 84% 34%, 100% 48%, 84% 70%, 24% 76%, 8% 70%);
+        background:
+          linear-gradient(90deg, rgba(134, 159, 191, 0.98) 0%, rgba(230, 236, 242, 0.98) 38%, rgba(129, 170, 205, 0.96) 100%);
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+      }
+
+      .boot-ship-body::before {
+        position: absolute;
+        content: "";
+        left: 52px;
+        top: 17px;
+        width: 92px;
+        height: 14px;
+        border-radius: 999px;
+        background: linear-gradient(90deg, rgba(255, 255, 255, 0.2), rgba(67, 92, 138, 0.7), rgba(255, 255, 255, 0.16));
+      }
+
+      .boot-ship-fin {
+        position: absolute;
+        right: 24px;
+        top: 11px;
+        width: 44px;
+        height: 34px;
+        clip-path: polygon(0 100%, 34% 0, 100% 36%, 76% 100%);
+        background: linear-gradient(180deg, rgba(110, 171, 225, 0.95), rgba(44, 92, 150, 0.92));
+      }
+
+      .boot-ship-engine {
+        position: absolute;
+        left: -18px;
+        top: 24px;
+        width: 56px;
+        height: 10px;
+        border-radius: 999px;
+        background: linear-gradient(90deg, rgba(255, 255, 255, 0), rgba(124, 228, 179, 0.35), rgba(124, 228, 179, 0.95));
+        filter: blur(1px);
+        animation: boot-engine 0.9s ease-in-out infinite;
+      }
+
+      .boot-ship-engine::after {
+        position: absolute;
+        content: "";
+        left: -48px;
+        top: -8px;
+        width: 66px;
+        height: 26px;
+        border-radius: 50%;
+        background: radial-gradient(circle at right, rgba(124, 228, 179, 0.72), rgba(124, 228, 179, 0));
+        filter: blur(2px);
+      }
+
+      .boot-title {
+        margin: 0 0 10px;
+        font-size: 30px;
+        font-weight: 700;
+        letter-spacing: -0.03em;
+      }
+
+      .boot-subtitle {
+        margin: 0 0 18px;
+        color: rgba(243, 245, 247, 0.72);
+        font-size: 15px;
+        line-height: 1.45;
+      }
+
+      .boot-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .boot-spinner {
+        width: 18px;
+        height: 18px;
+        border-radius: 999px;
+        border: 2px solid rgba(255, 255, 255, 0.22);
+        border-top-color: #7ce4b3;
+        animation: boot-spin 1s linear infinite;
+        flex: 0 0 auto;
+      }
+
+      .boot-status {
+        font-size: 14px;
+        color: #dfe5eb;
+      }
+
+      .boot-detail {
+        margin-top: 14px;
+        min-height: 20px;
+        color: rgba(243, 245, 247, 0.58);
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      .boot-progress {
+        margin-top: 18px;
+        height: 6px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.08);
+        overflow: hidden;
+      }
+
+      .boot-progress-bar {
+        width: 38%;
+        height: 100%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, #7ce4b3 0%, #7ebcff 100%);
+        animation: boot-progress-slide 2.4s ease-in-out infinite;
+        transform-origin: left center;
+      }
+
+      .boot-detail.error {
+        color: #ffb2b2;
+        white-space: pre-wrap;
+      }
+
+      @keyframes boot-drift {
+        0%,
+        100% {
+          transform: translate3d(0, 0, 0) rotate(-4deg);
+        }
+
+        50% {
+          transform: translate3d(12px, -8px, 0) rotate(-1deg);
+        }
+      }
+
+      @keyframes boot-engine {
+        0%,
+        100% {
+          opacity: 0.75;
+          transform: scaleX(0.92);
+        }
+
+        50% {
+          opacity: 1;
+          transform: scaleX(1.06);
+        }
+      }
+
+      @keyframes boot-progress-slide {
+        0% {
+          transform: translateX(-85%) scaleX(0.9);
+        }
+
+        50% {
+          transform: translateX(90%) scaleX(1.05);
+        }
+
+        100% {
+          transform: translateX(240%) scaleX(0.9);
+        }
+      }
+
+      @keyframes boot-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+    </style>
   </head>
   <body>
+    <div id="boot-splash" role="status" aria-live="polite">
+      <div class="boot-card">
+        <div class="boot-hero" aria-hidden="true">
+          <div class="boot-stars"></div>
+          <div class="boot-planet"></div>
+          <div class="boot-ship">
+            <div class="boot-ship-engine"></div>
+            <div class="boot-ship-body"></div>
+            <div class="boot-ship-fin"></div>
+          </div>
+        </div>
+        <h1 class="boot-title">Conquerors: Domination Demo</h1>
+        <p class="boot-subtitle">Launching the command deck, warming the local server, and stabilising the battlefield.</p>
+        <div class="boot-row">
+          <div class="boot-spinner" id="boot-spinner"></div>
+          <div class="boot-status" id="boot-status">Launching command deck...</div>
+        </div>
+        <div class="boot-detail" id="boot-detail">Cold Steam launches can take a few seconds while the local simulation spins up.</div>
+        <div class="boot-progress" aria-hidden="true">
+          <div class="boot-progress-bar"></div>
+        </div>
+      </div>
+    </div>
     <div id="root"></div>
+    <script>
+      (function () {
+        const splash = document.getElementById('boot-splash');
+        const spinner = document.getElementById('boot-spinner');
+        const status = document.getElementById('boot-status');
+        const detail = document.getElementById('boot-detail');
+
+        if (!splash || !spinner || !status || !detail) {
+          return;
+        }
+
+        const longBootTimer = window.setTimeout(() => {
+          status.textContent = 'Still starting...';
+          detail.textContent = 'Steam and the local command server are taking longer than normal to stabilise.';
+        }, 12000);
+
+        window.addEventListener('ag:boot-status', (event) => {
+          const payload = event && event.detail ? event.detail : null;
+          if (!payload) {
+            return;
+          }
+
+          if (typeof payload.status === 'string' && payload.status.trim()) {
+            status.textContent = payload.status;
+          }
+
+          if (typeof payload.detail === 'string' && payload.detail.trim()) {
+            detail.textContent = payload.detail;
+          }
+        });
+
+        window.addEventListener('ag:boot-ready', () => {
+          window.clearTimeout(longBootTimer);
+          splash.classList.add('hidden');
+          window.setTimeout(() => splash.remove(), 260);
+        });
+
+        window.addEventListener('ag:boot-error', (event) => {
+          window.clearTimeout(longBootTimer);
+          const message =
+            event && event.detail && typeof event.detail.message === 'string'
+              ? event.detail.message
+              : 'The game failed to finish starting.';
+
+          spinner.style.display = 'none';
+          status.textContent = 'Startup failed';
+          detail.textContent = message;
+          detail.classList.add('error');
+        });
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

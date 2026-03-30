@@ -1,0 +1,11 @@
+"DepotBuild"
+{
+	"DepotID" "4432211"
+	"FileMapping"
+	{
+		"LocalPath" "releases/steam/microsoft-windows/*"
+		"DepotPath" "."
+		"recursive" "1"
+	}
+	"FileExclusion" "*.pdb"
+}

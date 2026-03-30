@@ -1,0 +1,387 @@
+.patch-notes-modal {
+    width: min(92vw, 1040px);
+    max-width: 1040px;
+    max-height: min(88vh, 880px);
+}
+
+.patch-notes-body {
+    padding: 22px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    background:
+        radial-gradient(circle at top, rgba(255, 214, 102, 0.08), transparent 48%),
+        rgba(7, 10, 17, 0.92);
+}
+
+.patch-notes-hero {
+    padding: 18px 20px;
+    border-radius: 18px;
+    border: 1px solid rgba(255, 214, 102, 0.14);
+    background:
+        linear-gradient(180deg, rgba(255, 214, 102, 0.08), rgba(255, 153, 51, 0.04)),
+        rgba(255, 255, 255, 0.03);
+    text-align: left;
+}
+
+.patch-notes-hero__eyebrow {
+    display: inline-flex;
+    padding: 5px 10px;
+    border-radius: 999px;
+    background: rgba(255, 214, 102, 0.14);
+    color: #ffd88a;
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+}
+
+.patch-notes-hero__title {
+    margin: 14px 0 10px;
+    font-size: 1.5rem;
+    color: #fff4d7;
+}
+
+.patch-notes-hero__copy {
+    margin: 0;
+    color: var(--text-secondary);
+    line-height: 1.6;
+}
+
+.patch-notes-hero__stats {
+    margin-top: 18px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+
+.patch-notes-hero__stat {
+    min-width: 140px;
+    padding: 12px 14px;
+    border-radius: 14px;
+    border: 1px solid rgba(255, 214, 102, 0.12);
+    background: rgba(255, 255, 255, 0.03);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.patch-notes-hero__stat-value {
+    font-size: 1.2rem;
+    font-weight: 800;
+    color: #fff5db;
+}
+
+.patch-notes-hero__stat-label {
+    color: var(--text-muted);
+    font-size: 0.82rem;
+}
+
+.patch-notes-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+.patch-notes-filter-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.patch-notes-filter-chip {
+    min-height: 42px;
+    padding: 10px 14px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    font-weight: 700;
+}
+
+.patch-notes-filter-chip:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-primary);
+}
+
+.patch-notes-filter-chip--active {
+    border-color: rgba(255, 214, 102, 0.28);
+    background:
+        linear-gradient(180deg, rgba(255, 214, 102, 0.18), rgba(255, 153, 51, 0.06)),
+        rgba(255, 255, 255, 0.05);
+    color: #fff3d0;
+    box-shadow: 0 10px 20px rgba(0, 0, 0, 0.18);
+}
+
+.patch-notes-sort {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 180px;
+    text-align: left;
+}
+
+.patch-notes-sort__label {
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.patch-notes-sort__select {
+    min-height: 44px;
+}
+
+.patch-notes-list {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.patch-note-card {
+    display: grid;
+    grid-template-columns: minmax(200px, 240px) 18px minmax(0, 1fr);
+    gap: 14px;
+    align-items: stretch;
+}
+
+.patch-note-card__visual {
+    position: relative;
+    overflow: hidden;
+    min-height: 100%;
+    border-radius: 18px;
+    border: 1px solid color-mix(in srgb, var(--patch-note-accent, #ffd766) 32%, rgba(255, 255, 255, 0.08));
+    background:
+        radial-gradient(circle at 20% 20%, color-mix(in srgb, var(--patch-note-accent, #ffd766) 20%, transparent), transparent 38%),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02)),
+        rgba(6, 10, 16, 0.95);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.05),
+        0 16px 32px rgba(0, 0, 0, 0.24);
+}
+
+.patch-note-card__visual--icon-only {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background:
+        radial-gradient(circle at 50% 30%, color-mix(in srgb, var(--patch-note-accent, #ffd766) 28%, transparent), transparent 45%),
+        linear-gradient(145deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.01)),
+        rgba(8, 12, 19, 0.96);
+}
+
+.patch-note-card__artwork {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    opacity: 0.78;
+}
+
+.patch-note-card__visual-scrim {
+    position: absolute;
+    inset: 0;
+    background:
+        linear-gradient(180deg, rgba(7, 10, 16, 0.14), rgba(7, 10, 16, 0.86)),
+        linear-gradient(135deg, color-mix(in srgb, var(--patch-note-accent, #ffd766) 24%, transparent), transparent 55%);
+}
+
+.patch-note-card__visual-badge {
+    position: absolute;
+    top: 14px;
+    left: 14px;
+    width: 54px;
+    height: 54px;
+    border-radius: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(7, 10, 16, 0.72);
+    border: 1px solid color-mix(in srgb, var(--patch-note-accent, #ffd766) 38%, rgba(255, 255, 255, 0.08));
+    color: color-mix(in srgb, var(--patch-note-accent, #ffd766) 72%, white);
+    backdrop-filter: blur(8px);
+}
+
+.patch-note-card__visual-badge svg,
+.patch-note-card__visual-icon-hero svg {
+    width: 28px;
+    height: 28px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.patch-note-card__visual-icon-hero {
+    width: 112px;
+    height: 112px;
+    border-radius: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background:
+        linear-gradient(180deg, color-mix(in srgb, var(--patch-note-accent, #ffd766) 24%, rgba(255,255,255,0.06)), rgba(255,255,255,0.02)),
+        rgba(255, 255, 255, 0.02);
+    color: color-mix(in srgb, var(--patch-note-accent, #ffd766) 76%, white);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.08),
+        0 18px 36px rgba(0, 0, 0, 0.24);
+}
+
+.patch-note-card__visual-icon-hero svg {
+    width: 52px;
+    height: 52px;
+}
+
+.patch-note-card__visual-meta {
+    position: absolute;
+    right: 14px;
+    bottom: 14px;
+    left: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.patch-note-card__rail {
+    border-radius: 999px;
+    background:
+        linear-gradient(180deg, var(--patch-note-accent, rgba(255, 214, 102, 0.9)), rgba(255, 255, 255, 0.16));
+    box-shadow: 0 0 18px color-mix(in srgb, var(--patch-note-accent, #ffd766) 40%, transparent);
+}
+
+.patch-note-card__content {
+    padding: 18px 20px;
+    border-radius: 18px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.02)),
+        rgba(255, 255, 255, 0.025);
+    text-align: left;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.05),
+        0 14px 28px rgba(0, 0, 0, 0.22);
+}
+
+.patch-note-card__badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    backdrop-filter: blur(8px);
+}
+
+.patch-note-card__badge--latest {
+    background: rgba(255, 214, 102, 0.14);
+    color: #ffd88a;
+}
+
+.patch-note-card__badge--archive {
+    background: rgba(148, 163, 184, 0.14);
+    color: #d4deea;
+}
+
+.patch-note-card__date {
+    font-size: 0.84rem;
+    color: rgba(244, 248, 255, 0.88);
+    text-shadow: 0 1px 8px rgba(0, 0, 0, 0.4);
+}
+
+.patch-note-card__title {
+    margin: 0 0 10px;
+    font-size: 1.14rem;
+    color: var(--text-primary);
+}
+
+.patch-note-card__summary {
+    margin: 0 0 14px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+}
+
+.patch-note-card__highlights {
+    margin: 0;
+    padding-left: 18px;
+    color: var(--text-secondary);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.patch-note-card__highlights li::marker {
+    color: #ffd88a;
+}
+
+.patch-note-card__tags {
+    margin-top: 16px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.patch-note-card__tag {
+    display: inline-flex;
+    padding: 6px 10px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    font-weight: 600;
+}
+
+@media (max-width: 720px) {
+    .patch-notes-modal {
+        width: min(96vw, 760px);
+    }
+
+    .patch-notes-body {
+        padding: 16px;
+    }
+
+    .patch-note-card {
+        grid-template-columns: 1fr;
+        gap: 10px;
+    }
+
+    .patch-note-card__content,
+    .patch-notes-hero {
+        padding: 16px;
+    }
+
+    .patch-note-card__visual {
+        min-height: 180px;
+    }
+
+    .patch-note-card__rail {
+        display: none;
+    }
+}
+
+@media (max-width: 560px) {
+    .patch-notes-toolbar {
+        align-items: stretch;
+    }
+
+    .patch-notes-sort {
+        width: 100%;
+    }
+
+    .patch-note-card__visual-meta {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+}
