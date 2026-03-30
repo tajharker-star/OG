@@ -1,0 +1,17 @@
+"appbuild"
+{
+	"appid"	"4432210"
+	"desc" "Conquerors: Domination Main Build"
+	"buildoutput" "output"
+	"contentroot" ".."
+	"setlive" ""
+	"preview" "0"
+	"local" ""
+
+	"depots"
+	{
+		"4432211" "depot_build_4432211_main_windows.vdf"
+		"4432212" "depot_build_4432212_main_macos.vdf"
+		"4432213" "depot_build_4432213_main_linux.vdf"
+	}
+}
