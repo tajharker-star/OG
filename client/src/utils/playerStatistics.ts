@@ -15,6 +15,7 @@ export interface MatchStatisticsSummary {
     source: MatchSource;
     humanPlayers: number;
     botPlayers: number;
+    maxBotDifficulty?: number;
     ranked?: boolean;
     coop?: boolean;
 }

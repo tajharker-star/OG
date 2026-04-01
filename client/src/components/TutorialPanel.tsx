@@ -1,13 +1,16 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { GameMap, Player, Unit } from '../types/game';
 import {
     TUTORIAL_BUILDING_GROUPS,
     TUTORIAL_CORE_LESSONS,
+    TUTORIAL_MAP_PLAYBOOKS,
     TUTORIAL_RESOURCE_LESSONS,
     TUTORIAL_STRATEGY_LESSONS,
     TUTORIAL_UNIT_GROUPS,
     type TutorialGuideGroup,
     type TutorialLesson,
+    type TutorialMapType,
+    normalizeTutorialMapType,
 } from '../data/tutorialGuide';
 import './TutorialPanel.css';
 
@@ -15,6 +18,12 @@ type TutorialPanelProps = {
     player: Player;
     mapData: GameMap | null;
     units: Unit[];
+    tutorialMapType?: TutorialMapType;
+    onAllObjectivesComplete?: () => void;
+    botChallengeStarted?: boolean;
+    botChallengeCompleted?: boolean;
+    panelStyle?: React.CSSProperties;
+    toggleStyle?: React.CSSProperties;
 };
 
 type TutorialTabId = 'objectives' | 'resources' | 'buildings' | 'units' | 'winning';
@@ -150,28 +159,75 @@ const renderGuideGroups = (groups: TutorialGuideGroup[]) => (
     </div>
 );
 
-export function TutorialPanel({ player, mapData, units }: TutorialPanelProps) {
+const getSpotlightPriority = (card: TutorialGuideGroup['cards'][number], spotlightIds: string[]) => {
+    const matchIndex = spotlightIds.findIndex((id) => id === card.id || id === card.entityType);
+    return matchIndex === -1 ? Number.POSITIVE_INFINITY : matchIndex;
+};
+
+const prioritizeGuideGroups = (groups: TutorialGuideGroup[], spotlightIds: string[]) => (
+    groups.map((group) => ({
+        ...group,
+        cards: [...group.cards].sort((a, b) => {
+            const priorityDelta = getSpotlightPriority(a, spotlightIds) - getSpotlightPriority(b, spotlightIds);
+            if (priorityDelta !== 0) {
+                return priorityDelta;
+            }
+
+            return a.title.localeCompare(b.title);
+        })
+    }))
+);
+
+export function TutorialPanel({
+    player,
+    mapData,
+    units,
+    tutorialMapType,
+    onAllObjectivesComplete,
+    botChallengeStarted = false,
+    botChallengeCompleted = false,
+    panelStyle,
+    toggleStyle,
+}: TutorialPanelProps) {
     const [isOpen, setIsOpen] = useState(true);
     const [activeTab, setActiveTab] = useState<TutorialTabId>('objectives');
+    const completionReportedRef = useRef(false);
+
+    const activeTutorialMap = normalizeTutorialMapType(mapData?.mapType || tutorialMapType);
+    const mapPlaybook = TUTORIAL_MAP_PLAYBOOKS[activeTutorialMap];
 
     const ownedBuildings = useMemo(() => {
         const counts = new Map<string, number>();
-        const register = (type?: string) => {
+        const seenBuildingIds = new Set<string>();
+        const register = (type?: string, id?: string) => {
             if (!type) return;
+            if (id) {
+                if (seenBuildingIds.has(id)) return;
+                seenBuildingIds.add(id);
+            }
             counts.set(type, (counts.get(type) || 0) + 1);
         };
 
         mapData?.islands.forEach((island) => {
             island.buildings.forEach((building) => {
                 if (building.ownerId === player.id) {
-                    register(building.type);
+                    register(building.type, building.id);
                 }
             });
         });
 
         mapData?.waterBuildings?.forEach((building) => {
             if (building.ownerId === player.id) {
-                register(building.type);
+                register(building.type, building.id);
+            }
+        });
+
+        mapData?.oilSpots.forEach((spot) => {
+            const building = spot.building;
+            if (!building) return;
+            const ownerId = building.ownerId || spot.ownerId;
+            if (ownerId === player.id) {
+                register(building.type, building.id);
             }
         });
 
@@ -183,12 +239,41 @@ export function TutorialPanel({ player, mapData, units }: TutorialPanelProps) {
         [player.id, units]
     );
 
+    const buildingGuideGroups = useMemo(
+        () => prioritizeGuideGroups(TUTORIAL_BUILDING_GROUPS, mapPlaybook.buildingSpotlightIds),
+        [mapPlaybook.buildingSpotlightIds]
+    );
+
+    const unitGuideGroups = useMemo(
+        () => prioritizeGuideGroups(TUTORIAL_UNIT_GROUPS, mapPlaybook.unitSpotlightIds),
+        [mapPlaybook.unitSpotlightIds]
+    );
+
+    const coreLessons = useMemo(
+        () => [...mapPlaybook.focusLessons, ...TUTORIAL_CORE_LESSONS],
+        [mapPlaybook.focusLessons]
+    );
+
+    const resourceLessons = useMemo(
+        () => [...mapPlaybook.resourceLessons, ...TUTORIAL_RESOURCE_LESSONS],
+        [mapPlaybook.resourceLessons]
+    );
+
+    const strategyLessons = useMemo(
+        () => [...mapPlaybook.winningLessons, ...TUTORIAL_STRATEGY_LESSONS],
+        [mapPlaybook.winningLessons]
+    );
+
     const objectiveCards = useMemo(() => {
-        const economyReady =
-            (ownedBuildings.get('mine') || 0) +
-            (ownedBuildings.get('farm') || 0) +
-            (ownedBuildings.get('oil_well') || 0) +
-            (ownedBuildings.get('oil_rig') || 0) > 0;
+        const hasDock = (ownedBuildings.get('dock') || 0) > 0;
+        const hasConstructionShip = ownedUnits.some((unit) => unit.type === 'construction_ship');
+        const hasFerry = ownedUnits.some((unit) => unit.type === 'ferry');
+        const hasOilSeeker = ownedUnits.some((unit) => unit.type === 'oil_seeker');
+        const hasGoldProduction = ((ownedBuildings.get('mine') || 0) + (ownedBuildings.get('farm') || 0)) > 0;
+        const hasOilWell = (ownedBuildings.get('oil_well') || 0) > 0;
+        const hasOilRig = (ownedBuildings.get('oil_rig') || 0) > 0;
+        const hasOilProduction = hasOilWell || hasOilRig;
+        const economyReady = hasGoldProduction && hasOilProduction;
         const productionReady =
             (ownedBuildings.get('barracks') || 0) +
             (ownedBuildings.get('tank_factory') || 0) +
@@ -199,10 +284,24 @@ export function TutorialPanel({ player, mapData, units }: TutorialPanelProps) {
             ownedUnits.some((unit) => ['humvee', 'ferry', 'construction_ship', 'aircraft_carrier', 'mothership'].includes(unit.type)) ||
             Array.from(ownedBuildings.keys()).some((type) => LOGISTICS_OR_SUPPORT_BUILDING_TYPES.has(type));
         const techReady =
-            (ownedBuildings.get('oil_well') || 0) +
-            (ownedBuildings.get('oil_rig') || 0) +
+            (hasOilWell ? 1 : 0) +
+            (hasOilRig ? 1 : 0) +
             (ownedBuildings.get('air_base') || 0) +
             (ownedBuildings.get('tank_factory') || 0) > 0;
+        const mapSpecificObjective = activeTutorialMap === 'desert'
+            ? {
+                ...mapPlaybook.extraObjective,
+                done: hasOilSeeker,
+            }
+            : activeTutorialMap === 'grasslands'
+                ? {
+                    ...mapPlaybook.extraObjective,
+                    done: hasDock && (hasFerry || hasConstructionShip),
+                }
+                : {
+                    ...mapPlaybook.extraObjective,
+                    done: hasDock && (hasConstructionShip || hasOilRig),
+                };
 
         return [
             {
@@ -215,13 +314,19 @@ export function TutorialPanel({ player, mapData, units }: TutorialPanelProps) {
                 id: 'economy',
                 done: economyReady,
                 title: 'Start your economy',
-                detail: 'Build a Mine, Farm, Oil Well, or Oil Rig so your income can grow.'
+                detail: mapPlaybook.objectiveDetails.economy
             },
             {
                 id: 'production',
                 done: productionReady,
                 title: 'Unlock army production',
-                detail: 'Add a Barracks, Dock, Tank Factory, or Air Base so you can train real forces.'
+                detail: mapPlaybook.objectiveDetails.production
+            },
+            {
+                id: mapSpecificObjective.id,
+                done: mapSpecificObjective.done,
+                title: mapSpecificObjective.title,
+                detail: mapSpecificObjective.detail
             },
             {
                 id: 'combat',
@@ -233,19 +338,39 @@ export function TutorialPanel({ player, mapData, units }: TutorialPanelProps) {
                 id: 'mobility',
                 done: mobilityReady,
                 title: 'Learn support and logistics',
-                detail: 'Try transports, defenses, bridges, healing, or minefields to understand map control.'
+                detail: mapPlaybook.objectiveDetails.mobility
             },
             {
                 id: 'tech',
                 done: techReady,
                 title: 'Reach advanced tech',
-                detail: 'Oil unlocks the heavy tools that usually decide the mid and late game.'
+                detail: mapPlaybook.objectiveDetails.tech
+            },
+            {
+                id: 'tutorial-final-battle',
+                done: botChallengeCompleted,
+                title: 'Spawn a bot and defeat it',
+                detail: botChallengeCompleted
+                    ? 'Bot defeated. You reached the victory screen and completed the tutorial.'
+                    : botChallengeStarted
+                        ? 'Bot deployed. Defeat every bot that was added, reach the victory screen, and finish the tutorial.'
+                        : 'When you are ready, press Add Bot, then defeat that bot and win the match to complete the tutorial.'
             }
         ];
-    }, [ownedBuildings, ownedUnits]);
+    }, [activeTutorialMap, botChallengeCompleted, botChallengeStarted, mapPlaybook.extraObjective, mapPlaybook.objectiveDetails.economy, mapPlaybook.objectiveDetails.mobility, mapPlaybook.objectiveDetails.production, mapPlaybook.objectiveDetails.tech, ownedBuildings, ownedUnits]);
 
     const completedObjectives = objectiveCards.filter((objective) => objective.done).length;
     const progressPercent = Math.round((completedObjectives / objectiveCards.length) * 100);
+    const allObjectivesComplete = objectiveCards.length > 0 && completedObjectives === objectiveCards.length;
+
+    useEffect(() => {
+        if (!allObjectivesComplete || completionReportedRef.current || !onAllObjectivesComplete) {
+            return;
+        }
+
+        completionReportedRef.current = true;
+        onAllObjectivesComplete();
+    }, [allObjectivesComplete, onAllObjectivesComplete]);
 
     if (!isOpen) {
         return (
@@ -253,6 +378,7 @@ export function TutorialPanel({ player, mapData, units }: TutorialPanelProps) {
                 type="button"
                 className="tutorial-panel-toggle"
                 onClick={() => setIsOpen(true)}
+                style={toggleStyle}
             >
                 Tutorial
             </button>
@@ -260,13 +386,13 @@ export function TutorialPanel({ player, mapData, units }: TutorialPanelProps) {
     }
 
     return (
-        <aside className="tutorial-panel">
+        <aside className="tutorial-panel" style={panelStyle}>
             <div className="tutorial-panel__header">
                 <div>
                     <div className="tutorial-panel__eyebrow">Campaign Tutorial</div>
-                    <h3>Tutorial Sandbox</h3>
+                    <h3>{mapPlaybook.icon} {mapPlaybook.label} Tutorial Sandbox</h3>
                     <p>
-                        High starting resources are loaded. Learn the systems here, then press Add Bot when you want live practice.
+                        {mapPlaybook.headerSummary}
                     </p>
                 </div>
                 <button
@@ -308,7 +434,7 @@ export function TutorialPanel({ player, mapData, units }: TutorialPanelProps) {
                 {activeTab === 'objectives' && (
                     <>
                         <div className="tutorial-panel__objective-callout">
-                            <strong>Victory plan:</strong> build income, unlock production, pressure key enemy economy, then destroy the HQ.
+                            <strong>Victory plan:</strong> {mapPlaybook.objectiveCallout}
                         </div>
                         <div className="tutorial-panel__objective-list">
                             {objectiveCards.map((objective) => (
@@ -326,14 +452,14 @@ export function TutorialPanel({ player, mapData, units }: TutorialPanelProps) {
                                 </article>
                             ))}
                         </div>
-                        {renderLessonList(TUTORIAL_CORE_LESSONS)}
+                        {renderLessonList(coreLessons)}
                     </>
                 )}
 
-                {activeTab === 'resources' && renderLessonList(TUTORIAL_RESOURCE_LESSONS)}
-                {activeTab === 'buildings' && renderGuideGroups(TUTORIAL_BUILDING_GROUPS)}
-                {activeTab === 'units' && renderGuideGroups(TUTORIAL_UNIT_GROUPS)}
-                {activeTab === 'winning' && renderLessonList(TUTORIAL_STRATEGY_LESSONS)}
+                {activeTab === 'resources' && renderLessonList(resourceLessons)}
+                {activeTab === 'buildings' && renderGuideGroups(buildingGuideGroups)}
+                {activeTab === 'units' && renderGuideGroups(unitGuideGroups)}
+                {activeTab === 'winning' && renderLessonList(strategyLessons)}
             </div>
         </aside>
     );

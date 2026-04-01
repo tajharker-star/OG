@@ -2,6 +2,7 @@ import {
     TUTORIAL_BUILDING_GROUPS,
     TUTORIAL_UNIT_GROUPS,
     type TutorialGuideCard,
+    normalizeTutorialMapType,
 } from './tutorialGuide';
 
 export type ActionGuidePreview =
@@ -114,14 +115,15 @@ export const BUILDING_ACTION_GUIDES: Record<string, ActionGuide> = {
         '🛢️',
         'oil-water',
         [
-            'Place on a free offshore oil spot.',
-            'Needs a nearby construction ship and safe water control.',
+            'Place directly on a black oil spot that is in the water.',
+            'A normal Builder cannot place this. Use a Construction Ship from a Dock.',
+            'If the oil spot is on land, build an Oil Well instead.',
             'Best after you already have a dock or sea escort online.'
         ],
         ['Use rigs to unlock ships, planes, and late-game production without starving your oil bank.'],
         [
-            { kind: 'oil-spot', label: 'Oil Spot' },
-            { kind: 'water', label: 'Water' }
+            { kind: 'oil-spot', label: 'Black Oil Spot' },
+            { kind: 'water', label: 'Water Only' }
         ]
     ),
     oil_well: makeGuide(
@@ -393,4 +395,103 @@ export const UNIT_ACTION_GUIDES: Record<string, ActionGuide> = {
         undefined,
         ['Use heavy aliens when you already have economy and map control and want a durable finisher, not a first strike.']
     ),
+};
+
+export const getContextualActionGuide = (
+    guide: ActionGuide | undefined,
+    mapType?: string
+): ActionGuide | undefined => {
+    if (!guide) {
+        return undefined;
+    }
+
+    const tutorialMapType = normalizeTutorialMapType(mapType);
+
+    if (tutorialMapType === 'desert') {
+        if (guide.id === 'oil_well') {
+            return {
+                ...guide,
+                placement: [
+                    'Desert tip: recruit an Oil Seeker first so hidden land oil spots become visible.',
+                    ...(guide.placement || []),
+                ],
+                use: [
+                    'On desert maps, the usual flow is Barracks -> Oil Seeker -> Oil Well -> Tank Factory.',
+                    ...guide.use,
+                ],
+            };
+        }
+
+        if (guide.id === 'oil_seeker') {
+            return {
+                ...guide,
+                summary: 'Your oil scanner for desert maps. Use it to reveal hidden land oil before building Oil Wells.',
+                use: [
+                    'Desert maps: train this early, select it, and toggle the scanner so land oil spots stand out immediately.',
+                    ...guide.use,
+                ],
+                bestFor: 'Revealing hidden land oil fast so your Oil Wells and land-tech timing do not get delayed.',
+            };
+        }
+    }
+
+    if (tutorialMapType === 'grasslands') {
+        if (guide.id === 'dock') {
+            return {
+                ...guide,
+                use: [
+                    'Grasslands tip: a Dock opens ferry shortcuts and side-lane pressure even before the map feels naval.',
+                    ...guide.use,
+                ],
+            };
+        }
+
+        if (guide.id === 'construction_ship') {
+            return {
+                ...guide,
+                use: [
+                    'Grasslands tip: Construction Ships still matter for bridge work, side-lane infrastructure, and any offshore expansion.',
+                    ...guide.use,
+                ],
+            };
+        }
+    }
+
+    if (tutorialMapType === 'islands') {
+        if (guide.id === 'dock') {
+            return {
+                ...guide,
+                use: [
+                    'Island tip: this is usually your first major tech building because it unlocks ferry routes, navy, and Construction Ships.',
+                    ...guide.use,
+                ],
+            };
+        }
+
+        if (guide.id === 'oil_rig') {
+            return {
+                ...guide,
+                placement: [
+                    'Island tip: build a Dock first, then recruit a Construction Ship before trying to claim offshore oil.',
+                    ...(guide.placement || []),
+                ],
+                use: [
+                    'On island maps, Oil Rigs are the cleanest way to power your destroyers, aircraft, and late-game pressure.',
+                    ...guide.use,
+                ],
+            };
+        }
+
+        if (guide.id === 'construction_ship') {
+            return {
+                ...guide,
+                use: [
+                    'Island tip: this is the unit that actually places your Oil Rigs on black water oil spots.',
+                    ...guide.use,
+                ],
+            };
+        }
+    }
+
+    return guide;
 };

@@ -4,10 +4,11 @@ import { steamService } from '../services/steam';
 import type { ConnectionState } from '../services/socket';
 import type { Player, GameMap, Unit } from '../types/game';
 import type { MatchResult, MatchSource, MatchStatisticsSummary } from '../utils/playerStatistics';
+import type { TutorialMapType } from '../data/tutorialGuide';
 import { SettingsModal } from './SettingsModal';
 import { ActionGuidePanel } from './ActionGuidePanel';
 import { TutorialPanel } from './TutorialPanel';
-import { BUILDING_ACTION_GUIDES, UNIT_ACTION_GUIDES, type ActionGuide } from '../data/actionGuides';
+import { BUILDING_ACTION_GUIDES, UNIT_ACTION_GUIDES, getContextualActionGuide, type ActionGuide } from '../data/actionGuides';
 import { settingsManager } from '../game/SettingsManager';
 import { Confetti } from './Confetti';
 import { EndGameOverlay } from './EndGameOverlay';
@@ -338,6 +339,8 @@ interface GameUIProps {
     isLocalMode?: boolean;
     isDevBypass?: boolean;
     tutorialMode?: boolean;
+    tutorialMapType?: TutorialMapType;
+    onTutorialObjectivesCompleted?: () => void;
     matchStatsSource?: MatchSource;
     onMatchResolved?: (summary: MatchStatisticsSummary) => void;
 }
@@ -449,6 +452,8 @@ export const GameUI: React.FC<GameUIProps> = ({
     isLocalMode = false,
     isDevBypass = false,
     tutorialMode = false,
+    tutorialMapType,
+    onTutorialObjectivesCompleted,
     matchStatsSource = 'lan',
     onMatchResolved,
 }) => {
@@ -462,12 +467,14 @@ export const GameUI: React.FC<GameUIProps> = ({
     const [selectedUnitIds, setSelectedUnitIds] = useState<string[]>([]);
     const [selectedBuildingIds, setSelectedBuildingIds] = useState<string[]>([]);
     const [revealedOilSpots, setRevealedOilSpots] = useState<Set<string>>(new Set());
+    const [viewportSize, setViewportSize] = useState({ width: window.innerWidth, height: window.innerHeight });
     const [showSettings, setShowSettings] = useState(false);
     const [isConstructionMinimized, setIsConstructionMinimized] = useState(false);
     const [isSelectionMinimized, setIsSelectionMinimized] = useState(false);
     const [activeCategory, setActiveCategory] = useState<string | null>(null);
     const [isScannerActive, setIsScannerActive] = useState(false);
-    const [isChatVisible, setIsChatVisible] = useState(true);
+    const [isChatVisible, setIsChatVisible] = useState(false);
+    const [unreadChatCount, setUnreadChatCount] = useState(0);
     const [menuGuideState, setMenuGuideState] = useState<{ guide: ActionGuide; source: 'build' | 'recruit' } | null>(null);
     const [roundGuiButtonPositions, setRoundGuiButtonPositions] = useState(readSavedRoundGuiButtonPositions);
     const [draggingRoundGuiButton, setDraggingRoundGuiButton] = useState<RoundGuiButtonKey | null>(null);
@@ -498,6 +505,14 @@ export const GameUI: React.FC<GameUIProps> = ({
     const [isDraggingStats, setIsDraggingStats] = useState(false);
     const [isStatsMinimized, setIsStatsMinimized] = useState(false);
     const statsDragOffset = useRef({ x: 0, y: 0 });
+    const recruitPanelRef = useRef<HTMLDivElement>(null);
+    const transportPanelRef = useRef<HTMLDivElement>(null);
+    const recruitGuidePanelRef = useRef<HTMLElement | null>(null);
+    const [hudPanelHeights, setHudPanelHeights] = useState({
+        recruit: 0,
+        transport: 0,
+        recruitGuide: 0
+    });
 
     // Build Menu Drag State
     const [buildMenuPos, setBuildMenuPos] = useState({ x: 20, y: 120 });
@@ -540,6 +555,7 @@ export const GameUI: React.FC<GameUIProps> = ({
     const matchLoadStartedAtRef = useRef<number>(Date.now());
     const pingSamplesRef = useRef<number[]>([]);
     const fpsSamplesRef = useRef<number[]>([]);
+    const chatVisibleRef = useRef(false);
 
     // Client-Side Gate (Anti-Bounce)
     const clientMatchState = useRef<'LOBBY' | 'STARTING' | 'IN_MATCH'>('LOBBY');
@@ -596,6 +612,13 @@ export const GameUI: React.FC<GameUIProps> = ({
         }
     }, [gameStatus]);
 
+    useEffect(() => {
+        chatVisibleRef.current = isChatVisible;
+        if (isChatVisible) {
+            setUnreadChatCount(0);
+        }
+    }, [isChatVisible]);
+
     const botDisplayNameById = React.useMemo(() => {
         const labels = new Map<string, string>();
         let botIndex = 1;
@@ -625,6 +648,16 @@ export const GameUI: React.FC<GameUIProps> = ({
 
         return `Player ${owner.id.slice(0, 4)}`;
     }, [botDisplayNameById]);
+
+    const toggleChatVisibility = React.useCallback(() => {
+        setIsChatVisible((current) => !current);
+    }, []);
+
+    const closeChat = React.useCallback(() => {
+        setIsChatVisible(false);
+    }, []);
+
+    const unreadChatLabel = unreadChatCount > 99 ? '99+' : `${unreadChatCount}`;
 
     useEffect(() => {
         playerSnapshotRef.current = player;
@@ -668,6 +701,7 @@ export const GameUI: React.FC<GameUIProps> = ({
     useEffect(() => {
         const w = window.innerWidth;
         const h = window.innerHeight;
+        setViewportSize({ width: w, height: h });
         setRoundGuiButtonPositions((current) => ({
             build: clampRoundGuiButtonPosition(current.build),
             chat: clampRoundGuiButtonPosition(current.chat)
@@ -685,6 +719,7 @@ export const GameUI: React.FC<GameUIProps> = ({
         const onResize = () => {
             const w2 = window.innerWidth;
             const h2 = window.innerHeight;
+            setViewportSize({ width: w2, height: h2 });
             setRoundGuiButtonPositions((current) => ({
                 build: clampRoundGuiButtonPosition(current.build),
                 chat: clampRoundGuiButtonPosition(current.chat)
@@ -714,6 +749,8 @@ export const GameUI: React.FC<GameUIProps> = ({
     const [matchEnded, setMatchEnded] = useState(false); // New authoritative state
     const [isSpectateActive, setIsSpectateActive] = useState(false); // Actual spectate mode active (UI hidden)
     const [endGameState, setEndGameState] = useState<{ mode: 'VICTORY' | 'DEFEAT', canSpectate: boolean, reason?: string } | null>(null);
+    const [tutorialBotChallengeStarted, setTutorialBotChallengeStarted] = useState(false);
+    const [tutorialBotChallengeCompleted, setTutorialBotChallengeCompleted] = useState(false);
 
     const [tunnelPassword, setTunnelPassword] = useState<string | null>(null);
     const [tunnelUrl, setTunnelUrl] = useState<string | null>(null);
@@ -736,7 +773,11 @@ export const GameUI: React.FC<GameUIProps> = ({
             roster.filter(candidate => !candidate.isBot).length,
             playerSnapshotRef.current && !playerSnapshotRef.current.isBot ? 1 : 0
         );
-        const botPlayers = roster.filter(candidate => candidate.isBot).length;
+        const botRoster = roster.filter(candidate => candidate.isBot);
+        const botPlayers = botRoster.length;
+        const maxBotDifficulty = botRoster.reduce((highest, bot) => (
+            Math.max(highest, Number.isFinite(bot.difficulty) ? (bot.difficulty as number) : 0)
+        ), 0);
         const source = matchStatsSourceRef.current;
 
         matchStatsReportedRef.current = true;
@@ -745,6 +786,7 @@ export const GameUI: React.FC<GameUIProps> = ({
             source,
             humanPlayers,
             botPlayers,
+            maxBotDifficulty: botPlayers > 0 ? maxBotDifficulty : undefined,
             coop: botPlayers > 0,
             ranked: source === 'steam' && humanPlayers >= 2 && botPlayers === 0,
         });
@@ -754,6 +796,17 @@ export const GameUI: React.FC<GameUIProps> = ({
         const unsubscribe = connectionManager.subscribe(setConnectionState);
         return unsubscribe;
     }, []);
+
+    useEffect(() => {
+        if (!tutorialMode || gameStatus !== 'playing') {
+            setTutorialBotChallengeStarted(false);
+            setTutorialBotChallengeCompleted(false);
+            return;
+        }
+
+        const hasBotInRoster = Array.from(allPlayers.values()).some((candidate) => candidate.isBot);
+        setTutorialBotChallengeStarted(hasBotInRoster);
+    }, [allPlayers, gameStatus, tutorialMode]);
 
     useEffect(() => {
         // Request game state only after socket listeners are attached,
@@ -793,6 +846,7 @@ export const GameUI: React.FC<GameUIProps> = ({
             matchStatsReportedRef.current = false;
             pingSamplesRef.current = [];
             fpsSamplesRef.current = [];
+            setTutorialBotChallengeCompleted(false);
             setHasUnitsSnapshot(false);
             setLocalBaseVisible(false);
             setLocalHqConfirmed(false);
@@ -1109,11 +1163,16 @@ export const GameUI: React.FC<GameUIProps> = ({
             // Legacy handler, keep for safety but MATCH_ENDED is primary
             if (!matchEnded) {
                 const isMe = data.winnerId === socket.id;
+                const botCount = Array.from(allPlayersSnapshotRef.current.values()).filter((candidate) => candidate.isBot).length;
                 console.log(`gameOver (Legacy) received. Winner: ${data.winnerId}, Local: ${socket.id}, DidWin: ${isMe}`);
 
                 setWinnerId(data.winnerId);
                 setGameOverReason(data.reason);
                 // setMatchEnded(true); // DISABLED: Using EndGameOverlay
+
+                if (tutorialMode && isMe && botCount > 0) {
+                    setTutorialBotChallengeCompleted(true);
+                }
 
                 setEndGameState({
                     mode: isMe ? 'VICTORY' : 'DEFEAT',
@@ -1140,6 +1199,10 @@ export const GameUI: React.FC<GameUIProps> = ({
             setWinnerId(data.winnerPlayerId);
             setGameOverReason(data.endReason);
             // setMatchEnded(true); // DISABLED: Using EndGameOverlay
+
+            if (tutorialMode && isMe && Array.from(allPlayersSnapshotRef.current.values()).some((candidate) => candidate.isBot)) {
+                setTutorialBotChallengeCompleted(true);
+            }
 
             setEndGameState({
                 mode: isMe ? 'VICTORY' : 'DEFEAT',
@@ -1260,6 +1323,9 @@ export const GameUI: React.FC<GameUIProps> = ({
 
         const handleChatMessage = (msg: ChatMessage) => {
             setChatMessages(prev => [...prev, msg]);
+            if (!chatVisibleRef.current && msg.sender !== socket.id && msg.sender !== 'System') {
+                setUnreadChatCount((current) => current + 1);
+            }
         };
 
         const handleOilRevealed = (e: CustomEvent) => {
@@ -1836,9 +1902,10 @@ export const GameUI: React.FC<GameUIProps> = ({
     };
 
     const showActionGuide = React.useCallback((guide: ActionGuide | undefined, source: 'build' | 'recruit') => {
-        if (!guide) return;
-        setMenuGuideState({ guide, source });
-    }, []);
+        const contextualGuide = getContextualActionGuide(guide, mapData?.mapType || tutorialMapType);
+        if (!contextualGuide) return;
+        setMenuGuideState({ guide: contextualGuide, source });
+    }, [mapData?.mapType, tutorialMapType]);
 
     const clearActionGuide = React.useCallback((id?: string) => {
         setMenuGuideState((current) => {
@@ -2076,12 +2143,87 @@ export const GameUI: React.FC<GameUIProps> = ({
         }
     }, [recruitOptions.length]);
 
+    useEffect(() => {
+        const measure = () => {
+            const next = {
+                recruit: recruitPanelRef.current?.offsetHeight ?? 0,
+                transport: transportPanelRef.current?.offsetHeight ?? 0,
+                recruitGuide: recruitGuidePanelRef.current?.offsetHeight ?? 0
+            };
+
+            setHudPanelHeights((current) => (
+                current.recruit === next.recruit &&
+                current.transport === next.transport &&
+                current.recruitGuide === next.recruitGuide
+            ) ? current : next);
+        };
+
+        measure();
+
+        const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null;
+        const observedElements = [
+            recruitPanelRef.current,
+            transportPanelRef.current,
+            recruitGuidePanelRef.current
+        ].filter((element): element is HTMLElement => element !== null);
+
+        observedElements.forEach((element) => observer?.observe(element));
+        window.addEventListener('resize', measure);
+
+        return () => {
+            observer?.disconnect();
+            window.removeEventListener('resize', measure);
+        };
+    }, [
+        recruitOptions.length,
+        recruitTitle,
+        selectedTransport?.id,
+        selectedTransport?.cargo?.length,
+        menuGuideState?.source,
+        menuGuideState?.guide.id
+    ]);
+
+    const hudEdgeGap = 20;
+    const hudStackGap = 12;
+    const hudBottomGap = 50;
+    const tutorialTopOffset = 62;
+    const defaultTutorialBottomClearance = 78;
+    const recruitPanelBottom = hudBottomGap;
+    const transportPanelBottom = recruitPanelBottom + (hudPanelHeights.recruit > 0 ? hudPanelHeights.recruit + hudStackGap : 0);
+    const recruitGuideBottom = transportPanelBottom + (hudPanelHeights.transport > 0 ? hudPanelHeights.transport + hudStackGap : 0);
+    const rightDockTopFromBottom = Math.max(
+        recruitOptions.length > 0 ? recruitPanelBottom + hudPanelHeights.recruit : 0,
+        selectedTransport && selectedTransport.type !== 'mothership' ? transportPanelBottom + hudPanelHeights.transport : 0,
+        menuGuideState?.source === 'recruit' ? recruitGuideBottom + hudPanelHeights.recruitGuide : 0
+    );
+    const tutorialBottomClearance = Math.max(defaultTutorialBottomClearance, rightDockTopFromBottom + hudStackGap);
+    const tutorialMaxHeight = Math.max(0, viewportSize.height - tutorialTopOffset - tutorialBottomClearance);
+    const tutorialPanelStyle: React.CSSProperties = {
+        top: `${tutorialTopOffset}px`,
+        right: `${hudEdgeGap}px`,
+        maxHeight: `${tutorialMaxHeight}px`
+    };
+    const tutorialToggleStyle: React.CSSProperties = {
+        top: `${tutorialTopOffset + 10}px`,
+        right: `${hudEdgeGap}px`
+    };
+    const recruitPanelStyle: React.CSSProperties = {
+        right: `${hudEdgeGap}px`,
+        bottom: `${recruitPanelBottom}px`
+    };
+    const transportPanelStyle: React.CSSProperties = {
+        right: `${hudEdgeGap}px`,
+        bottom: `${transportPanelBottom}px`,
+        top: 'auto',
+        transform: 'none'
+    };
+
     const menuGuideStyle = React.useMemo(() => {
         if (!menuGuideState) return undefined;
 
         if (menuGuideState.source === 'build') {
-            const viewportWidth = window.innerWidth;
-            const viewportHeight = window.innerHeight;
+            const viewportWidth = viewportSize.width;
+            const viewportHeight = viewportSize.height;
             const guideWidth = Math.min(340, viewportWidth - 32);
 
             return {
@@ -2090,8 +2232,11 @@ export const GameUI: React.FC<GameUIProps> = ({
             };
         }
 
-        return { right: 20, bottom: 170 };
-    }, [buildMenuPos.x, buildMenuPos.y, menuGuideState]);
+        return {
+            right: hudEdgeGap,
+            bottom: recruitGuideBottom
+        };
+    }, [buildMenuPos.x, buildMenuPos.y, hudEdgeGap, menuGuideState, recruitGuideBottom, viewportSize.height, viewportSize.width]);
 
     const isVoting = gameStatus === 'voting';
     const renderLoadingScreen = (title: string, subtitle: string, checks: LoadingCheckItem[]) => {
@@ -2450,12 +2595,15 @@ export const GameUI: React.FC<GameUIProps> = ({
                 {/* Chat Toggle Button (Consistent with Game) */}
                 <button
                     onMouseDown={handleRoundGuiButtonMouseDown('chat')}
-                    onClick={handleRoundGuiButtonClick('chat', () => setIsChatVisible(!isChatVisible))}
+                    onClick={handleRoundGuiButtonClick('chat', toggleChatVisibility)}
                     title={`${isChatVisible ? 'Hide Chat' : 'Show Chat'} • drag to move`}
                     className={`chat-global-toggle-btn ${draggingRoundGuiButton === 'chat' ? 'dragging' : ''}`}
                     style={{ left: roundGuiButtonPositions.chat.x, top: roundGuiButtonPositions.chat.y }}
                 >
                     <ChatToggleIcon />
+                    {!isChatVisible && unreadChatCount > 0 && (
+                        <span className="chat-global-toggle-btn__badge">{unreadChatLabel}</span>
+                    )}
                 </button>
 
                 {/* Chat Overlay in Lobby */}
@@ -2465,7 +2613,7 @@ export const GameUI: React.FC<GameUIProps> = ({
                     myId={socket.id || ''}
                     players={allPlayers}
                     visible={isChatVisible}
-                    onClose={() => setIsChatVisible(false)}
+                    onClose={closeChat}
                     position={chatPos}
                     onDragStart={handleChatDragStart}
                 />
@@ -2678,12 +2826,15 @@ export const GameUI: React.FC<GameUIProps> = ({
                 {/* Chat Toggle Button (Consistent with Game) */}
                 <button
                     onMouseDown={handleRoundGuiButtonMouseDown('chat')}
-                    onClick={handleRoundGuiButtonClick('chat', () => setIsChatVisible(!isChatVisible))}
+                    onClick={handleRoundGuiButtonClick('chat', toggleChatVisibility)}
                     title={`${isChatVisible ? 'Hide Chat' : 'Show Chat'} • drag to move`}
                     className={`chat-global-toggle-btn ${draggingRoundGuiButton === 'chat' ? 'dragging' : ''}`}
                     style={{ left: roundGuiButtonPositions.chat.x, top: roundGuiButtonPositions.chat.y }}
                 >
                     <ChatToggleIcon />
+                    {!isChatVisible && unreadChatCount > 0 && (
+                        <span className="chat-global-toggle-btn__badge">{unreadChatLabel}</span>
+                    )}
                 </button>
 
                 <ChatOverlay
@@ -2692,7 +2843,7 @@ export const GameUI: React.FC<GameUIProps> = ({
                     myId={socket.id || ''}
                     players={allPlayers}
                     visible={isChatVisible}
-                    onClose={() => setIsChatVisible(false)}
+                    onClose={closeChat}
                     position={chatPos}
                     onDragStart={handleChatDragStart}
                 />
@@ -2794,6 +2945,7 @@ export const GameUI: React.FC<GameUIProps> = ({
                     guide={menuGuideState.guide}
                     source={menuGuideState.source}
                     style={menuGuideStyle}
+                    panelRef={menuGuideState.source === 'recruit' ? recruitGuidePanelRef : undefined}
                 />
             )}
 
@@ -2802,6 +2954,12 @@ export const GameUI: React.FC<GameUIProps> = ({
                     player={player}
                     mapData={mapData}
                     units={units}
+                    tutorialMapType={tutorialMapType}
+                    onAllObjectivesComplete={onTutorialObjectivesCompleted}
+                    botChallengeStarted={tutorialBotChallengeStarted}
+                    botChallengeCompleted={tutorialBotChallengeCompleted}
+                    panelStyle={tutorialPanelStyle}
+                    toggleStyle={tutorialToggleStyle}
                 />
             )}
 
@@ -3037,7 +3195,11 @@ export const GameUI: React.FC<GameUIProps> = ({
             )}
 
             {selectedTransport && selectedTransport.type !== 'mothership' && (
-                <div className="transport-control-panel">
+                <div
+                    ref={transportPanelRef}
+                    className="transport-control-panel"
+                    style={transportPanelStyle}
+                >
                     <div className="transport-header">
                         <div className="transport-title">Transport Control</div>
                         <div className="transport-stats">
@@ -3138,7 +3300,9 @@ export const GameUI: React.FC<GameUIProps> = ({
 
             {recruitOptions.length > 0 && (
                 <div
+                    ref={recruitPanelRef}
                     className={`recruit-panel ${recruitTitle === 'Mothership Recruitment' ? 'large' : 'small'}`}
+                    style={recruitPanelStyle}
                 >
                     <button
                         onClick={() => {
@@ -3363,12 +3527,15 @@ export const GameUI: React.FC<GameUIProps> = ({
             {/* Chat Toggle Button */}
             <button
                 onMouseDown={handleRoundGuiButtonMouseDown('chat')}
-                onClick={handleRoundGuiButtonClick('chat', () => setIsChatVisible(!isChatVisible))}
+                onClick={handleRoundGuiButtonClick('chat', toggleChatVisibility)}
                 title={`${isChatVisible ? 'Hide Chat' : 'Show Chat'} • drag to move`}
                 className={`chat-global-toggle-btn ${draggingRoundGuiButton === 'chat' ? 'dragging' : ''}`}
                 style={{ left: roundGuiButtonPositions.chat.x, top: roundGuiButtonPositions.chat.y }}
             >
                 <ChatToggleIcon />
+                {!isChatVisible && unreadChatCount > 0 && (
+                    <span className="chat-global-toggle-btn__badge">{unreadChatLabel}</span>
+                )}
             </button>
 
             {/* Game Over Screen */}
@@ -3404,7 +3571,7 @@ export const GameUI: React.FC<GameUIProps> = ({
                 myId={socket.id || ''}
                 players={allPlayers}
                 visible={isChatVisible}
-                onClose={() => setIsChatVisible(false)}
+                onClose={closeChat}
                 position={chatPos}
                 onDragStart={handleChatDragStart}
             />

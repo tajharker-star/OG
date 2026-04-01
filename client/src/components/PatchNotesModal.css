@@ -56,6 +56,50 @@
     gap: 12px;
 }
 
+.patch-notes-hero__legend {
+    margin-top: 16px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.patch-notes-hero__legend-chip {
+    min-height: 42px;
+    padding: 8px 12px;
+    border-radius: 14px;
+    border: 1px solid rgba(255, 214, 102, 0.12);
+    background: rgba(255, 255, 255, 0.04);
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: #f4f7ff;
+}
+
+.patch-notes-hero__legend-icon {
+    width: 22px;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #ffd88a;
+}
+
+.patch-notes-hero__legend-icon svg {
+    width: 18px;
+    height: 18px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.patch-notes-hero__legend-label {
+    font-size: 0.8rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+}
+
 .patch-notes-hero__stat {
     min-width: 140px;
     padding: 12px 14px;
@@ -145,73 +189,56 @@
 
 .patch-note-card {
     display: grid;
-    grid-template-columns: minmax(200px, 240px) 18px minmax(0, 1fr);
+    grid-template-columns: 188px 12px minmax(0, 1fr);
     gap: 14px;
     align-items: stretch;
 }
 
-.patch-note-card__visual {
-    position: relative;
-    overflow: hidden;
-    min-height: 100%;
+.patch-note-card__icon-panel {
+    padding: 16px;
     border-radius: 18px;
-    border: 1px solid color-mix(in srgb, var(--patch-note-accent, #ffd766) 32%, rgba(255, 255, 255, 0.08));
+    border: 1px solid color-mix(in srgb, var(--patch-note-accent, #ffd766) 30%, rgba(255, 255, 255, 0.08));
     background:
-        radial-gradient(circle at 20% 20%, color-mix(in srgb, var(--patch-note-accent, #ffd766) 20%, transparent), transparent 38%),
-        linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02)),
-        rgba(6, 10, 16, 0.95);
+        radial-gradient(circle at 50% 8%, color-mix(in srgb, var(--patch-note-accent, #ffd766) 22%, transparent), transparent 42%),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.02)),
+        rgba(8, 12, 19, 0.96);
     box-shadow:
         inset 0 1px 0 rgba(255, 255, 255, 0.05),
         0 16px 32px rgba(0, 0, 0, 0.24);
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
 }
 
-.patch-note-card__visual--icon-only {
+.patch-note-card__icon-main-shell {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    align-items: center;
+    text-align: center;
+}
+
+.patch-note-card__icon-main {
+    width: 78px;
+    height: 78px;
+    border-radius: 22px;
     display: flex;
     align-items: center;
     justify-content: center;
+    color: color-mix(in srgb, var(--patch-note-accent, #ffd766) 78%, white);
     background:
-        radial-gradient(circle at 50% 30%, color-mix(in srgb, var(--patch-note-accent, #ffd766) 28%, transparent), transparent 45%),
-        linear-gradient(145deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.01)),
-        rgba(8, 12, 19, 0.96);
+        linear-gradient(180deg, color-mix(in srgb, var(--patch-note-accent, #ffd766) 22%, rgba(255,255,255,0.05)), rgba(255,255,255,0.02)),
+        rgba(255, 255, 255, 0.02);
+    border: 1px solid color-mix(in srgb, var(--patch-note-accent, #ffd766) 34%, rgba(255, 255, 255, 0.08));
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.08),
+        0 16px 32px rgba(0, 0, 0, 0.22);
 }
 
-.patch-note-card__artwork {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    opacity: 0.78;
-}
-
-.patch-note-card__visual-scrim {
-    position: absolute;
-    inset: 0;
-    background:
-        linear-gradient(180deg, rgba(7, 10, 16, 0.14), rgba(7, 10, 16, 0.86)),
-        linear-gradient(135deg, color-mix(in srgb, var(--patch-note-accent, #ffd766) 24%, transparent), transparent 55%);
-}
-
-.patch-note-card__visual-badge {
-    position: absolute;
-    top: 14px;
-    left: 14px;
-    width: 54px;
-    height: 54px;
-    border-radius: 16px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(7, 10, 16, 0.72);
-    border: 1px solid color-mix(in srgb, var(--patch-note-accent, #ffd766) 38%, rgba(255, 255, 255, 0.08));
-    color: color-mix(in srgb, var(--patch-note-accent, #ffd766) 72%, white);
-    backdrop-filter: blur(8px);
-}
-
-.patch-note-card__visual-badge svg,
-.patch-note-card__visual-icon-hero svg {
-    width: 28px;
-    height: 28px;
+.patch-note-card__icon-main svg,
+.patch-note-card__change-icon svg {
+    width: 40px;
+    height: 40px;
     fill: none;
     stroke: currentColor;
     stroke-width: 2.7;
@@ -219,37 +246,70 @@
     stroke-linejoin: round;
 }
 
-.patch-note-card__visual-icon-hero {
-    width: 112px;
-    height: 112px;
-    border-radius: 28px;
+.patch-note-card__icon-main-label {
+    font-size: 0.86rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #fff1c9;
+}
+
+.patch-note-card__change-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.patch-note-card__change-heading {
+    font-size: 0.75rem;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: rgba(255, 241, 201, 0.72);
+}
+
+.patch-note-card__change-chip {
+    min-height: 56px;
+    padding: 10px 8px;
+    border-radius: 14px;
     display: flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
-    background:
-        linear-gradient(180deg, color-mix(in srgb, var(--patch-note-accent, #ffd766) 24%, rgba(255,255,255,0.06)), rgba(255,255,255,0.02)),
-        rgba(255, 255, 255, 0.02);
-    color: color-mix(in srgb, var(--patch-note-accent, #ffd766) 76%, white);
-    box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.08),
-        0 18px 36px rgba(0, 0, 0, 0.24);
+    gap: 6px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    color: var(--text-secondary);
+    text-align: center;
 }
 
-.patch-note-card__visual-icon-hero svg {
-    width: 52px;
-    height: 52px;
-}
-
-.patch-note-card__visual-meta {
-    position: absolute;
-    right: 14px;
-    bottom: 14px;
-    left: 14px;
-    display: flex;
+.patch-note-card__change-icon {
+    width: 26px;
+    height: 26px;
+    flex: 0 0 auto;
+    display: inline-flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    flex-wrap: wrap;
+    justify-content: center;
+    color: color-mix(in srgb, var(--patch-note-accent, #ffd766) 74%, white);
+}
+
+.patch-note-card__change-icon svg {
+    width: 22px;
+    height: 22px;
+}
+
+.patch-note-card__change-label {
+    font-size: 0.74rem;
+    font-weight: 700;
+    line-height: 1.2;
+    color: #eef2f8;
+}
+
+.patch-note-card__icon-meta {
+    margin-top: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
 }
 
 .patch-note-card__rail {
@@ -275,13 +335,14 @@
 .patch-note-card__badge {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
+    width: fit-content;
     padding: 4px 10px;
     border-radius: 999px;
     font-size: 0.74rem;
     font-weight: 700;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    backdrop-filter: blur(8px);
 }
 
 .patch-note-card__badge--latest {
@@ -297,7 +358,6 @@
 .patch-note-card__date {
     font-size: 0.84rem;
     color: rgba(244, 248, 255, 0.88);
-    text-shadow: 0 1px 8px rgba(0, 0, 0, 0.4);
 }
 
 .patch-note-card__title {
@@ -358,12 +418,13 @@
     }
 
     .patch-note-card__content,
-    .patch-notes-hero {
+    .patch-notes-hero,
+    .patch-note-card__icon-panel {
         padding: 16px;
     }
 
-    .patch-note-card__visual {
-        min-height: 180px;
+    .patch-note-card__change-list {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
     }
 
     .patch-note-card__rail {
@@ -380,8 +441,7 @@
         width: 100%;
     }
 
-    .patch-note-card__visual-meta {
-        align-items: flex-start;
-        flex-direction: column;
+    .patch-note-card__change-list {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 }

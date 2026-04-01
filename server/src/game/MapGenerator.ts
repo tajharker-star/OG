@@ -45,6 +45,8 @@ export interface OilSpot {
     y: number;
     radius: number;
     occupiedBy?: string;
+    ownerId?: string;
+    building?: Building;
 }
 
 export interface Bridge {

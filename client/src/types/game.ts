@@ -43,7 +43,9 @@ export interface OilSpot {
   x: number;
   y: number;
   radius: number;
-  occupiedBy?: string; 
+  occupiedBy?: string;
+  ownerId?: string;
+  building?: Building;
 }
 
 export interface Bridge {
@@ -105,6 +107,7 @@ export interface Unit {
   lastSteerTime?: number;
   vx?: number;
   vy?: number;
+  path?: { x: number; y: number }[];
   facingAngle?: number;
 }
 
@@ -117,6 +120,7 @@ export interface Player {
     oil: number;
   };
   isBot?: boolean;
+  difficulty?: number;
   status?: 'active' | 'eliminated';
   hqSpawnedOnce?: boolean;
 }

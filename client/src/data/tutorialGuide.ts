@@ -22,6 +22,41 @@ export type TutorialLesson = {
     bullets: string[];
 };
 
+export type TutorialMapType = 'desert' | 'grasslands' | 'islands';
+
+export type TutorialMapOption = {
+    id: TutorialMapType;
+    label: string;
+    icon: string;
+    summary: string;
+    focus: string;
+    highlights: string[];
+};
+
+export type TutorialMapPlaybook = {
+    id: TutorialMapType;
+    label: string;
+    icon: string;
+    headerSummary: string;
+    objectiveCallout: string;
+    focusLessons: TutorialLesson[];
+    resourceLessons: TutorialLesson[];
+    winningLessons: TutorialLesson[];
+    buildingSpotlightIds: string[];
+    unitSpotlightIds: string[];
+    objectiveDetails: {
+        economy: string;
+        production: string;
+        mobility: string;
+        tech: string;
+    };
+    extraObjective: {
+        id: string;
+        title: string;
+        detail: string;
+    };
+};
+
 export const TUTORIAL_CORE_LESSONS: TutorialLesson[] = [
     {
         id: 'goal',
@@ -49,6 +84,7 @@ export const TUTORIAL_CORE_LESSONS: TutorialLesson[] = [
         summary: 'This tutorial sandbox starts rich and safe so you can experiment first, then press Add Bot when you want live practice.',
         bullets: [
             'Build freely, read the unit and building cards, and use the checklist to cover the basics.',
+            'Your final tutorial quest is to press Add Bot and defeat that bot so you reach the victory screen.',
             'When you feel comfortable, add a bot and practice turning your economy into an actual win.',
             'After that, jump into The Beginning to start the normal campaign.'
         ]
@@ -71,7 +107,8 @@ export const TUTORIAL_RESOURCE_LESSONS: TutorialLesson[] = [
         title: 'Oil',
         summary: 'Oil is the tech resource. Your strongest vehicles, ships, aircraft, and support structures all need it.',
         bullets: [
-            'Oil Wells harvest land oil spots. Oil Rigs harvest water oil spots.',
+            'Oil Wells go on land oil spots. Oil Rigs go only on black oil spots that are out in the water.',
+            'Oil Rigs are built by Construction Ships from a Dock, not by normal Builders on land.',
             'Rocketeers, tanks, missile launchers, aircraft, carriers, and motherships all lean on oil.',
             'If you ignore oil, you lock yourself out of advanced armies and lose the late game.'
         ]
@@ -140,11 +177,13 @@ export const TUTORIAL_BUILDING_GROUPS: TutorialGuideGroup[] = [
                 id: 'oil-rig',
                 entityType: 'oil_rig',
                 title: 'Oil Rig',
-                summary: 'Water-based oil income that pays for powerful naval and air late-game armies.',
-                strengths: 'Strong offshore oil production once your dock game is online.',
-                caution: 'Requires water access and is vulnerable if you lose naval control.',
+                summary: 'Water-based oil income built on black offshore oil spots using a Construction Ship.',
+                strengths: 'Strong offshore oil production once your dock and Construction Ship are online.',
+                caution: 'Cannot be placed on land and normal Builders cannot place it. You need water access and a Construction Ship.',
                 tips: [
-                    'Use Construction Ships to reach offshore oil safely.',
+                    'Look for the black oil spot sitting in the water, not the land oil spot.',
+                    'Build a Dock first, then send a Construction Ship to the offshore oil spot.',
+                    'If the oil spot is on land, build an Oil Well instead of an Oil Rig.',
                     'Oil Rigs are a big reason to build docks early on island maps.',
                     'Escort your offshore economy with destroyers, pirate ships, or naval mines.'
                 ]
@@ -337,6 +376,7 @@ export const TUTORIAL_UNIT_GROUPS: TutorialGuideGroup[] = [
                 strengths: 'Required for Oil Rigs and strong water infrastructure.',
                 caution: 'A Construction Ship without water control is easy to punish.',
                 tips: [
+                    'Use it to place Oil Rigs on black oil spots in the water.',
                     'Escort construction ships with combat ships if enemy navy is nearby.',
                     'Use them to expand offshore oil and safe naval infrastructure.',
                     'They are strategic units, so losing them slows your whole sea game.'
@@ -576,3 +616,221 @@ export const TUTORIAL_STRATEGY_LESSONS: TutorialLesson[] = [
         ]
     }
 ];
+
+export const TUTORIAL_MAP_OPTIONS: TutorialMapOption[] = [
+    {
+        id: 'desert',
+        label: 'Desert',
+        icon: '🏜️',
+        summary: 'Best for learning land-oil maps and the Oil Seeker scanner flow.',
+        focus: 'Open Barracks, recruit an Oil Seeker, reveal land oil, then convert it into Oil Wells and heavy land tech.',
+        highlights: [
+            'Recruit Oil Seeker from Barracks',
+            'Reveal hidden land oil before building',
+            'Oil Wells power tanks, missiles, and aircraft'
+        ]
+    },
+    {
+        id: 'grasslands',
+        label: 'Grasslands',
+        icon: '🌿',
+        summary: 'Best for learning mixed land pressure with shoreline docks and ferry routes.',
+        focus: 'Use Docks earlier than you think so builders, ferries, and coastal armies can move between side lanes quickly.',
+        highlights: [
+            'Dock opens water shortcuts',
+            'Ferries move builders and infantry fast',
+            'Shoreline control snowballs expansions'
+        ]
+    },
+    {
+        id: 'islands',
+        label: 'Islands',
+        icon: '🌊',
+        summary: 'Best for learning navy, Construction Ships, and offshore oil rigs.',
+        focus: 'Build a Dock, recruit a Construction Ship, and place Oil Rigs on black water oil spots to unlock your late game.',
+        highlights: [
+            'Dock is your first big tech building',
+            'Construction Ships place Oil Rigs',
+            'Destroyers protect offshore economy'
+        ]
+    }
+];
+
+export const TUTORIAL_MAP_PLAYBOOKS: Record<TutorialMapType, TutorialMapPlaybook> = {
+    desert: {
+        id: 'desert',
+        label: 'Desert',
+        icon: '🏜️',
+        headerSummary: 'Desert maps hide key land oil. Start with a Barracks, recruit an Oil Seeker, turn the scanner on, reveal oil, then build Oil Wells so your tanks and missiles come online fast.',
+        objectiveCallout: 'Desert plan: Barracks first, Oil Seeker second, Oil Wells third, then roll that oil into tanks, missile launchers, and the HQ kill.',
+        focusLessons: [
+            {
+                id: 'desert-map-plan',
+                title: 'Desert maps are about hidden land oil',
+                summary: 'Your biggest tutorial job on desert is learning that oil usually has to be found before it can be used.',
+                bullets: [
+                    'Recruit an Oil Seeker from the Barracks early instead of blindly guessing where oil is.',
+                    'Select the Oil Seeker and toggle the scanner so hidden land oil becomes obvious.',
+                    'Once a land oil spot is revealed, put an Oil Well on it and start planning your tank or missile timing.'
+                ]
+            }
+        ],
+        resourceLessons: [
+            {
+                id: 'desert-resource-focus',
+                title: 'How desert income really works',
+                summary: 'Gold gets you started, but revealed land oil is what unlocks your real power spike.',
+                bullets: [
+                    'Open with the same builder + gold habits as any other map.',
+                    'Do not delay your Oil Seeker too long or you will sit on gold with no tech follow-up.',
+                    'Desert players who find oil first usually control the mid game.'
+                ]
+            }
+        ],
+        winningLessons: [
+            {
+                id: 'desert-winning-plan',
+                title: 'How to win desert maps',
+                summary: 'Use the scanner to beat greed. Reveal oil, claim it, then punish enemies who stayed on basic infantry too long.',
+                bullets: [
+                    'Pressure enemy oil islands and wells before committing to the HQ dive.',
+                    'Tanks and missile launchers are especially strong once your land oil is secured.',
+                    'If the enemy never gets their oil online, the desert map usually snowballs in your favor.'
+                ]
+            }
+        ],
+        buildingSpotlightIds: ['barracks', 'oil-well', 'tank-factory', 'tower', 'mine', 'farm'],
+        unitSpotlightIds: ['builder', 'oil-seeker', 'soldier', 'tank', 'missile-launcher', 'humvee'],
+        objectiveDetails: {
+            economy: 'On desert maps, place at least one gold building (Mine or Farm) and one oil building (usually an Oil Well after scanning) so your economy covers both gold and tech.',
+            production: 'Open with a Barracks so you can recruit the Oil Seeker and early troops before scaling into a Tank Factory.',
+            mobility: 'Use Oil Seekers, humvees, towers, and builder expansion to control wide land lanes and protect your oil.',
+            tech: 'Land oil from Oil Wells is the switch that turns on tanks, missile launchers, aircraft, and real mid-game pressure.'
+        },
+        extraObjective: {
+            id: 'desert-scan',
+            title: 'Recruit and use an Oil Seeker',
+            detail: 'Desert maps hide oil. Train an Oil Seeker from the Barracks, select it, and use the scanner so land oil spots become obvious.'
+        }
+    },
+    grasslands: {
+        id: 'grasslands',
+        label: 'Grasslands',
+        icon: '🌿',
+        headerSummary: 'Grasslands still rewards docks. Use the shoreline to move faster than pure land players, ferry builders into side lanes, and open safer coastal expansion routes.',
+        objectiveCallout: 'Grasslands plan: build income, get a Dock on a useful shoreline, use ferries to move builders and troops, then squeeze the enemy from more than one angle.',
+        focusLessons: [
+            {
+                id: 'grasslands-map-plan',
+                title: 'Grasslands still wants shoreline control',
+                summary: 'Even on greener land maps, Docks create shortcuts that pure land openings cannot match.',
+                bullets: [
+                    'A Dock lets you use Ferries and naval units to bypass slow land pathing.',
+                    'Builders moved by Ferry can claim side islands and backline space much faster.',
+                    'If there is offshore oil or water pressure, your Dock becomes even more valuable.'
+                ]
+            }
+        ],
+        resourceLessons: [
+            {
+                id: 'grasslands-resource-focus',
+                title: 'Why Docks matter on grasslands',
+                summary: 'Docks are not just for island maps. They help you secure side economy and faster reinforcement routes.',
+                bullets: [
+                    'Mine and Farm openings are still good, but do not ignore the shoreline.',
+                    'A Dock can protect coastal income and let you contest water routes before the enemy does.',
+                    'Use ferries to move builders and infantry into safer expansion positions.'
+                ]
+            }
+        ],
+        winningLessons: [
+            {
+                id: 'grasslands-winning-plan',
+                title: 'How to win grasslands maps',
+                summary: 'Use the dock to create side pressure, then force the enemy to defend more ground than they can actually cover.',
+                bullets: [
+                    'Attack from multiple lanes instead of only one big land push.',
+                    'A Ferry or Construction Ship can open paths the enemy does not expect.',
+                    'Once their side economy is stretched, collapse production and finish the HQ.'
+                ]
+            }
+        ],
+        buildingSpotlightIds: ['dock', 'mine', 'farm', 'barracks', 'bridge-node', 'oil-well'],
+        unitSpotlightIds: ['builder', 'ferry', 'construction-ship', 'destroyer', 'humvee', 'soldier'],
+        objectiveDetails: {
+            economy: 'Build at least one gold building (Mine or Farm) and one oil building so your income covers both expansion and tech before you lean into shoreline pressure.',
+            production: 'Open Barracks for basics, then add a Dock early so ferries and naval tools can open faster map control.',
+            mobility: 'Practice Ferries, Docks, and builder movement so you can attack from side lanes instead of slogging through one front.',
+            tech: 'Grasslands rewards players who turn shoreline control into stable oil and production before the enemy can react.'
+        },
+        extraObjective: {
+            id: 'grasslands-dock',
+            title: 'Open shoreline logistics',
+            detail: 'Build a Dock on useful water, then recruit a Ferry or Construction Ship so you can move builders and armies through side lanes faster.'
+        }
+    },
+    islands: {
+        id: 'islands',
+        label: 'Islands',
+        icon: '🌊',
+        headerSummary: 'Island maps are won on the water. Build a Dock early, recruit a Construction Ship, and turn black offshore oil spots into Oil Rigs while your navy protects them.',
+        objectiveCallout: 'Islands plan: Dock first, Construction Ship second, Oil Rig third, then snowball offshore oil into destroyers, transports, and the HQ finish.',
+        focusLessons: [
+            {
+                id: 'islands-map-plan',
+                title: 'Island maps teach the full Dock -> Construction Ship -> Oil Rig flow',
+                summary: 'If you skip water infrastructure on islands, you usually fall behind before the real fighting starts.',
+                bullets: [
+                    'Build a Dock early because water control decides where your armies can even go.',
+                    'Recruit a Construction Ship so you can place Oil Rigs on black offshore oil spots.',
+                    'Escort your rigs and transports with combat ships so the enemy cannot delete your economy for free.'
+                ]
+            }
+        ],
+        resourceLessons: [
+            {
+                id: 'islands-resource-focus',
+                title: 'Offshore oil is the island-map power spike',
+                summary: 'Black water oil spots are some of the most important objectives on island maps.',
+                bullets: [
+                    'Normal Builders cannot place Oil Rigs, so the Dock and Construction Ship are mandatory.',
+                    'A protected Oil Rig fuels destroyers, aircraft, carriers, and other expensive tech.',
+                    'If you control the offshore oil, you usually control the late game.'
+                ]
+            }
+        ],
+        winningLessons: [
+            {
+                id: 'islands-winning-plan',
+                title: 'How to win island maps',
+                summary: 'Secure water routes first, then strangle offshore economy, then push the HQ once the enemy cannot reinforce between islands.',
+                bullets: [
+                    'Destroyers are the cleanest way to escort ferries, rigs, and construction ships.',
+                    'Bridge Nodes and Ferries let you attack islands the enemy left weak.',
+                    'Once their docks and rigs are down, the HQ becomes much easier to finish.'
+                ]
+            }
+        ],
+        buildingSpotlightIds: ['dock', 'oil-rig', 'bridge-node', 'repair-dock', 'naval-mine', 'mine'],
+        unitSpotlightIds: ['construction-ship', 'destroyer', 'ferry', 'pirate-ship', 'builder', 'aircraft-carrier'],
+        objectiveDetails: {
+            economy: 'Start with a gold building, then claim black offshore oil with a Dock and Construction Ship so your economy has both gold income and oil income online.',
+            production: 'Dock is the priority production building here because it unlocks ships, ferries, Construction Ships, and offshore expansion.',
+            mobility: 'Practice Ferries, Construction Ships, Destroyers, and Bridge Nodes so moving between islands becomes second nature.',
+            tech: 'Island late game is powered by offshore oil. The faster your rigs are online, the faster your navy and aircraft can take over.'
+        },
+        extraObjective: {
+            id: 'islands-rig',
+            title: 'Launch offshore expansion',
+            detail: 'Build a Dock, recruit a Construction Ship, and use it to place an Oil Rig on a black oil spot in the water.'
+        }
+    }
+};
+
+export const normalizeTutorialMapType = (mapType?: string): TutorialMapType => {
+    if (mapType === 'desert' || mapType === 'grasslands' || mapType === 'islands') {
+        return mapType;
+    }
+
+    return 'islands';
+};

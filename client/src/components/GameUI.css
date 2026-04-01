@@ -200,6 +200,25 @@
     pointer-events: none;
 }
 
+.chat-global-toggle-btn__badge {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    min-width: 22px;
+    height: 22px;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: linear-gradient(180deg, #ff6b6b, #d62828);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 800;
+    line-height: 22px;
+    text-align: center;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.45);
+    border: 2px solid rgba(8, 12, 18, 0.95);
+    pointer-events: none;
+}
+
 .chat-global-toggle-btn svg {
     pointer-events: none;
 }

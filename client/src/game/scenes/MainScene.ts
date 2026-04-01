@@ -45,6 +45,17 @@ type PlacementValidation = {
     reason: string;
 };
 
+type PredictedMoveState = {
+    targetX: number;
+    targetY: number;
+    speed: number;
+    type: string;
+    intentId: string;
+    path?: { x: number; y: number }[];
+    vx?: number;
+    vy?: number;
+};
+
 const CLIENT_DEFINITE_PLACEMENT_FAILURE_REASONS = new Set([
     'Map data still loading',
     'Connection not ready',
@@ -93,6 +104,7 @@ const BUILDING_FOOTPRINTS: Record<string, number> = {
 };
 
 const NON_BLOCKING_BUILDING_TYPES = new Set<string>(['mine', 'bridge_node', 'naval_mine']);
+const BRIDGE_NODE_LAND_ACCESS_EDGE_PADDING = 18;
 
 export class MainScene extends Phaser.Scene {
   private islandsGroup!: Phaser.GameObjects.Group;
@@ -176,7 +188,7 @@ export class MainScene extends Phaser.Scene {
     };
 
     // Client-Side Prediction
-  private predictedMoves: Map<string, { targetX: number, targetY: number, speed: number, type: string, intentId: string, vx?: number, vy?: number }> = new Map();
+  private predictedMoves: Map<string, PredictedMoveState> = new Map();
   private lastCommandTime: number = 0;
 
   constructor() {
@@ -558,6 +570,142 @@ export class MainScene extends Phaser.Scene {
     };
   }
 
+  private isBridgeNodeWaypoint(point?: { x: number; y: number }, tolerance: number = 12): boolean {
+    if (!point || !this.currentMap) return false;
+
+    for (const island of this.currentMap.islands) {
+      for (const building of island.buildings) {
+        if (building.type !== 'bridge_node' || building.isConstructing || building.health <= 0) continue;
+        const nodeX = island.x + (building.x || 0);
+        const nodeY = island.y + (building.y || 0);
+        if (Math.hypot(point.x - nodeX, point.y - nodeY) <= tolerance) {
+          return true;
+        }
+      }
+    }
+
+    for (const building of this.currentMap.waterBuildings || []) {
+      if (building.type !== 'bridge_node' || building.isConstructing || building.health <= 0) continue;
+      const nodeX = building.x || 0;
+      const nodeY = building.y || 0;
+      if (Math.hypot(point.x - nodeX, point.y - nodeY) <= tolerance) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private getWaypointArrivalThreshold(point?: { x: number; y: number }) {
+    return this.isBridgeNodeWaypoint(point) ? 8 : 24;
+  }
+
+  private getIslandContainingPoint(x: number, y: number, buffer: number = 35): Island | null {
+    if (!this.currentMap) return null;
+
+    const island = this.currentMap.islands.find(candidate => {
+      if (candidate.points) {
+        if (this.isPointInPolygon({ x, y }, candidate.points)) return true;
+        const closest = this.getClosestPointOnPolygon({ x, y }, candidate.points);
+        return Math.hypot(x - closest.x, y - closest.y) <= buffer;
+      }
+      return Math.hypot(x - candidate.x, y - candidate.y) <= candidate.radius + buffer;
+    });
+
+    return island || null;
+  }
+
+  private getTraversalNeighbors(token: string): string[] {
+    if (!this.currentMap) return [];
+
+    if (token.startsWith('island:')) {
+      const islandId = token.slice('island:'.length);
+      const island = this.currentMap.islands.find(candidate => candidate.id === islandId);
+      if (!island) return [];
+
+      return island.buildings
+        .filter(building => building.type === 'bridge_node' && !building.isConstructing && building.health > 0)
+        .map(building => `node:${building.id}`);
+    }
+
+    const nodeId = token.slice('node:'.length);
+    const node = this.getNodeView(nodeId);
+    if (!node || node.building.type !== 'bridge_node' || node.building.isConstructing || node.building.health <= 0) {
+      return [];
+    }
+
+    const neighbors: string[] = [];
+    if (node.island) {
+      neighbors.push(`island:${node.island.id}`);
+    }
+
+    this.currentMap.bridges.forEach(bridge => {
+      if (bridge.type !== 'bridge') return;
+      if (bridge.nodeAId === nodeId) neighbors.push(`node:${bridge.nodeBId}`);
+      if (bridge.nodeBId === nodeId) neighbors.push(`node:${bridge.nodeAId}`);
+    });
+
+    return neighbors;
+  }
+
+  private findTraversalPathBetweenTokens(startTokens: string[], endToken: string): string[] | null {
+    if (startTokens.length === 0) return null;
+    if (startTokens.includes(endToken)) return [endToken];
+
+    const queue: Array<{ token: string; path: string[] }> = [];
+    const visited = new Set<string>();
+
+    startTokens.forEach(token => {
+      queue.push({ token, path: [token] });
+      visited.add(token);
+    });
+
+    while (queue.length > 0) {
+      const { token, path } = queue.shift()!;
+      if (token === endToken) return path;
+
+      for (const neighbor of this.getTraversalNeighbors(token)) {
+        if (visited.has(neighbor)) continue;
+        visited.add(neighbor);
+        queue.push({ token: neighbor, path: [...path, neighbor] });
+      }
+    }
+
+    return null;
+  }
+
+  private buildPredictedBridgeWaypointPath(unit: Unit, target: { x: number; y: number }): { x: number; y: number }[] {
+    if (!this.currentMap) return [];
+    if (!['soldier', 'sniper', 'rocketeer', 'builder', 'tank', 'humvee', 'oil_seeker', 'missile_launcher'].includes(unit.type)) {
+      return [];
+    }
+
+    const startIsland = this.getIslandContainingPoint(unit.x, unit.y, 45);
+    const endIsland = this.getIslandContainingPoint(target.x, target.y, 45);
+    if (!startIsland || !endIsland || startIsland.id === endIsland.id) return [];
+
+    const traversalPath = this.findTraversalPathBetweenTokens([`island:${startIsland.id}`], `island:${endIsland.id}`);
+    if (!Array.isArray(traversalPath) || traversalPath.length < 2) return [];
+
+    const waypoints: { x: number; y: number }[] = [];
+    traversalPath.forEach(token => {
+      if (!token.startsWith('node:')) return;
+      const node = this.getNodeView(token.slice('node:'.length));
+      if (!node) return;
+      waypoints.push(this.getAdjustedTarget(unit.type, node.x, node.y));
+    });
+
+    const filtered: { x: number; y: number }[] = [];
+    waypoints.forEach(point => {
+      const previous = filtered[filtered.length - 1];
+      if (!previous || Math.hypot(previous.x - point.x, previous.y - point.y) > 16) {
+        filtered.push(point);
+      }
+    });
+
+    return filtered;
+  }
+
   private getBridgeChainPaths(bridges: GameMap['bridges']) {
     const bridgeSegments = bridges.filter(bridge => bridge.type === 'bridge');
     const adjacency = new Map<string, string[]>();
@@ -653,6 +801,20 @@ export class MainScene extends Phaser.Scene {
     );
   }
 
+  private hasBridgeNodeLandAccessClearance(island: Island, absX: number, absY: number): boolean {
+    if (!this.isPointOnIslandSurface(island, absX, absY)) {
+      return false;
+    }
+
+    if (island.points) {
+      const closest = this.getClosestPointOnPolygon({ x: absX, y: absY }, island.points);
+      return Math.hypot(absX - closest.x, absY - closest.y) >= BRIDGE_NODE_LAND_ACCESS_EDGE_PADDING;
+    }
+
+    const edgeDistance = island.radius - Math.hypot(absX - island.x, absY - island.y);
+    return edgeDistance >= BRIDGE_NODE_LAND_ACCESS_EDGE_PADDING;
+  }
+
   private isPlacementClearOnIsland(island: Island, buildingType: string, absX: number, absY: number): boolean {
     const footprint = this.getEffectivePlacementFootprintRadius(buildingType);
     const nonBlocking = this.isNonBlockingBuildingType(buildingType);
@@ -690,6 +852,10 @@ export class MainScene extends Phaser.Scene {
     }
 
     if (buildingType !== 'dock' && buildingType !== 'oil_rig') {
+      if (buildingType === 'bridge_node' && !this.hasBridgeNodeLandAccessClearance(island, absX, absY)) {
+        return false;
+      }
+
       const edgePadding = nonBlocking
         ? 0
         : this.currentMap?.mapType === 'islands'
@@ -850,6 +1016,10 @@ export class MainScene extends Phaser.Scene {
       }
     }
 
+    if (type === 'bridge_node' && !this.hasBridgeNodeLandAccessClearance(island, x, y)) {
+      return { valid: false, reason: 'Too close to island edge for bridge access' };
+    }
+
     if (type === 'mine') {
       const freeSpot = island.goldSpots.find(spot =>
         !spot.occupiedBy &&
@@ -994,7 +1164,26 @@ export class MainScene extends Phaser.Scene {
       .join('|');
 
     const oilState = mapData.oilSpots
-      .map(spot => `${spot.id}:${spot.occupiedBy ?? ''}:${(spot as any).ownerId ?? ''}`)
+      .map(spot => {
+        const building = spot.building;
+        const queue = building?.recruitmentQueue?.[0];
+        const queueState = queue
+          ? `${queue.unitType}:${Math.round(queue.progress)}:${Math.round(queue.totalTime)}:${building?.recruitmentQueue?.length || 0}`
+          : 'none';
+
+        return [
+          spot.id,
+          spot.occupiedBy ?? '',
+          spot.ownerId ?? '',
+          building?.id ?? '',
+          building?.type ?? '',
+          Math.round(building?.health ?? 0),
+          Math.round(building?.maxHealth ?? 0),
+          building?.isConstructing ? 1 : 0,
+          Math.round(building?.constructionProgress ?? 0),
+          queueState
+        ].join(':');
+      })
       .join('|');
 
     const waterBuildingState = (mapData.waterBuildings || [])
@@ -1011,7 +1200,19 @@ export class MainScene extends Phaser.Scene {
       ].join(':'))
       .join('|');
 
-    return `${buildingState}#${oilState}#${waterBuildingState}`;
+    const bridgeState = (mapData.bridges || [])
+      .map(bridge => [
+        bridge.id,
+        bridge.type,
+        bridge.nodeAId,
+        bridge.nodeBId,
+        bridge.ownerId ?? '',
+        Math.round(bridge.health ?? 0),
+        Math.round(bridge.maxHealth ?? 0)
+      ].join(':'))
+      .join('|');
+
+    return `${buildingState}#${oilState}#${waterBuildingState}#${bridgeState}`;
   }
 
   private getSpatialSoundLocation(x: number, y: number) {
@@ -2644,9 +2845,25 @@ export class MainScene extends Phaser.Scene {
               if (prediction.vy === undefined) prediction.vy = 0;
 
               let currentSpeed = Math.hypot(prediction.vx, prediction.vy);
-              
-              const dx = prediction.targetX - container.x;
-              const dy = prediction.targetY - container.y;
+
+              while (prediction.path && prediction.path.length > 0) {
+                  const nextWaypoint = prediction.path[0];
+                  const threshold = this.getWaypointArrivalThreshold(nextWaypoint);
+                  if (Phaser.Math.Distance.Between(container.x, container.y, nextWaypoint.x, nextWaypoint.y) >= threshold) {
+                      break;
+                  }
+                  if (this.isBridgeNodeWaypoint(nextWaypoint)) {
+                      container.setPosition(nextWaypoint.x, nextWaypoint.y);
+                  }
+                  prediction.path.shift();
+              }
+
+              const activeTarget = prediction.path && prediction.path.length > 0
+                  ? prediction.path[0]
+                  : { x: prediction.targetX, y: prediction.targetY };
+
+              const dx = activeTarget.x - container.x;
+              const dy = activeTarget.y - container.y;
               const distToTarget = Math.sqrt(dx*dx + dy*dy);
               
               let shouldMove = false;
@@ -2676,7 +2893,15 @@ export class MainScene extends Phaser.Scene {
                    }
               }
 
-              container.setPosition(container.x + prediction.vx * dtSec, container.y + prediction.vy * dtSec);
+              const moveStepX = prediction.vx * dtSec;
+              const moveStepY = prediction.vy * dtSec;
+              const moveStepDist = Math.hypot(moveStepX, moveStepY);
+
+              if (shouldMove && moveStepDist > distToTarget) {
+                  container.setPosition(activeTarget.x, activeTarget.y);
+              } else {
+                  container.setPosition(container.x + moveStepX, container.y + moveStepY);
+              }
 
               if (!shouldMove && currentSpeed < 1) {
                    container.setPosition(prediction.targetX, prediction.targetY);
@@ -2915,13 +3140,19 @@ export class MainScene extends Phaser.Scene {
           this.selectedUnitIds.forEach(id => {
               const unit = this.currentUnits.find(u => u.id === id);
               if (unit && unit.ownerId === socket.id && unit.status === 'moving' && unit.targetX !== undefined && unit.targetY !== undefined) {
-                  const dist = Math.hypot(unit.targetX - unit.x, unit.targetY - unit.y);
-                  const points = Math.min(50, dist / 20); // Cap dots for performance
-                  const dx = (unit.targetX - unit.x) / points;
-                  const dy = (unit.targetY - unit.y) / points;
+                  const pathPoints = [{ x: unit.x, y: unit.y }, ...(unit.path || []), { x: unit.targetX, y: unit.targetY }];
 
-                  for (let i = 0; i < points; i++) {
-                      this.pathGraphics.fillCircle(unit.x + dx * i, unit.y + dy * i, 2);
+                  for (let segmentIndex = 0; segmentIndex < pathPoints.length - 1; segmentIndex++) {
+                      const from = pathPoints[segmentIndex];
+                      const to = pathPoints[segmentIndex + 1];
+                      const dist = Math.hypot(to.x - from.x, to.y - from.y);
+                      const points = Math.max(1, Math.min(50, Math.floor(dist / 20)));
+                      const dx = (to.x - from.x) / points;
+                      const dy = (to.y - from.y) / points;
+
+                      for (let i = 0; i < points; i++) {
+                          this.pathGraphics.fillCircle(from.x + dx * i, from.y + dy * i, 2);
+                      }
                   }
               }
           });
@@ -2973,21 +3204,24 @@ export class MainScene extends Phaser.Scene {
         console.log('Issuing move command to:', x, y);
         
         // Process each unit individually for Hybrid Networking (Intent-based)
-        this.selectedUnitIds.forEach(id => {
-            const unit = this.currentUnits.find(u => u.id === id);
-            if (unit) {
-                const intentId = `intent_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-                const adjustedTarget = this.getAdjustedTarget(unit.type, x, y);
-                
-                // Client-Side Prediction: Start moving immediately
-                // Optimistic direct line (Navmesh will be handled by server/steering)
-                this.predictedMoves.set(id, {
-                    targetX: adjustedTarget.x,
-                    targetY: adjustedTarget.y,
-                    speed: unit.speed || 150, // Default speed if missing
-                    type: unit.type,
-                    intentId: intentId
-                });
+	        this.selectedUnitIds.forEach(id => {
+	            const unit = this.currentUnits.find(u => u.id === id);
+	            if (unit) {
+	                const intentId = `intent_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+	                const adjustedTarget = this.getAdjustedTarget(unit.type, x, y);
+	                const predictedPath = this.buildPredictedBridgeWaypointPath(unit, adjustedTarget);
+	                
+	                // Client-Side Prediction: Start moving immediately
+	                // Use bridge-aware waypoints for land moves across bridged islands so the
+	                // local preview matches the server route instead of cutting through water.
+	                this.predictedMoves.set(id, {
+	                    targetX: adjustedTarget.x,
+	                    targetY: adjustedTarget.y,
+	                    speed: unit.speed || 150, // Default speed if missing
+	                    type: unit.type,
+	                    intentId: intentId,
+	                    path: predictedPath.length > 0 ? predictedPath : undefined
+	                });
 
                 // Send Intent
                 socket.emit('moveIntent', {

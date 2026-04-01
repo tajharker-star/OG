@@ -29,6 +29,30 @@ const SORT_OPTIONS: Array<{ key: PatchNotesSortKey; label: string }> = [
     { key: 'title', label: 'Title A-Z' },
 ];
 
+const PATCH_NOTE_ICON_LABELS: Record<PatchNoteIconKey, string> = {
+    demo: 'Release',
+    steam: 'Steam',
+    loading: 'Loading',
+    rules: 'Rules',
+    stats: 'Stats',
+    audio: 'Audio',
+    lobby: 'UI',
+    ai: 'Bots',
+    units: 'Units',
+    buildings: 'Buildings',
+    logistics: 'Logistics',
+    campaign: 'Campaign',
+};
+
+const HERO_ICON_KEYS: PatchNoteIconKey[] = [
+    'campaign',
+    'buildings',
+    'units',
+    'ai',
+    'stats',
+    'steam',
+];
+
 const matchesFilter = (entry: PatchNoteEntry, filter: PatchNotesFilterKey) => {
     if (filter === 'all') return true;
     if (filter === 'latest') return entry.filters.includes('Latest');
@@ -173,6 +197,13 @@ const renderPatchNoteIcon = (iconKey: PatchNoteIconKey) => {
     }
 };
 
+const getVisibleChangeIcons = (entry: PatchNoteEntry) => {
+    const deduped = [entry.iconKey, ...entry.changeIcons].filter((iconKey, index, source) => (
+        source.indexOf(iconKey) === index
+    ));
+    return deduped.slice(0, 4);
+};
+
 export const PatchNotesModal: React.FC<PatchNotesModalProps> = ({ isOpen, onClose }) => {
     const [activeFilter, setActiveFilter] = useState<PatchNotesFilterKey>('all');
     const [sortKey, setSortKey] = useState<PatchNotesSortKey>('most-recent');
@@ -194,9 +225,21 @@ export const PatchNotesModal: React.FC<PatchNotesModalProps> = ({ isOpen, onClos
                     <div className="patch-notes-hero__eyebrow">Lobby Intel</div>
                     <h3 className="patch-notes-hero__title">Stay current with the latest build</h3>
                     <p className="patch-notes-hero__copy">
-                        This archive tracks the major systems, balance improvements, quality-of-life work,
-                        and platform updates currently represented in the demo.
+                        This archive now uses quick-read icons instead of side screenshots, so players can scan what changed
+                        much faster and jump straight to the systems they care about.
                     </p>
+                    <div className="patch-notes-hero__legend" aria-label="Patch note icon legend">
+                        {HERO_ICON_KEYS.map((iconKey) => (
+                            <div key={iconKey} className="patch-notes-hero__legend-chip">
+                                <span className="patch-notes-hero__legend-icon" aria-hidden="true">
+                                    {renderPatchNoteIcon(iconKey)}
+                                </span>
+                                <span className="patch-notes-hero__legend-label">
+                                    {PATCH_NOTE_ICON_LABELS[iconKey]}
+                                </span>
+                            </div>
+                        ))}
+                    </div>
                     <div className="patch-notes-hero__stats">
                         <div className="patch-notes-hero__stat">
                             <span className="patch-notes-hero__stat-value">{PATCH_NOTE_ENTRIES.length}</span>
@@ -242,53 +285,67 @@ export const PatchNotesModal: React.FC<PatchNotesModalProps> = ({ isOpen, onClos
                 <div className="patch-notes-list">
                     {filteredEntries.map((entry) => {
                         const accentStyle = { '--patch-note-accent': entry.accent } as React.CSSProperties;
-                        const hasArtwork = Boolean(entry.artwork);
+                        const visibleIcons = getVisibleChangeIcons(entry);
 
                         return (
-                        <article key={entry.id} className="patch-note-card" style={accentStyle}>
-                            <div className={`patch-note-card__visual ${hasArtwork ? '' : 'patch-note-card__visual--icon-only'}`}>
-                                {entry.artwork && (
-                                    <img
-                                        src={entry.artwork}
-                                        alt={entry.artworkAlt || entry.title}
-                                        className="patch-note-card__artwork"
-                                    />
-                                )}
-                                <div className="patch-note-card__visual-scrim" aria-hidden="true" />
-                                <div className="patch-note-card__visual-badge" aria-hidden="true">
-                                    {renderPatchNoteIcon(entry.iconKey)}
-                                </div>
-                                {!hasArtwork && (
-                                    <div className="patch-note-card__visual-icon-hero" aria-hidden="true">
-                                        {renderPatchNoteIcon(entry.iconKey)}
+                            <article key={entry.id} className="patch-note-card" style={accentStyle}>
+                                <div className="patch-note-card__icon-panel">
+                                    <div className="patch-note-card__icon-main-shell">
+                                        <div className="patch-note-card__icon-main" aria-hidden="true">
+                                            {renderPatchNoteIcon(entry.iconKey)}
+                                        </div>
+                                        <div className="patch-note-card__icon-main-label">
+                                            {PATCH_NOTE_ICON_LABELS[entry.iconKey]}
+                                        </div>
                                     </div>
-                                )}
-                                <div className="patch-note-card__visual-meta">
-                                    <span className={`patch-note-card__badge patch-note-card__badge--${entry.badge.toLowerCase()}`}>
-                                        {entry.badge}
-                                    </span>
-                                    <span className="patch-note-card__date">{entry.dateLabel}</span>
-                                </div>
-                            </div>
-                            <div className="patch-note-card__rail" aria-hidden="true" />
-                            <div className="patch-note-card__content">
-                                <h4 className="patch-note-card__title">{entry.title}</h4>
-                                <p className="patch-note-card__summary">{entry.summary}</p>
 
-                                <ul className="patch-note-card__highlights">
-                                    {entry.highlights.map((highlight) => (
-                                        <li key={highlight}>{highlight}</li>
-                                    ))}
-                                </ul>
+                                    <div className="patch-note-card__change-heading">Systems touched</div>
+                                    <div className="patch-note-card__change-list">
+                                        {visibleIcons.map((iconKey) => (
+                                            <div
+                                                key={`${entry.id}-${iconKey}`}
+                                                className="patch-note-card__change-chip"
+                                                title={PATCH_NOTE_ICON_LABELS[iconKey]}
+                                            >
+                                                <span className="patch-note-card__change-icon" aria-hidden="true">
+                                                    {renderPatchNoteIcon(iconKey)}
+                                                </span>
+                                                <span className="patch-note-card__change-label">
+                                                    {PATCH_NOTE_ICON_LABELS[iconKey]}
+                                                </span>
+                                            </div>
+                                        ))}
+                                    </div>
 
-                                <div className="patch-note-card__tags">
-                                    {entry.tags.map((tag) => (
-                                        <span key={tag} className="patch-note-card__tag">{tag}</span>
-                                    ))}
+                                    <div className="patch-note-card__icon-meta">
+                                        <span className={`patch-note-card__badge patch-note-card__badge--${entry.badge.toLowerCase()}`}>
+                                            {entry.badge}
+                                        </span>
+                                        <span className="patch-note-card__date">{entry.dateLabel}</span>
+                                    </div>
                                 </div>
-                            </div>
-                        </article>
-                    )})}
+
+                                <div className="patch-note-card__rail" aria-hidden="true" />
+
+                                <div className="patch-note-card__content">
+                                    <h4 className="patch-note-card__title">{entry.title}</h4>
+                                    <p className="patch-note-card__summary">{entry.summary}</p>
+
+                                    <ul className="patch-note-card__highlights">
+                                        {entry.highlights.map((highlight) => (
+                                            <li key={highlight}>{highlight}</li>
+                                        ))}
+                                    </ul>
+
+                                    <div className="patch-note-card__tags">
+                                        {entry.tags.map((tag) => (
+                                            <span key={tag} className="patch-note-card__tag">{tag}</span>
+                                        ))}
+                                    </div>
+                                </div>
+                            </article>
+                        );
+                    })}
                 </div>
             </div>
         </Modal>

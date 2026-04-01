@@ -101,9 +101,9 @@ function main() {
         createUnit(playerId, 'construction_ship', 1030, 420)
     );
 
-    const sourceNodeBuilt = gameState.buildStructure(playerId, gameState.units[0].id, 'bridge_node', 374, 420);
+    const sourceNodeBuilt = gameState.buildStructure(playerId, gameState.units[0].id, 'bridge_node', 356, 420);
     const waterNodeBuilt = gameState.buildStructure(playerId, gameState.units[1].id, 'bridge_node', 720, 420);
-    const targetNodeBuilt = gameState.buildStructure(playerId, gameState.units[2].id, 'bridge_node', 1066, 420);
+    const targetNodeBuilt = gameState.buildStructure(playerId, gameState.units[2].id, 'bridge_node', 1084, 420);
     assert(sourceNodeBuilt, 'source bridge node should build on land from construction ship support');
     assert(waterNodeBuilt, 'middle bridge node should build in open water');
     assert(targetNodeBuilt, 'target bridge node should build on land from construction ship support');
@@ -117,8 +117,13 @@ function main() {
     ];
     assert(nodeIds.every(Boolean), 'all planned bridge nodes should exist');
 
+    const versionBeforeFirstConnect = gameState.map.version;
     gameState.connectNodes(playerId, nodeIds[0]!, nodeIds[1]!);
+    assert(gameState.map.version !== versionBeforeFirstConnect, 'first bridge connection should invalidate map version immediately');
+
+    const versionBeforeSecondConnect = gameState.map.version;
     gameState.connectNodes(playerId, nodeIds[1]!, nodeIds[2]!);
+    assert(gameState.map.version !== versionBeforeSecondConnect, 'second bridge connection should also invalidate map version immediately');
     assert(gameState.map.bridges.length === 2, 'bridge chain should create two linear bridge segments');
 
     const traversal = gameState.findIslandTraversalPath(homeIsland.id, targetIsland.id);

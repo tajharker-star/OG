@@ -1,10 +1,3 @@
-import appIconImage from '../assets/patch-notes/app-icon.png';
-import battleArtImage from '../assets/patch-notes/battle-art.png';
-import campaignCustomImage from '../assets/patch-notes/campaign-custom.png';
-import demoReleaseImage from '../assets/patch-notes/demo-release.png';
-import lobbyMenuImage from '../assets/patch-notes/lobby-menu.png';
-import steamPlatformImage from '../assets/patch-notes/steam-platform.png';
-
 export type PatchNoteBadge = 'Latest' | 'Archive';
 export type PatchNoteFilterTag = 'Latest' | 'Balance' | 'Content' | 'Archive';
 export type PatchNoteIconKey =
@@ -32,12 +25,182 @@ export interface PatchNoteEntry {
     highlights: string[];
     tags: string[];
     iconKey: PatchNoteIconKey;
+    changeIcons: PatchNoteIconKey[];
     accent: string;
-    artwork?: string;
-    artworkAlt?: string;
 }
 
 export const PATCH_NOTE_ENTRIES: PatchNoteEntry[] = [
+    {
+        id: 'tutorial-economy-and-placement-clarity',
+        badge: 'Latest',
+        filters: ['Latest', 'Content'],
+        sortOrder: 142,
+        dateLabel: 'Apr 1, 2026',
+        title: 'Tutorial economy and placement clarity pass',
+        summary: 'Economy onboarding now teaches the exact resource spots and support units players need, so oil and gold placement is much harder to misunderstand.',
+        highlights: [
+            'Economy hover guides now show real placement graphics like the three-dot gold node, grassland patch, black oil spot, and land or water requirement markers.',
+            'Land-map tutorials now explicitly teach recruiting an Oil Seeker before trying to place Oil Wells on maps like Desert.',
+            'Water-map tutorials now push Dock into Construction Ship into Oil Rig flow so players understand offshore oil before they get stuck.',
+            'The Start your economy objective now requires both a gold producer and an oil producer, so players learn the full economy loop instead of half of it.'
+        ],
+        tags: ['Tutorial', 'Economy', 'Oil', 'Placement'],
+        iconKey: 'buildings',
+        changeIcons: ['buildings', 'campaign', 'logistics', 'units'],
+        accent: '#f7cb70'
+    },
+    {
+        id: 'tutorial-map-playbooks-and-oil-guidance',
+        badge: 'Latest',
+        filters: ['Latest', 'Content'],
+        sortOrder: 138,
+        dateLabel: 'Apr 1, 2026',
+        title: 'Map-specific tutorial playbooks and oil guidance',
+        summary: 'The tutorial now teaches the right economy and logistics plan for the actual map you picked instead of forcing one generic lesson path.',
+        highlights: [
+            'Added a tutorial map picker so players can start on Desert, Grasslands, or Islands before launching the sandbox.',
+            'Desert now explicitly teaches Barracks into Oil Seeker scanner use, then land Oil Wells and heavy land tech.',
+            'Grasslands now teaches earlier Dock and ferry usage for shoreline shortcuts and faster side-lane expansion.',
+            'Islands now teaches the full Dock -> Construction Ship -> Oil Rig flow for offshore oil and naval control.'
+        ],
+        tags: ['Tutorial', 'Maps', 'Oil Scanner', 'Onboarding'],
+        iconKey: 'campaign',
+        changeIcons: ['campaign', 'logistics', 'buildings', 'units'],
+        accent: '#96e0c2'
+    },
+    {
+        id: 'tutorial-graduation-and-bot-achievements',
+        badge: 'Latest',
+        filters: ['Latest', 'Content'],
+        sortOrder: 136,
+        dateLabel: 'Apr 1, 2026',
+        title: 'Tutorial graduation quest and new achievement milestones',
+        summary: 'The tutorial now has a real final test: add a bot, beat it, reach the victory screen, and graduate properly with progression rewards.',
+        highlights: [
+            'Added a final tutorial quest that stays incomplete until the player spawns a bot, defeats every bot in the tutorial match, and reaches the victory screen.',
+            'Added the Tutorial Graduate achievement that unlocks from either finishing every tutorial objective or winning the final bot challenge.',
+            'Added new bot milestone achievements for beating bot difficulties 7, 8, 9, and 10.',
+            'Higher bot difficulty wins now cascade the lower-tier bot achievements too, so a level 10 win awards the whole 7-10 set.'
+        ],
+        tags: ['Tutorial', 'Achievements', 'Bots', 'Progression'],
+        iconKey: 'stats',
+        changeIcons: ['stats', 'campaign', 'ai'],
+        accent: '#9fb0ff'
+    },
+    {
+        id: 'patch-notes-quick-scan-pass',
+        badge: 'Latest',
+        filters: ['Latest', 'Content'],
+        sortOrder: 134,
+        dateLabel: 'Apr 1, 2026',
+        title: 'Patch notes quick-scan icon pass',
+        summary: 'The changelog is now much faster to read because the side screenshots were replaced with icon-based change callouts and system chips.',
+        highlights: [
+            'Removed the slower side artwork treatment from patch note cards so the left rail is pure icon information now.',
+            'Each patch note now uses a clean icon column that highlights the systems touched by that update.',
+            'The result is a faster scan path for players who just want to know what changed at a glance.',
+            'Patch entries were also updated with the newest tutorial, onboarding, and achievement work.'
+        ],
+        tags: ['Patch Notes', 'UI', 'Readability', 'Archive'],
+        iconKey: 'lobby',
+        changeIcons: ['lobby', 'stats', 'campaign'],
+        accent: '#ffd37a'
+    },
+    {
+        id: 'hud-usability-and-chat-polish',
+        badge: 'Latest',
+        filters: ['Latest'],
+        sortOrder: 132,
+        dateLabel: 'Apr 1, 2026',
+        title: 'HUD usability and chat control polish',
+        summary: 'The floating in-match controls are easier to place, easier to read, and no longer fight basic camera control while you play.',
+        highlights: [
+            'Made the round construction, chat, and settings opener buttons draggable and persist their positions between launches.',
+            'Aligned the default in-match opener row across the top and cleaned up the chat button with a proper round shape plus chat-bubble icon.',
+            'Stopped Tab from cycling focus through the HUD so WASD and arrow-key camera movement keep working.',
+            'Chat input now drops out of typing mode when you click away from the chat window.'
+        ],
+        tags: ['HUD', 'Chat', 'Controls', 'Quality of Life'],
+        iconKey: 'lobby',
+        changeIcons: ['lobby', 'logistics'],
+        accent: '#ffcf7d'
+    },
+    {
+        id: 'tutorial-and-guided-learning-pass',
+        badge: 'Latest',
+        filters: ['Latest', 'Content'],
+        sortOrder: 130,
+        dateLabel: 'Mar 31, 2026',
+        title: 'Tutorial mode and guided learning pass',
+        summary: 'Campaign now opens with a real tutorial sandbox that teaches economy, production, unit roles, and how to actually win matches.',
+        highlights: [
+            'Added a new Tutorial mission at the top of the campaign with safe starting resources and guided lessons.',
+            'Added build and recruit hover previews that explain placement, usage, and matchups before players commit.',
+            'Economy previews now show the correct placement graphics for gold, grassland, land oil, and water oil.',
+            'Tutorial and construction panels were darkened and simplified so the text is easier to read in live matches.'
+        ],
+        tags: ['Tutorial', 'Campaign', 'Onboarding', 'Build Preview'],
+        iconKey: 'campaign',
+        changeIcons: ['campaign', 'buildings', 'units'],
+        accent: '#8fe3bf'
+    },
+    {
+        id: 'local-match-fairness-and-bot-tools',
+        badge: 'Latest',
+        filters: ['Latest', 'Balance'],
+        sortOrder: 128,
+        dateLabel: 'Mar 31, 2026',
+        title: 'Local match fairness and bot management',
+        summary: 'Single-player and local matches now start more fairly and give you better control over when bots enter the sandbox.',
+        highlights: [
+            'Bots now wait for every human player to finish the start load gate before the match simulation really begins.',
+            'Tutorial and custom matches support adding bots after the match is already running, instead of leaving the Add Bot button dead.',
+            'Match startup and local-engine flow were tuned so onboarding and practice sessions are much smoother.',
+            'Selected-item ownership labels now read as Steam usernames for humans and clean Bot 1, Bot 2, Bot 3 labels for AI players.'
+        ],
+        tags: ['Bots', 'Tutorial', 'Custom Match', 'Fair Start'],
+        iconKey: 'ai',
+        changeIcons: ['ai', 'campaign', 'rules'],
+        accent: '#9de58d'
+    },
+    {
+        id: 'patch-notes-and-store-cta-refresh',
+        badge: 'Latest',
+        filters: ['Latest', 'Content'],
+        sortOrder: 126,
+        dateLabel: 'Mar 30, 2026',
+        title: 'Patch notes archive and Steam wishlist CTA',
+        summary: 'The front end now calls out updates properly and gives demo players a clearer route to follow the full game on Steam.',
+        highlights: [
+            'Added an in-game Patch Notes button with a real archive instead of hiding changelog details outside the game.',
+            'Added dated entries, filters for Latest, Balance, Content, Archive, and sort order controls.',
+            'Added the animated Wishlist on Steam button that links directly to the main game store page.',
+            'Added the Demo Release announcement entry with a thank-you note and full-game roadmap messaging.'
+        ],
+        tags: ['Patch Notes', 'Steam', 'Wishlist', 'Presentation'],
+        iconKey: 'steam',
+        changeIcons: ['steam', 'lobby', 'campaign'],
+        accent: '#8ecbff'
+    },
+    {
+        id: 'ui-theme-and-panel-polish',
+        badge: 'Latest',
+        filters: ['Latest', 'Content'],
+        sortOrder: 124,
+        dateLabel: 'Mar 30, 2026',
+        title: 'UI theme and panel polish pass',
+        summary: 'Menus and in-match panels were pushed closer to the Conquerors: Domination logo style so the whole game feels more cohesive.',
+        highlights: [
+            'Rounded and re-themed UI panels and buttons across the lobby, settings, stats, tutorial, and in-match HUD.',
+            'Rebuilt the construction panel into a cleaner command deck with richer category cards and better readability.',
+            'Cleaned up multiplayer menu presentation so host and join flows match the rest of the game design.',
+            'Darkened build previews and selected-item panels to make important information easier to read in combat.'
+        ],
+        tags: ['UI', 'HUD', 'Construction', 'Multiplayer'],
+        iconKey: 'lobby',
+        changeIcons: ['lobby', 'buildings', 'campaign'],
+        accent: '#ffd772'
+    },
     {
         id: 'demo-release',
         badge: 'Latest',
@@ -54,9 +217,8 @@ export const PATCH_NOTE_ENTRIES: PatchNoteEntry[] = [
         ],
         tags: ['Demo Release', 'Welcome', 'Thank You', 'Roadmap'],
         iconKey: 'demo',
-        accent: '#ffb74d',
-        artwork: demoReleaseImage,
-        artworkAlt: 'Conquerors: Domination demo key art.'
+        changeIcons: ['demo', 'campaign', 'steam'],
+        accent: '#ffb74d'
     },
     {
         id: 'steam-platform-hardening',
@@ -73,9 +235,8 @@ export const PATCH_NOTE_ENTRIES: PatchNoteEntry[] = [
         ],
         tags: ['Steam', 'CI', 'Windows', 'macOS', 'Linux'],
         iconKey: 'steam',
-        accent: '#66c0f4',
-        artwork: steamPlatformImage,
-        artworkAlt: 'Steam store presentation artwork for Conquerors: Domination.'
+        changeIcons: ['steam', 'loading'],
+        accent: '#66c0f4'
     },
     {
         id: 'warmup-and-local-engine',
@@ -92,9 +253,8 @@ export const PATCH_NOTE_ENTRIES: PatchNoteEntry[] = [
         ],
         tags: ['Loading', 'Campaign', 'Custom', 'Stability'],
         iconKey: 'loading',
-        accent: '#8ce2cb',
-        artwork: campaignCustomImage,
-        artworkAlt: 'Campaign and custom game setup screen.'
+        changeIcons: ['loading', 'campaign'],
+        accent: '#8ce2cb'
     },
     {
         id: 'elimination-and-hq-rules',
@@ -111,9 +271,8 @@ export const PATCH_NOTE_ENTRIES: PatchNoteEntry[] = [
         ],
         tags: ['Combat', 'Rules', 'Victory', 'Defeat'],
         iconKey: 'rules',
-        accent: '#ff7d6e',
-        artwork: battleArtImage,
-        artworkAlt: 'Battle artwork showing active combat.'
+        changeIcons: ['rules', 'campaign'],
+        accent: '#ff7d6e'
     },
     {
         id: 'stats-and-achievements',
@@ -130,9 +289,8 @@ export const PATCH_NOTE_ENTRIES: PatchNoteEntry[] = [
         ],
         tags: ['Stats', 'Achievements', 'Ranked', 'Steam'],
         iconKey: 'stats',
-        accent: '#97a7ff',
-        artwork: appIconImage,
-        artworkAlt: 'Conquerors: Domination app icon.'
+        changeIcons: ['stats', 'steam', 'campaign'],
+        accent: '#97a7ff'
     },
     {
         id: 'audio-overhaul',
@@ -149,6 +307,7 @@ export const PATCH_NOTE_ENTRIES: PatchNoteEntry[] = [
         ],
         tags: ['Audio', 'SFX', 'Mixer', 'UI'],
         iconKey: 'audio',
+        changeIcons: ['audio', 'lobby', 'units', 'buildings'],
         accent: '#ff8bd4'
     },
     {
@@ -166,9 +325,8 @@ export const PATCH_NOTE_ENTRIES: PatchNoteEntry[] = [
         ],
         tags: ['Lobby', 'UI', 'Multiplayer', 'Presentation'],
         iconKey: 'lobby',
-        accent: '#ffd772',
-        artwork: lobbyMenuImage,
-        artworkAlt: 'Main menu lobby screenshot.'
+        changeIcons: ['lobby', 'campaign'],
+        accent: '#ffd772'
     },
     {
         id: 'bot-difficulty-overhaul',
@@ -186,9 +344,8 @@ export const PATCH_NOTE_ENTRIES: PatchNoteEntry[] = [
         ],
         tags: ['Bots', 'AI', 'Difficulty', 'Strategy'],
         iconKey: 'ai',
-        accent: '#8fe388',
-        artwork: battleArtImage,
-        artworkAlt: 'Combat artwork used to represent AI battle tuning.'
+        changeIcons: ['ai', 'units', 'logistics'],
+        accent: '#8fe388'
     },
     {
         id: 'unit-roster-expansion',
@@ -206,9 +363,8 @@ export const PATCH_NOTE_ENTRIES: PatchNoteEntry[] = [
         ],
         tags: ['Units', 'Land', 'Naval', 'Air'],
         iconKey: 'units',
-        accent: '#ff9e47',
-        artwork: battleArtImage,
-        artworkAlt: 'Explosive battlefield art representing the expanded unit roster.'
+        changeIcons: ['units', 'logistics'],
+        accent: '#ff9e47'
     },
     {
         id: 'building-and-economy-expansion',
@@ -226,9 +382,8 @@ export const PATCH_NOTE_ENTRIES: PatchNoteEntry[] = [
         ],
         tags: ['Buildings', 'Economy', 'Support', 'Defense'],
         iconKey: 'buildings',
-        accent: '#f2cf63',
-        artwork: campaignCustomImage,
-        artworkAlt: 'Custom game setup screen representing broader match and building options.'
+        changeIcons: ['buildings', 'logistics', 'units'],
+        accent: '#f2cf63'
     },
     {
         id: 'logistics-and-map-control',
@@ -246,6 +401,7 @@ export const PATCH_NOTE_ENTRIES: PatchNoteEntry[] = [
         ],
         tags: ['Logistics', 'Bridges', 'Transport', 'Map Control'],
         iconKey: 'logistics',
+        changeIcons: ['logistics', 'buildings'],
         accent: '#84d8ff'
     },
     {
@@ -263,8 +419,7 @@ export const PATCH_NOTE_ENTRIES: PatchNoteEntry[] = [
         ],
         tags: ['Campaign', 'Skirmish', 'Offline', 'Progression'],
         iconKey: 'campaign',
-        accent: '#90dfc4',
-        artwork: campaignCustomImage,
-        artworkAlt: 'Campaign and custom match selection screen.'
+        changeIcons: ['campaign', 'ai', 'loading'],
+        accent: '#90dfc4'
     }
 ];

@@ -30,6 +30,10 @@ import {
     unlockEligibleAchievements,
     type AchievementUnlockState,
 } from './utils/playerAchievements';
+import {
+    TUTORIAL_MAP_OPTIONS,
+    type TutorialMapType,
+} from './data/tutorialGuide';
 import './App.css';
 
 const LOCAL_STATISTICS_BACKUP_KEY = 'ag_statistics_backup_v1';
@@ -42,6 +46,7 @@ const MAIN_GAME_STEAM_DEEP_LINK = `steam://store/${MAIN_GAME_STEAM_APP_ID}`;
 const SETTINGS_FLOAT_BUTTON_SIZE = 56;
 const SETTINGS_FLOAT_BUTTON_MARGIN = 24;
 const SETTINGS_FLOAT_BUTTON_STORAGE_KEY = 'ag_settings_float_button_position_v1';
+const DEFAULT_TUTORIAL_MAP: TutorialMapType = 'desert';
 
 const getDefaultSettingsButtonPosition = () => ({
     x: SETTINGS_FLOAT_BUTTON_MARGIN,
@@ -255,7 +260,7 @@ const CAMPAIGN_LEVELS: CampaignLevelConfig[] = [
         mapType: 'islands',
         botCount: 0,
         difficulty: 1,
-        description: 'Guided sandbox that teaches objectives, gold, oil, buildings, unit roles, counterplay, and how to turn a match into a win.',
+        description: 'Choose desert, grasslands, or islands and learn the exact economy, oil, dock, scanner, and logistics flow for that map before the real campaign starts.',
         isTutorial: true,
         cardBadge: 'New',
         modeLabel: 'Guided Sandbox',
@@ -354,6 +359,9 @@ function App() {
     // Campaign State
     const [isCampaignMode, setIsCampaignMode] = useState(false);
     const [isTutorialMode, setIsTutorialMode] = useState(false);
+    const [selectedTutorialMap, setSelectedTutorialMap] = useState<TutorialMapType>(DEFAULT_TUTORIAL_MAP);
+    const [showTutorialMapPicker, setShowTutorialMapPicker] = useState(false);
+    const [pendingTutorialLevelIndex, setPendingTutorialLevelIndex] = useState<number | null>(null);
     const [isLocalMode, setIsLocalMode] = useState(false); // Campaign or Custom
     const [campaignLevel, setCampaignLevel] = useState(0);
     const [showCampaignModal, setShowCampaignModal] = useState<'victory' | 'defeat' | null>(null);
@@ -526,6 +534,48 @@ function App() {
 
     const handleWishlistClick = () => {
         void openExternalUrl(MAIN_GAME_STEAM_DEEP_LINK, MAIN_GAME_STEAM_STORE_URL);
+    };
+
+    const unlockAchievementsByIds = async (
+        achievementIds: string[],
+        unlockedAt: string = new Date().toISOString()
+    ) => {
+        const idsToUnlock = Array.from(new Set(achievementIds)).filter((achievementId) => (
+            !achievementUnlocksRef.current.unlockedAtById[achievementId]
+        ));
+
+        if (idsToUnlock.length === 0) {
+            return [];
+        }
+
+        const nextState: AchievementUnlockState = {
+            ...achievementUnlocksRef.current,
+            unlockedAtById: {
+                ...achievementUnlocksRef.current.unlockedAtById,
+            },
+        };
+
+        idsToUnlock.forEach((achievementId) => {
+            nextState.unlockedAtById[achievementId] = unlockedAt;
+        });
+
+        await commitAchievementUnlocks(nextState);
+
+        if (steamService.isInitialized) {
+            idsToUnlock.forEach((achievementId) => {
+                steamService.activateAchievement(achievementId);
+            });
+        }
+
+        return idsToUnlock;
+    };
+
+    const unlockAchievementById = async (
+        achievementId: string,
+        unlockedAt: string = new Date().toISOString()
+    ) => {
+        const unlocked = await unlockAchievementsByIds([achievementId], unlockedAt);
+        return unlocked.length > 0;
     };
 
     const commitStatistics = async (nextStatistics: PlayerStatistics) => {
@@ -1274,6 +1324,25 @@ function App() {
         return mapType;
     };
 
+    const openTutorialMapPicker = (levelIndex: number) => {
+        setPendingTutorialLevelIndex(levelIndex);
+        setShowTutorialMapPicker(true);
+    };
+
+    const closeTutorialMapPicker = () => {
+        setShowTutorialMapPicker(false);
+        setPendingTutorialLevelIndex(null);
+    };
+
+    const startSelectedTutorialMap = () => {
+        if (pendingTutorialLevelIndex === null) {
+            return;
+        }
+
+        closeTutorialMapPicker();
+        void startCampaignLevel(pendingTutorialLevelIndex, selectedTutorialMap);
+    };
+
     const ensureLocalEngineReady = async (
         retries: number = 8,
         delayMs: number = 750,
@@ -1398,14 +1467,20 @@ function App() {
         return () => { cancelled = true; };
     }, []);
 
-    const startCampaignLevel = async (levelIndex: number) => {
+    const startCampaignLevel = async (levelIndex: number, tutorialMapOverride?: TutorialMapType) => {
         const level = CAMPAIGN_LEVELS[levelIndex];
         if (!level) return;
 
-        const selectedMapType = resolveMapType(level.mapType);
+        const requestedTutorialMap = tutorialMapOverride || selectedTutorialMap;
+        const selectedMapType = level.isTutorial
+            ? resolveMapType(requestedTutorialMap)
+            : resolveMapType(level.mapType);
 
         setIsCampaignMode(true);
         setIsTutorialMode(Boolean(level.isTutorial));
+        if (level.isTutorial) {
+            setSelectedTutorialMap(requestedTutorialMap);
+        }
         setCampaignLevel(levelIndex);
         setMatchStatsSource('campaign');
         // Ensure the embedded local engine is ready.
@@ -1434,7 +1509,10 @@ function App() {
     };
 
     const retryLevel = () => {
-        startCampaignLevel(campaignLevel);
+        startCampaignLevel(
+            campaignLevel,
+            CAMPAIGN_LEVELS[campaignLevel]?.isTutorial ? selectedTutorialMap : undefined
+        );
     };
 
     const startCustomGame = async () => {
@@ -1463,6 +1541,29 @@ function App() {
         if (steamService.isInitialized) {
             await pushStatisticsToSteam(committed);
         }
+
+        if (isTutorialMode && summary.result === 'win' && summary.botPlayers > 0) {
+            await unlockAchievementById('TUTORIAL_GRADUATE', playedAt);
+        }
+
+        if (summary.result === 'win' && (summary.maxBotDifficulty || 0) >= 7) {
+            const botDifficultyAchievements: string[] = [];
+
+            if ((summary.maxBotDifficulty || 0) >= 7) botDifficultyAchievements.push('BOT_LEVEL_7');
+            if ((summary.maxBotDifficulty || 0) >= 8) botDifficultyAchievements.push('BOT_LEVEL_8');
+            if ((summary.maxBotDifficulty || 0) >= 9) botDifficultyAchievements.push('BOT_LEVEL_9');
+            if ((summary.maxBotDifficulty || 0) >= 10) botDifficultyAchievements.push('BOT_LEVEL_10');
+
+            await unlockAchievementsByIds(botDifficultyAchievements, playedAt);
+        }
+    };
+
+    const handleTutorialObjectivesCompleted = () => {
+        if (!isTutorialMode) {
+            return;
+        }
+
+        void unlockAchievementById('TUTORIAL_GRADUATE');
     };
 
     return (
@@ -1750,7 +1851,14 @@ function App() {
                                             key={level.id}
                                             className="campaign-card"
                                             disabled={!isLocalEngineReady}
-                                            onClick={() => startCampaignLevel(index)}
+                                            onClick={() => {
+                                                if (level.isTutorial) {
+                                                    openTutorialMapPicker(index);
+                                                    return;
+                                                }
+
+                                                void startCampaignLevel(index);
+                                            }}
                                         >
                                             <div className="campaign-card-header">
                                                 <div className="campaign-name-row">
@@ -1762,7 +1870,9 @@ function App() {
                                                             </span>
                                                         )}
                                                     </div>
-                                                    <span className="campaign-map">Map: {level.mapType === 'random' ? 'Random' : level.mapType}</span>
+                                                    <span className="campaign-map">
+                                                        Map: {level.isTutorial ? 'Choose at launch' : level.mapType === 'random' ? 'Random' : level.mapType}
+                                                    </span>
                                                 </div>
                                             </div>
                                             <div className="campaign-card-body">
@@ -1851,6 +1961,57 @@ function App() {
                 </>
             )}
 
+            <Modal
+                isOpen={showTutorialMapPicker}
+                onClose={closeTutorialMapPicker}
+                className="modal-content tutorial-map-modal"
+                title="Choose Tutorial Map"
+            >
+                <div className="tutorial-map-modal__intro">
+                    Pick the map you want the tutorial to explain. Each version teaches a different economy and logistics flow.
+                </div>
+                <div className="tutorial-map-grid">
+                    {TUTORIAL_MAP_OPTIONS.map((option) => {
+                        const isSelected = selectedTutorialMap === option.id;
+
+                        return (
+                            <button
+                                key={option.id}
+                                type="button"
+                                className={`tutorial-map-card ${isSelected ? 'selected' : ''}`}
+                                onClick={() => setSelectedTutorialMap(option.id)}
+                            >
+                                <div className="tutorial-map-card__header">
+                                    <div className="tutorial-map-card__title">
+                                        <span className="tutorial-map-card__icon" aria-hidden="true">{option.icon}</span>
+                                        <span>{option.label}</span>
+                                    </div>
+                                    {isSelected && <span className="tutorial-map-card__badge">Selected</span>}
+                                </div>
+                                <p className="tutorial-map-card__summary">{option.summary}</p>
+                                <p className="tutorial-map-card__focus">{option.focus}</p>
+                                <ul className="tutorial-map-card__highlights">
+                                    {option.highlights.map((highlight) => (
+                                        <li key={highlight}>{highlight}</li>
+                                    ))}
+                                </ul>
+                            </button>
+                        );
+                    })}
+                </div>
+                <div className="modal-actions tutorial-map-modal__actions">
+                    <button type="button" className="menu-btn secondary" onClick={closeTutorialMapPicker}>Cancel</button>
+                    <button
+                        type="button"
+                        className="menu-btn primary"
+                        onClick={startSelectedTutorialMap}
+                        disabled={pendingTutorialLevelIndex === null}
+                    >
+                        Start {TUTORIAL_MAP_OPTIONS.find((option) => option.id === selectedTutorialMap)?.label || 'Tutorial'}
+                    </button>
+                </div>
+            </Modal>
+
             <PatchNotesModal
                 isOpen={showPatchNotes}
                 onClose={() => setShowPatchNotes(false)}
@@ -1865,6 +2026,8 @@ function App() {
                     isLocalMode={isLocalMode}
                     isDevBypass={isDevBypass}
                     tutorialMode={isTutorialMode}
+                    tutorialMapType={selectedTutorialMap}
+                    onTutorialObjectivesCompleted={handleTutorialObjectivesCompleted}
                     matchStatsSource={matchStatsSource}
                     steamLobbyId={steamLobbyId}
                     onMatchResolved={handleMatchResolved}

@@ -5331,18 +5331,18 @@ export class BotAI {
 
   private getBridgeNodePlacement(gameState: GameState, sourceIsland: Island, targetIsland: Island): { x: number; y: number } {
       const angle = Math.atan2(targetIsland.y - sourceIsland.y, targetIsland.x - sourceIsland.x);
+      const inwardClearance = 24;
       if (sourceIsland.points && sourceIsland.points.length > 2) {
           const probeX = sourceIsland.x + Math.cos(angle) * (sourceIsland.radius + 120);
           const probeY = sourceIsland.y + Math.sin(angle) * (sourceIsland.radius + 120);
           const edge = MapGenerator.getClosestPointOnPolygon(probeX, probeY, sourceIsland.points);
-          const inward = 6;
           return {
-              x: edge.x - Math.cos(angle) * inward,
-              y: edge.y - Math.sin(angle) * inward
+              x: edge.x - Math.cos(angle) * inwardClearance,
+              y: edge.y - Math.sin(angle) * inwardClearance
           };
       }
 
-      const edgeRadius = Math.max(18, sourceIsland.radius - 6);
+      const edgeRadius = Math.max(18, sourceIsland.radius - inwardClearance);
       return {
           x: sourceIsland.x + Math.cos(angle) * edgeRadius,
           y: sourceIsland.y + Math.sin(angle) * edgeRadius

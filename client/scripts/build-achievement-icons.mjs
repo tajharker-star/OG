@@ -66,26 +66,31 @@ const LOCKED_THEME = {
 };
 
 const ACHIEVEMENTS = [
-    { id: 'FIRST_DEPLOYMENT', monogram: 'FD', category: 'General', tier: 1 },
-    { id: 'FIELD_TESTED', monogram: 'FT', category: 'General', tier: 2 },
-    { id: 'WAR_MACHINE', monogram: 'WM', category: 'General', tier: 3 },
-    { id: 'FIRST_VICTORY', monogram: 'FV', category: 'General', tier: 1 },
-    { id: 'SEASONED_WINNER', monogram: 'SW', category: 'General', tier: 2 },
-    { id: 'DOMINATOR', monogram: 'DM', category: 'General', tier: 3 },
-    { id: 'STAYING_POWER', monogram: 'SP', category: 'General', tier: 2 },
-    { id: 'LEGENDARY_STREAK', monogram: 'LS', category: 'General', tier: 3 },
-    { id: 'CAMPAIGN_INITIATE', monogram: 'CI', category: 'Campaign', tier: 1 },
-    { id: 'CAMPAIGN_CONQUEROR', monogram: 'CC', category: 'Campaign', tier: 2 },
-    { id: 'CAMPAIGN_LEGEND', monogram: 'CL', category: 'Campaign', tier: 3 },
-    { id: 'SKIRMISH_STARTER', monogram: 'SS', category: 'Custom', tier: 1 },
-    { id: 'SKIRMISH_SUPREME', monogram: 'SU', category: 'Custom', tier: 3 },
-    { id: 'NETWORK_INITIATE', monogram: 'NI', category: 'Multiplayer', tier: 1 },
-    { id: 'ONLINE_WARLORD', monogram: 'OW', category: 'Multiplayer', tier: 2 },
-    { id: 'ONLINE_LEGEND', monogram: 'OL', category: 'Multiplayer', tier: 3 },
-    { id: 'COOP_WINGMAN', monogram: 'CW', category: 'Co-op', tier: 1 },
-    { id: 'PVE_COMMANDER', monogram: 'PV', category: 'Co-op', tier: 2 },
-    { id: 'RANKED_ROOKIE', monogram: 'RR', category: 'Ranked', tier: 1 },
-    { id: 'RANKED_CONTENDER', monogram: 'RC', category: 'Ranked', tier: 2 },
+    { id: 'FIRST_DEPLOYMENT', title: 'First Deployment', description: 'Play your first match.', monogram: 'FD', category: 'General', tier: 1 },
+    { id: 'FIELD_TESTED', title: 'Field Tested', description: 'Play 10 matches.', monogram: 'FT', category: 'General', tier: 2 },
+    { id: 'WAR_MACHINE', title: 'War Machine', description: 'Play 50 matches.', monogram: 'WM', category: 'General', tier: 3 },
+    { id: 'FIRST_VICTORY', title: 'First Victory', description: 'Win your first match.', monogram: 'FV', category: 'General', tier: 1 },
+    { id: 'SEASONED_WINNER', title: 'Seasoned Winner', description: 'Win 10 matches.', monogram: 'SW', category: 'General', tier: 2 },
+    { id: 'DOMINATOR', title: 'Dominator', description: 'Win 50 matches.', monogram: 'DM', category: 'General', tier: 3 },
+    { id: 'STAYING_POWER', title: 'Staying Power', description: 'Reach a 3-match win streak.', monogram: 'SP', category: 'General', tier: 2 },
+    { id: 'LEGENDARY_STREAK', title: 'Legendary Streak', description: 'Reach a 7-match win streak.', monogram: 'LS', category: 'General', tier: 3 },
+    { id: 'CAMPAIGN_INITIATE', title: 'Campaign Initiate', description: 'Complete your first campaign battle.', monogram: 'CI', category: 'Campaign', tier: 1 },
+    { id: 'TUTORIAL_GRADUATE', title: 'Tutorial Graduate', description: 'Beat the tutorial by completing every tutorial objective or by adding a bot and defeating it.', monogram: 'TG', category: 'Campaign', tier: 1 },
+    { id: 'CAMPAIGN_CONQUEROR', title: 'Campaign Conqueror', description: 'Win 5 campaign battles.', monogram: 'CC', category: 'Campaign', tier: 2 },
+    { id: 'CAMPAIGN_LEGEND', title: 'Campaign Legend', description: 'Win 15 campaign battles.', monogram: 'CL', category: 'Campaign', tier: 3 },
+    { id: 'SKIRMISH_STARTER', title: 'Skirmish Starter', description: 'Play your first custom match.', monogram: 'SS', category: 'Custom', tier: 1 },
+    { id: 'SKIRMISH_SUPREME', title: 'Skirmish Supreme', description: 'Win 10 custom matches.', monogram: 'SU', category: 'Custom', tier: 3 },
+    { id: 'NETWORK_INITIATE', title: 'Network Initiate', description: 'Play your first multiplayer match.', monogram: 'NI', category: 'Multiplayer', tier: 1 },
+    { id: 'ONLINE_WARLORD', title: 'Online Warlord', description: 'Win 10 multiplayer matches.', monogram: 'OW', category: 'Multiplayer', tier: 2 },
+    { id: 'ONLINE_LEGEND', title: 'Online Legend', description: 'Win 25 multiplayer matches.', monogram: 'OL', category: 'Multiplayer', tier: 3 },
+    { id: 'COOP_WINGMAN', title: 'Co-op Wingman', description: 'Win your first co-op or PvE match.', monogram: 'CW', category: 'Co-op', tier: 1 },
+    { id: 'BOT_LEVEL_7', title: 'Bot Hunter 7', description: 'Defeat a level 7 bot.', monogram: 'B7', category: 'Co-op', tier: 1 },
+    { id: 'BOT_LEVEL_8', title: 'Bot Hunter 8', description: 'Defeat a level 8 bot.', monogram: 'B8', category: 'Co-op', tier: 1 },
+    { id: 'BOT_LEVEL_9', title: 'Bot Hunter 9', description: 'Defeat a level 9 bot.', monogram: 'B9', category: 'Co-op', tier: 2 },
+    { id: 'BOT_LEVEL_10', title: 'Bot Hunter 10', description: 'Defeat a level 10 bot.', monogram: 'B10', category: 'Co-op', tier: 3 },
+    { id: 'PVE_COMMANDER', title: 'PvE Commander', description: 'Win 10 co-op or PvE matches.', monogram: 'PV', category: 'Co-op', tier: 2 },
+    { id: 'RANKED_ROOKIE', title: 'Ranked Rookie', description: 'Play your first ranked match.', monogram: 'RR', category: 'Ranked', tier: 1 },
+    { id: 'RANKED_CONTENDER', title: 'Ranked Contender', description: 'Win 5 ranked matches.', monogram: 'RC', category: 'Ranked', tier: 2 },
 ];
 
 const ensureDir = async directory => fs.mkdir(directory, { recursive: true });
@@ -218,6 +223,43 @@ const renderPng = async (page, svg, outputPath) => {
     await page.screenshot({ path: outputPath, omitBackground: true });
 };
 
+const csvEscape = value => `"${String(value).replaceAll('"', '""')}"`;
+
+const writeSteamMetadata = async () => {
+    const manifestPath = path.join(steamDir, 'steamworks-achievements.json');
+    const csvPath = path.join(steamDir, 'steamworks-achievements.csv');
+    const manifest = {
+        appId: '4432220',
+        appName: 'Conquerors: Domination Demo',
+        generatedAt: new Date().toISOString(),
+        achievements: ACHIEVEMENTS.map((achievement) => ({
+            apiName: achievement.id,
+            title: achievement.title,
+            description: achievement.description,
+            category: achievement.category,
+            unlockedIcon: `unlocked/${achievement.id}.png`,
+            lockedIcon: `locked/${achievement.id}.png`,
+        })),
+    };
+
+    const csvLines = [
+        ['api_name', 'title', 'description', 'category', 'unlocked_icon', 'locked_icon'].map(csvEscape).join(','),
+        ...ACHIEVEMENTS.map((achievement) => (
+            [
+                achievement.id,
+                achievement.title,
+                achievement.description,
+                achievement.category,
+                `unlocked/${achievement.id}.png`,
+                `locked/${achievement.id}.png`,
+            ].map(csvEscape).join(',')
+        )),
+    ];
+
+    await fs.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+    await fs.writeFile(csvPath, `${csvLines.join('\n')}\n`, 'utf8');
+};
+
 const writeReadme = async () => {
     const readmePath = path.join(steamDir, 'README.md');
     const lines = [
@@ -228,6 +270,8 @@ const writeReadme = async () => {
         '- `unlocked/` contains the colored Steam-ready PNGs.',
         '- `locked/` contains the grayscale variants.',
         '- `source-svg/` contains editable SVG source exports for the same set.',
+        '- `steamworks-achievements.json` contains the exact API names, titles, descriptions, and icon paths to copy into Steamworks.',
+        '- `steamworks-achievements.csv` contains the same achievement metadata in a quick spreadsheet-friendly format.',
         '',
         'Current target app: `4432220` (Conquerors: Domination Demo).',
     ];
@@ -257,6 +301,7 @@ const main = async () => {
     }
 
     await browser.close();
+    await writeSteamMetadata();
     await writeReadme();
     process.stdout.write(`Generated ${ACHIEVEMENTS.length * 2} achievement icons.\n`);
 };

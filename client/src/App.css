@@ -723,6 +723,123 @@ button:active {
     border-color: rgba(255, 214, 102, 0.34);
 }
 
+.tutorial-map-modal {
+    max-width: 920px;
+    text-align: left;
+}
+
+.tutorial-map-modal__intro {
+    color: var(--text-secondary);
+    margin-bottom: var(--spacing-md);
+    line-height: 1.5;
+}
+
+.tutorial-map-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: var(--spacing-md);
+}
+
+.tutorial-map-card {
+    width: 100%;
+    min-height: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    align-items: stretch;
+    text-align: left;
+    padding: 18px;
+    border-radius: var(--radius-lg);
+    border: 1px solid rgba(255, 196, 77, 0.18);
+    background:
+        linear-gradient(180deg, rgba(255, 206, 112, 0.06), rgba(24, 12, 6, 0.84)),
+        rgba(9, 6, 3, 0.9);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 14px 30px rgba(0, 0, 0, 0.28);
+    transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+}
+
+.tutorial-map-card:hover {
+    transform: translateY(-2px);
+    border-color: rgba(255, 206, 112, 0.36);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 18px 36px rgba(0, 0, 0, 0.34);
+}
+
+.tutorial-map-card.selected {
+    border-color: rgba(255, 214, 102, 0.55);
+    background:
+        linear-gradient(180deg, rgba(255, 214, 102, 0.12), rgba(24, 12, 6, 0.9)),
+        rgba(9, 6, 3, 0.94);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.08),
+        0 0 0 1px rgba(255, 214, 102, 0.16),
+        0 18px 36px rgba(0, 0, 0, 0.36);
+}
+
+.tutorial-map-card__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.tutorial-map-card__title {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 1.08rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.tutorial-map-card__icon {
+    font-size: 1.6rem;
+    filter: drop-shadow(0 6px 12px rgba(0, 0, 0, 0.28));
+}
+
+.tutorial-map-card__badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 5px 10px;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #fff6d9;
+    background: rgba(64, 152, 255, 0.18);
+    border: 1px solid rgba(140, 195, 255, 0.28);
+}
+
+.tutorial-map-card__summary,
+.tutorial-map-card__focus {
+    margin: 0;
+    line-height: 1.5;
+}
+
+.tutorial-map-card__summary {
+    color: var(--text-primary);
+}
+
+.tutorial-map-card__focus {
+    color: var(--text-secondary);
+    font-size: 0.92rem;
+}
+
+.tutorial-map-card__highlights {
+    margin: 0;
+    padding-left: 18px;
+    color: #f8ead1;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.tutorial-map-modal__actions {
+    margin-top: 24px;
+    justify-content: flex-end;
+}
+
 /* Range Inputs */
 input[type=range] {
     padding: 0;

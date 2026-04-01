@@ -156,6 +156,7 @@ If you want the new achievements screen to sync with Steam too, create these ach
 - `STAYING_POWER`
 - `LEGENDARY_STREAK`
 - `CAMPAIGN_INITIATE`
+- `TUTORIAL_GRADUATE`
 - `CAMPAIGN_CONQUEROR`
 - `CAMPAIGN_LEGEND`
 - `SKIRMISH_STARTER`
@@ -164,9 +165,26 @@ If you want the new achievements screen to sync with Steam too, create these ach
 - `ONLINE_WARLORD`
 - `ONLINE_LEGEND`
 - `COOP_WINGMAN`
+- `BOT_LEVEL_7`
+- `BOT_LEVEL_8`
+- `BOT_LEVEL_9`
+- `BOT_LEVEL_10`
 - `PVE_COMMANDER`
 - `RANKED_ROOKIE`
 - `RANKED_CONTENDER`
+
+Use the generated metadata pack when creating or updating them in Steamworks:
+
+- `/Users/codyharker/Desktop/cody/OG/client/steam-achievements/demo/steamworks-achievements.json`
+- `/Users/codyharker/Desktop/cody/OG/client/steam-achievements/demo/steamworks-achievements.csv`
+
+Those files include the exact API names, display titles, descriptions, and the matching locked/unlocked icon paths for the current achievement set, including:
+
+- `TUTORIAL_GRADUATE`
+- `BOT_LEVEL_7`
+- `BOT_LEVEL_8`
+- `BOT_LEVEL_9`
+- `BOT_LEVEL_10`
 
 Leave unchecked unless you add explicit support:
 

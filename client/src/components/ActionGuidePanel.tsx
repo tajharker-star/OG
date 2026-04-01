@@ -6,6 +6,7 @@ type ActionGuidePanelProps = {
     guide: ActionGuide;
     source: 'build' | 'recruit';
     style?: CSSProperties;
+    panelRef?: React.Ref<HTMLElement>;
 };
 
 const renderPlacementTargetGraphic = (kind: NonNullable<ActionGuide['placementTargets']>[number]['kind']) => {
@@ -107,8 +108,9 @@ const renderPreview = (guide: ActionGuide) => {
                     <div className="action-guide-preview__placement-ring" />
                     <div className="action-guide-preview__support action-guide-preview__support--ship">🏗️</div>
                     <div className="action-guide-preview__hero">{guide.icon}</div>
-                    <div className="action-guide-preview__badge action-guide-preview__badge--left">Oil Spot</div>
-                    <div className="action-guide-preview__badge action-guide-preview__badge--right">Water</div>
+                    <div className="action-guide-preview__badge action-guide-preview__badge--left">Black Oil Spot</div>
+                    <div className="action-guide-preview__badge action-guide-preview__badge--right">Water Only</div>
+                    <div className="action-guide-preview__callout">Construction Ship Required</div>
                 </div>
             );
         case 'shoreline':
@@ -199,11 +201,12 @@ const renderPreview = (guide: ActionGuide) => {
     }
 };
 
-export function ActionGuidePanel({ guide, source, style }: ActionGuidePanelProps) {
+export function ActionGuidePanel({ guide, source, style, panelRef }: ActionGuidePanelProps) {
     const showPlacementTargets = source === 'build' && guide.placementTargets && guide.placementTargets.length > 0;
 
     return (
         <aside
+            ref={panelRef}
             className={`action-guide-panel action-guide-panel--${source}`}
             style={style}
         >

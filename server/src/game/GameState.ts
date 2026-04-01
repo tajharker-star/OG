@@ -8,6 +8,7 @@ const ENABLE_VALID_POSITION_LOGS = process.env.DEBUG_VALID_POSITION === '1';
 const SIMULATION_TICKS_PER_SECOND = 30;
 const CONSTRUCTION_SPEED_MULTIPLIER = 3;
 const PLAYER_SNAPSHOT_INTERVAL_MS = 250;
+const BRIDGE_NODE_LAND_ACCESS_EDGE_PADDING = 18;
 
 export interface Player {
     id: string;
@@ -252,7 +253,19 @@ export class GameState {
                         recruitmentQueue: building.recruitmentQueue?.map(item => ({ ...item }))
                     }))
             })),
-            oilSpots: this.map.oilSpots.map(spot => ({ ...(spot as any) })),
+            oilSpots: this.map.oilSpots.map(spot => {
+                const oilSpot = spot as any;
+                const building = oilSpot.building as Building | undefined;
+                return {
+                    ...oilSpot,
+                    building: building
+                        ? {
+                            ...building,
+                            recruitmentQueue: building.recruitmentQueue?.map(item => ({ ...item }))
+                        }
+                        : undefined
+                };
+            }),
             bridges: this.map.bridges.map(bridge => ({ ...bridge })),
             waterBuildings: (this.map.waterBuildings || [])
                 .filter(building => this.isBuildingVisibleToPlayer(building as Building, playerId))
@@ -483,64 +496,76 @@ export class GameState {
         return false;
     }
 
-    public findIslandTraversalPath(startIslandId: string, endIslandId: string): string[] | null {
-        const cacheKey = `${startIslandId}->${endIslandId}`;
-        if (this.traversalPathCache.has(cacheKey)) {
-            return this.traversalPathCache.get(cacheKey)!;
-        }
-
-        const startToken = `island:${startIslandId}`;
-        const endToken = `island:${endIslandId}`;
-        const queue: Array<{ token: string; path: string[] }> = [{ token: startToken, path: [startToken] }];
-        const visited = new Set<string>([startToken]);
-
-        const getNeighbors = (token: string): string[] => {
-            if (token.startsWith('island:')) {
-                const islandId = token.slice('island:'.length);
-                const island = this.map.islands.find(candidate => candidate.id === islandId);
-                if (!island) return [];
-
-                const neighbors = island.buildings
-                    .filter(building => building.type === 'bridge_node' && !building.isConstructing && building.health > 0)
-                    .map(building => `node:${building.id}`);
-
-                this.map.islands.forEach(other => {
-                    if (other.id === island.id) return;
-                    if (!this.areIslandsLandConnected(island, other)) return;
-                    neighbors.push(`island:${other.id}`);
-                });
-
-                return neighbors;
+    private getIslandContainingPoint(x: number, y: number, buffer: number = 35): Island | null {
+        const island = this.map.islands.find(candidate => {
+            if (candidate.points) {
+                if (MapGenerator.isPointInPolygon(x, y, candidate.points)) return true;
+                const closest = MapGenerator.getClosestPointOnPolygon(x, y, candidate.points);
+                return Math.hypot(x - closest.x, y - closest.y) <= buffer;
             }
+            return Math.hypot(x - candidate.x, y - candidate.y) <= candidate.radius + buffer;
+        });
+        return island || null;
+    }
 
-            const nodeId = token.slice('node:'.length);
-            const context = this.getNodeContext(nodeId);
-            if (!context || context.node.type !== 'bridge_node' || context.node.isConstructing || context.node.health <= 0) {
-                return [];
-            }
+    private getTraversalNeighbors(token: string): string[] {
+        if (token.startsWith('island:')) {
+            const islandId = token.slice('island:'.length);
+            const island = this.map.islands.find(candidate => candidate.id === islandId);
+            if (!island) return [];
 
-            const neighbors: string[] = [];
-            if (context.islandId) {
-                neighbors.push(`island:${context.islandId}`);
-            }
+            const neighbors = island.buildings
+                .filter(building => building.type === 'bridge_node' && !building.isConstructing && building.health > 0)
+                .map(building => `node:${building.id}`);
 
-            this.map.bridges.forEach(bridge => {
-                if (bridge.type !== 'bridge') return;
-                if (bridge.nodeAId === nodeId) neighbors.push(`node:${bridge.nodeBId}`);
-                if (bridge.nodeBId === nodeId) neighbors.push(`node:${bridge.nodeAId}`);
+            this.map.islands.forEach(other => {
+                if (other.id === island.id) return;
+                if (!this.areIslandsLandConnected(island, other)) return;
+                neighbors.push(`island:${other.id}`);
             });
 
             return neighbors;
-        };
+        }
+
+        const nodeId = token.slice('node:'.length);
+        const context = this.getNodeContext(nodeId);
+        if (!context || context.node.type !== 'bridge_node' || context.node.isConstructing || context.node.health <= 0) {
+            return [];
+        }
+
+        const neighbors: string[] = [];
+        if (context.islandId) {
+            neighbors.push(`island:${context.islandId}`);
+        }
+
+        this.map.bridges.forEach(bridge => {
+            if (bridge.type !== 'bridge') return;
+            if (bridge.nodeAId === nodeId) neighbors.push(`node:${bridge.nodeBId}`);
+            if (bridge.nodeBId === nodeId) neighbors.push(`node:${bridge.nodeAId}`);
+        });
+
+        return neighbors;
+    }
+
+    private findTraversalPathBetweenTokens(startTokens: string[], endToken: string): string[] | null {
+        if (startTokens.length === 0) return null;
+        if (startTokens.includes(endToken)) return [endToken];
+
+        const queue: Array<{ token: string; path: string[] }> = [];
+        const visited = new Set<string>();
+
+        startTokens.forEach(token => {
+            queue.push({ token, path: [token] });
+            visited.add(token);
+        });
 
         while (queue.length > 0) {
             const { token, path } = queue.shift()!;
             if (token === endToken) {
-                this.traversalPathCache.set(cacheKey, path);
                 return path;
             }
 
-            for (const neighbor of getNeighbors(token)) {
+            for (const neighbor of this.getTraversalNeighbors(token)) {
                 if (visited.has(neighbor)) continue;
                 visited.add(neighbor);
                 queue.push({ token: neighbor, path: [...path, neighbor] });
@@ -548,6 +573,106 @@ export class GameState {
         }
 
         return null;
+    }
+
+    public findIslandTraversalPath(startIslandId: string, endIslandId: string): string[] | null {
+        const cacheKey = `${startIslandId}->${endIslandId}`;
+        if (this.traversalPathCache.has(cacheKey)) {
+            return this.traversalPathCache.get(cacheKey)!;
+        }
+
+        const path = this.findTraversalPathBetweenTokens([`island:${startIslandId}`], `island:${endIslandId}`);
+        if (path) {
+            this.traversalPathCache.set(cacheKey, path);
+        }
+        return path;
+    }
+
+    private buildLandBridgeWaypointPath(unit: Unit, target: { x: number; y: number }): { x: number; y: number }[] {
+        if (!this.isLandUnitType(unit.type)) return [];
+
+        const targetIsland = this.getIslandContainingPoint(target.x, target.y, 45);
+        if (!targetIsland) return [];
+
+        const currentIsland = this.getIslandContainingPoint(unit.x, unit.y, 45);
+        if (currentIsland) {
+            if (currentIsland.id === targetIsland.id || this.areIslandsLandConnected(currentIsland, targetIsland)) {
+                return [];
+            }
+        }
+
+        let startTokens: string[] = [];
+        if (currentIsland) {
+            startTokens = [`island:${currentIsland.id}`];
+        } else {
+            const bridgeInfo = this.getBridgeAt(unit.x, unit.y);
+            if (!bridgeInfo) return [];
+
+            startTokens = [bridgeInfo.bridge.nodeAId, bridgeInfo.bridge.nodeBId]
+                .map(nodeId => {
+                    const context = this.getNodeContext(nodeId);
+                    if (!context) return null;
+                    return {
+                        token: `node:${nodeId}`,
+                        distance: Math.hypot(unit.x - context.x, unit.y - context.y)
+                    };
+                })
+                .filter((entry): entry is { token: string; distance: number } => !!entry)
+                .sort((left, right) => left.distance - right.distance)
+                .map(entry => entry.token);
+        }
+
+        const traversalPath = this.findTraversalPathBetweenTokens(startTokens, `island:${targetIsland.id}`);
+        if (!Array.isArray(traversalPath) || traversalPath.length < 2) return [];
+
+        const waypoints: { x: number; y: number }[] = [];
+        traversalPath.forEach(token => {
+            if (!token.startsWith('node:')) return;
+            const nodeId = token.slice('node:'.length);
+            const context = this.getNodeContext(nodeId);
+            if (!context) return;
+            waypoints.push(this.adjustTarget(unit.type, context.x, context.y));
+        });
+
+        const filtered: { x: number; y: number }[] = [];
+        waypoints.forEach(point => {
+            const previous = filtered[filtered.length - 1];
+            if (!previous || Math.hypot(previous.x - point.x, previous.y - point.y) > 16) {
+                filtered.push(point);
+            }
+        });
+
+        return filtered;
+    }
+
+    private isBridgeNodeWaypoint(point?: { x: number; y: number }, tolerance: number = 12): boolean {
+        if (!point) return false;
+
+        for (const island of this.map.islands) {
+            for (const building of island.buildings) {
+                if (building.type !== 'bridge_node' || building.isConstructing || building.health <= 0) continue;
+                const nodeX = island.x + (building.x || 0);
+                const nodeY = island.y + (building.y || 0);
+                if (Math.hypot(point.x - nodeX, point.y - nodeY) <= tolerance) {
+                    return true;
+                }
+            }
+        }
+
+        for (const building of this.map.waterBuildings || []) {
+            if (building.type !== 'bridge_node' || building.isConstructing || building.health <= 0) continue;
+            const nodeX = building.x || 0;
+            const nodeY = building.y || 0;
+            if (Math.hypot(point.x - nodeX, point.y - nodeY) <= tolerance) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private getWaypointArrivalThreshold(point?: { x: number; y: number }): number {
+        return this.isBridgeNodeWaypoint(point) ? 8 : 30;
     }
 
     private isLandUnitType(type: string): boolean {
@@ -712,6 +837,7 @@ export class GameState {
     private advanceConstructionRepairAndRecruitment(deltaTimeSeconds: number) {
         const tickDelta = this.getSimulationTickDelta(deltaTimeSeconds);
         if (tickDelta <= 0) return;
+        let mapStateChanged = false;
 
         const processConstruction = (b: any, x: number, y: number, ownerId: string) => {
             if (!b.isConstructing) return;
@@ -721,6 +847,7 @@ export class GameState {
                 console.log(`[Construction] Missing stats for ${b.type}, finishing instantly.`);
                 b.isConstructing = false;
                 b.health = b.maxHealth;
+                mapStateChanged = true;
                 return;
             }
 
@@ -746,6 +873,7 @@ export class GameState {
                 b.constructionProgress = 100;
                 b.isConstructing = false;
                 b.health = b.maxHealth;
+                mapStateChanged = true;
             }
         };
 
@@ -831,6 +959,10 @@ export class GameState {
             processConstruction(building, building.x || 0, building.y || 0, building.ownerId);
             processRepair(building, building.x || 0, building.y || 0, building.ownerId);
         });
+
+        if (mapStateChanged) {
+            this.touchMapVersion();
+        }
     }
 
     private isUnitWithinFriendlyRepairDock(unit: Unit): boolean {
@@ -1016,6 +1148,20 @@ export class GameState {
         return 4;
     }
 
+    private hasBridgeNodeLandAccessClearance(island: Island, absX: number, absY: number): boolean {
+        if (!this.isPointOnIslandSurface(island, absX, absY)) {
+            return false;
+        }
+
+        if (island.points) {
+            const closest = MapGenerator.getClosestPointOnPolygon(absX, absY, island.points);
+            return Math.hypot(absX - closest.x, absY - closest.y) >= BRIDGE_NODE_LAND_ACCESS_EDGE_PADDING;
+        }
+
+        const edgeDistance = island.radius - Math.hypot(absX - island.x, absY - island.y);
+        return edgeDistance >= BRIDGE_NODE_LAND_ACCESS_EDGE_PADDING;
+    }
+
     public isBuildingPlacementClearOnIsland(island: Island, buildingType: string, absX: number, absY: number): boolean {
         const footprint = this.getEffectivePlacementFootprintRadius(buildingType, island);
         const nonBlocking = this.isNonBlockingBuildingType(buildingType);
@@ -1048,6 +1194,10 @@ export class GameState {
         }
 
         if (buildingType !== 'dock' && buildingType !== 'oil_rig') {
+            if (buildingType === 'bridge_node' && !this.hasBridgeNodeLandAccessClearance(island, absX, absY)) {
+                return false;
+            }
+
             const edgePadding = nonBlocking
                 ? 0
                 : this.mapType === 'islands'
@@ -2786,9 +2936,12 @@ export class GameState {
                 health: 1,
                 maxHealth: stats.maxHealth,
                 isConstructing: true,
-                constructionProgress: 0
+                constructionProgress: 0,
+                ownerId: playerId,
+                range: stats.range
             };
             oilSpot.occupiedBy = (oilSpot as any).building.id;
+            this.touchMapVersion();
 
             return true;
         }
@@ -3564,6 +3717,7 @@ export class GameState {
                     unit.targetX = adjusted.x;
                     unit.targetY = adjusted.y;
                     unit.targetIslandId = undefined;
+                    unit.path = undefined;
                     unit.status = 'moving';
                     return;
                 }
@@ -3572,38 +3726,35 @@ export class GameState {
                     unit.targetX = adjusted.x;
                     unit.targetY = adjusted.y;
                     unit.targetIslandId = undefined;
+                    unit.path = undefined;
                     unit.status = 'moving';
                     return;
                 }
 
                 if (isLandUnit) {
+                    unit.path = undefined;
                     // Check if moving to a different island
-                    const currentIsland = this.map.islands.find(i => {
-                        if (i.points) {
-                            // Check if point is inside OR within buffer
-                            if (MapGenerator.isPointInPolygon(unit.x, unit.y, i.points)) return true;
-                            const closest = MapGenerator.getClosestPointOnPolygon(unit.x, unit.y, i.points);
-                            return Math.hypot(unit.x - closest.x, unit.y - closest.y) < 40;
-                        }
-                        return Math.hypot(unit.x - i.x, unit.y - i.y) <= i.radius + 40;
-                    });
-                    const targetIsland = this.map.islands.find(i => {
-                        if (i.points) {
-                            if (MapGenerator.isPointInPolygon(adjusted.x, adjusted.y, i.points)) return true;
-                            const closest = MapGenerator.getClosestPointOnPolygon(adjusted.x, adjusted.y, i.points);
-                            return Math.hypot(adjusted.x - closest.x, adjusted.y - closest.y) < 40;
-                        }
-                        return Math.hypot(adjusted.x - i.x, adjusted.y - i.y) <= i.radius + 40;
-                    });
+                    const currentIsland = this.getIslandContainingPoint(unit.x, unit.y, 40);
+                    const targetIsland = this.getIslandContainingPoint(adjusted.x, adjusted.y, 40);
 
                     if (unit.type === 'builder') {
                         // console.log(`[MoveDebug] Builder ${unit.id} on ${currentIsland?.id} target ${targetIsland?.id}`);
                     }
 
+                    const bridgeWaypoints = this.buildLandBridgeWaypointPath(unit, adjusted);
+                    if (bridgeWaypoints.length > 0) {
+                        unit.targetX = adjusted.x;
+                        unit.targetY = adjusted.y;
+                        unit.targetIslandId = undefined;
+                        unit.path = bridgeWaypoints;
+                        unit.status = 'moving';
+                        return;
+                    }
+
                     if (currentIsland && targetIsland && currentIsland.id !== targetIsland.id) {
                         // Moving between different islands
-
-                        const islandPath = this.findIslandPath(currentIsland.id, targetIsland.id);
+                        const connectedByLand = this.areIslandsLandConnected(currentIsland, targetIsland);
+                        const islandPath = connectedByLand ? [currentIsland.id, targetIsland.id] : this.findIslandPath(currentIsland.id, targetIsland.id);
                         if (!islandPath) {
                             // If no path, move to the edge of the current island closest to the target
                             if (currentIsland.points) {
@@ -3619,6 +3770,24 @@ export class GameState {
                             unit.targetIslandId = undefined;
                             unit.status = 'moving';
                             return;
+                        }
+                    }
+
+                    if (!currentIsland && targetIsland) {
+                        const bridgeInfo = this.getBridgeAt(unit.x, unit.y);
+                        if (bridgeInfo) {
+                            const nodeAContext = this.getNodeContext(bridgeInfo.bridge.nodeAId);
+                            const nodeBContext = this.getNodeContext(bridgeInfo.bridge.nodeBId);
+                            const canReachTarget =
+                                (!!nodeAContext?.islandId && (nodeAContext.islandId === targetIsland.id || !!this.findIslandPath(nodeAContext.islandId, targetIsland.id))) ||
+                                (!!nodeBContext?.islandId && (nodeBContext.islandId === targetIsland.id || !!this.findIslandPath(nodeBContext.islandId, targetIsland.id)));
+
+                            if (!canReachTarget) {
+                                unit.targetIslandId = undefined;
+                                unit.path = undefined;
+                                unit.status = 'idle';
+                                return;
+                            }
                         }
                     }
 
@@ -3644,6 +3813,7 @@ export class GameState {
                 unit.targetX = adjusted.x;
                 unit.targetY = adjusted.y;
                 unit.targetIslandId = undefined; // Direct move
+                unit.path = undefined;
                 unit.status = 'moving';
 
                 if (!this.isValidPosition(adjusted.x, adjusted.y, unit.type)) {
@@ -3927,6 +4097,7 @@ export class GameState {
 
         // Clear path cache as connectivity changed
         this.clearTraversalCaches();
+        this.touchMapVersion();
     }
 
     convertWallToGate(playerId: string, nodeAId: string, nodeBId: string) {
@@ -3944,6 +4115,7 @@ export class GameState {
 
         player.resources.gold -= 50;
         bridge.type = 'gate';
+        this.touchMapVersion();
     }
 
     // Pathfinding Cache
@@ -5108,16 +5280,20 @@ export class GameState {
                     let activeTargetY = targetY;
 
                     if (unit.path && unit.path.length > 0) {
-                        const pt = unit.path[0];
-                        if (Math.hypot(unit.x - pt.x, unit.y - pt.y) < 30) { // Reached waypoint
-                            unit.path.shift();
-                            if (unit.path.length > 0) {
-                                activeTargetX = unit.path[0].x;
-                                activeTargetY = unit.path[0].y;
+                        while (unit.path.length > 0) {
+                            const pt = unit.path[0];
+                            const threshold = this.getWaypointArrivalThreshold(pt);
+                            if (Math.hypot(unit.x - pt.x, unit.y - pt.y) >= threshold) {
+                                activeTargetX = pt.x;
+                                activeTargetY = pt.y;
+                                break;
                             }
-                        } else {
-                            activeTargetX = pt.x;
-                            activeTargetY = pt.y;
+
+                            if (this.isBridgeNodeWaypoint(pt)) {
+                                unit.x = pt.x;
+                                unit.y = pt.y;
+                            }
+                            unit.path.shift();
                         }
                     }
 
@@ -5143,8 +5319,9 @@ export class GameState {
                         }
 
                         if (shouldMove) {
-                            moveX = dirX * unit.speed * deltaTime;
-                            moveY = dirY * unit.speed * deltaTime;
+                            const moveDistance = Math.min(dist, unit.speed * deltaTime);
+                            moveX = dirX * moveDistance;
+                            moveY = dirY * moveDistance;
                         }
 
                         if (!shouldMove) {

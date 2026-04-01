@@ -90,9 +90,11 @@ function main() {
 
     const waterNodeX = 430;
     const waterNodeY = 420;
-    const neutralIslandNodeX = 652;
+    const tooCloseNeutralIslandNodeX = 652;
+    const neutralIslandNodeX = 664;
     const neutralIslandNodeY = 420;
-    const enemyIslandNodeX = 1032;
+    const tooCloseEnemyIslandNodeX = 1032;
+    const enemyIslandNodeX = 1044;
     const enemyIslandNodeY = 420;
 
     const waterNodeBuilt = gameState.buildStructure(playerId, undefined as any, 'bridge_node', waterNodeX, waterNodeY);
@@ -101,8 +103,14 @@ function main() {
     const outOfRangeWaterNodeBuilt = gameState.buildStructure(playerId, undefined as any, 'bridge_node', 220, 120);
     assert(!outOfRangeWaterNodeBuilt, 'bridge node should still require a nearby builder or construction ship');
 
+    const tooCloseNeutralIslandNodeBuilt = gameState.buildStructure(playerId, undefined as any, 'bridge_node', tooCloseNeutralIslandNodeX, neutralIslandNodeY);
+    assert(!tooCloseNeutralIslandNodeBuilt, 'bridge node should reject shoreline clicks that leave no land access behind the node');
+
     const neutralIslandNodeBuilt = gameState.buildStructure(playerId, undefined as any, 'bridge_node', neutralIslandNodeX, neutralIslandNodeY);
     assert(neutralIslandNodeBuilt, 'bridge node should build on an unclaimed island when a nearby construction ship supports it');
+
+    const tooCloseEnemyIslandNodeBuilt = gameState.buildStructure(playerId, undefined as any, 'bridge_node', tooCloseEnemyIslandNodeX, enemyIslandNodeY);
+    assert(!tooCloseEnemyIslandNodeBuilt, 'enemy-land bridge nodes should also reject shoreline clicks that are too close to the edge');
 
     const enemyIslandNodeBuilt = gameState.buildStructure(playerId, undefined as any, 'bridge_node', enemyIslandNodeX, enemyIslandNodeY);
     assert(enemyIslandNodeBuilt, 'bridge node should build on an enemy-owned island when a nearby construction ship supports it');
@@ -124,7 +132,9 @@ function main() {
     console.log(JSON.stringify({
         waterNodeBuilt,
         outOfRangeWaterNodeBuilt,
+        tooCloseNeutralIslandNodeBuilt,
         neutralIslandNodeBuilt,
+        tooCloseEnemyIslandNodeBuilt,
         enemyIslandNodeBuilt,
         waterBuildingCount: (gameState.map.waterBuildings || []).length,
         neutralIslandBridgeNodes: neutralIsland.buildings.filter(building => building.type === 'bridge_node').length,
