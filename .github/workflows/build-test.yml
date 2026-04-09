@@ -346,6 +346,7 @@ jobs:
           appId: 4432220
           firstDepotIdOverride: 4432222
           buildDescription: "v${{ github.run_number }}"
+          releaseBranch: ${{ env.STEAM_PROMOTE_LIVE == 'true' && env.STEAM_LIVE_BRANCH || '' }}
           rootPath: client
           depot1Path: releases/steam/macos
           depot2Path: releases/steam/microsoft-windows
@@ -384,6 +385,7 @@ jobs:
           appId: 4432210
           firstDepotIdOverride: 4432211
           buildDescription: "v${{ github.run_number }}"
+          releaseBranch: ${{ env.STEAM_PROMOTE_LIVE == 'true' && env.STEAM_LIVE_BRANCH || '' }}
           rootPath: client
           depot1Path: releases/steam/microsoft-windows
           depot2Path: releases/steam/macos
@@ -415,6 +417,7 @@ jobs:
           appId: 4432220
           firstDepotIdOverride: 4432222
           buildDescription: "v${{ github.run_number }}"
+          releaseBranch: ${{ env.STEAM_PROMOTE_LIVE == 'true' && env.STEAM_LIVE_BRANCH || '' }}
           rootPath: client
           depot1Path: releases/steam/macos
           depot2Path: releases/steam/microsoft-windows
@@ -452,6 +455,7 @@ jobs:
           appId: 4432210
           firstDepotIdOverride: 4432211
           buildDescription: "v${{ github.run_number }}"
+          releaseBranch: ${{ env.STEAM_PROMOTE_LIVE == 'true' && env.STEAM_LIVE_BRANCH || '' }}
           rootPath: client
           depot1Path: releases/steam/microsoft-windows
           depot2Path: releases/steam/macos
