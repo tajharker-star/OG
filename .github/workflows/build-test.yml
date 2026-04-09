@@ -6,6 +6,29 @@ on:
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
+    inputs:
+      steam_publish_target:
+        description: "Steam target app(s) to upload"
+        type: choice
+        required: true
+        default: both
+        options:
+          - both
+          - main
+          - demo
+      steam_live_branch:
+        description: "Steam branch to set live"
+        type: choice
+        required: true
+        default: public
+        options:
+          - public
+          - beta
+      steam_promote_live:
+        description: "Promote uploaded build live after upload"
+        type: boolean
+        required: true
+        default: true
 
 jobs:
   build:
@@ -199,6 +222,10 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    env:
+      STEAM_PUBLISH_TARGET: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.steam_publish_target || 'both' }}
+      STEAM_LIVE_BRANCH: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.steam_live_branch || 'public' }}
+      STEAM_PROMOTE_LIVE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.steam_promote_live || 'true' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -310,7 +337,7 @@ jobs:
           shared_secret: ${{ secrets.STEAM_SHARED_SECRET }}
 
       - name: Steam Deploy (TOTP)
-        if: steps.steam-auth.outputs.mode == 'totp'
+        if: steps.steam-auth.outputs.mode == 'totp' && (env.STEAM_PUBLISH_TARGET == 'both' || env.STEAM_PUBLISH_TARGET == 'demo')
         uses: game-ci/steam-deploy@v3
         with:
           username: ${{ secrets.STEAM_USERNAME }}
@@ -325,12 +352,12 @@ jobs:
           depot3Path: releases/steam/linux
 
       - name: Promote Demo Build Live (TOTP)
-        if: steps.steam-auth.outputs.mode == 'totp'
+        if: steps.steam-auth.outputs.mode == 'totp' && env.STEAM_PROMOTE_LIVE == 'true' && (env.STEAM_PUBLISH_TARGET == 'both' || env.STEAM_PUBLISH_TARGET == 'demo')
         shell: bash
         env:
           STEAM_PARTNER_KEY: ${{ secrets.STEAM_PARTNER_KEY }}
           STEAM_APPROVER_STEAMID: ${{ secrets.STEAM_APPROVER_STEAMID }}
-          STEAM_BRANCH: public
+          STEAM_BRANCH: ${{ env.STEAM_LIVE_BRANCH }}
         run: |
           if [ -z "$STEAM_PARTNER_KEY" ]; then
             echo "STEAM_PARTNER_KEY not set; skipping demo live promotion."
@@ -339,16 +366,16 @@ jobs:
           build_id="$(grep -o 'BuildID [0-9]\+' client/steampipe/output/app_build_4432220.log | tail -n1 | awk '{print $2}')"
           test -n "$build_id"
           cd client
-          node scripts/steam-set-live.mjs demo "$build_id" public
+          node scripts/steam-set-live.mjs demo "$build_id" "$STEAM_BRANCH"
 
       - name: Reset Steam deploy workspace for main (TOTP)
-        if: steps.steam-auth.outputs.mode == 'totp'
+        if: steps.steam-auth.outputs.mode == 'totp' && (env.STEAM_PUBLISH_TARGET == 'both' || env.STEAM_PUBLISH_TARGET == 'main')
         shell: bash
         run: |
           sudo rm -rf BuildOutput client/BuildOutput
 
       - name: Steam Deploy Main (TOTP)
-        if: steps.steam-auth.outputs.mode == 'totp'
+        if: steps.steam-auth.outputs.mode == 'totp' && (env.STEAM_PUBLISH_TARGET == 'both' || env.STEAM_PUBLISH_TARGET == 'main')
         uses: game-ci/steam-deploy@v3
         with:
           username: ${{ secrets.STEAM_USERNAME }}
@@ -363,12 +390,12 @@ jobs:
           depot3Path: releases/steam/linux
 
       - name: Promote Main Build Live (TOTP)
-        if: steps.steam-auth.outputs.mode == 'totp'
+        if: steps.steam-auth.outputs.mode == 'totp' && env.STEAM_PROMOTE_LIVE == 'true' && (env.STEAM_PUBLISH_TARGET == 'both' || env.STEAM_PUBLISH_TARGET == 'main')
         shell: bash
         env:
           STEAM_PARTNER_KEY: ${{ secrets.STEAM_PARTNER_KEY }}
           STEAM_APPROVER_STEAMID: ${{ secrets.STEAM_APPROVER_STEAMID }}
-          STEAM_BRANCH: public
+          STEAM_BRANCH: ${{ env.STEAM_LIVE_BRANCH }}
         run: |
           if [ -z "$STEAM_PARTNER_KEY" ]; then
             echo "STEAM_PARTNER_KEY not set; skipping main live promotion."
@@ -377,10 +404,10 @@ jobs:
           build_id="$(grep -o 'BuildID [0-9]\+' client/steampipe/output/app_build_4432210.log | tail -n1 | awk '{print $2}')"
           test -n "$build_id"
           cd client
-          node scripts/steam-set-live.mjs main "$build_id" public
+          node scripts/steam-set-live.mjs main "$build_id" "$STEAM_BRANCH"
 
       - name: Steam Deploy (config.vdf)
-        if: steps.steam-auth.outputs.mode == 'config'
+        if: steps.steam-auth.outputs.mode == 'config' && (env.STEAM_PUBLISH_TARGET == 'both' || env.STEAM_PUBLISH_TARGET == 'demo')
         uses: game-ci/steam-deploy@v3
         with:
           username: ${{ secrets.STEAM_USERNAME }}
@@ -394,12 +421,12 @@ jobs:
           depot3Path: releases/steam/linux
 
       - name: Promote Demo Build Live (config.vdf)
-        if: steps.steam-auth.outputs.mode == 'config'
+        if: steps.steam-auth.outputs.mode == 'config' && env.STEAM_PROMOTE_LIVE == 'true' && (env.STEAM_PUBLISH_TARGET == 'both' || env.STEAM_PUBLISH_TARGET == 'demo')
         shell: bash
         env:
           STEAM_PARTNER_KEY: ${{ secrets.STEAM_PARTNER_KEY }}
           STEAM_APPROVER_STEAMID: ${{ secrets.STEAM_APPROVER_STEAMID }}
-          STEAM_BRANCH: public
+          STEAM_BRANCH: ${{ env.STEAM_LIVE_BRANCH }}
         run: |
           if [ -z "$STEAM_PARTNER_KEY" ]; then
             echo "STEAM_PARTNER_KEY not set; skipping demo live promotion."
@@ -408,16 +435,16 @@ jobs:
           build_id="$(grep -o 'BuildID [0-9]\+' client/steampipe/output/app_build_4432220.log | tail -n1 | awk '{print $2}')"
           test -n "$build_id"
           cd client
-          node scripts/steam-set-live.mjs demo "$build_id" public
+          node scripts/steam-set-live.mjs demo "$build_id" "$STEAM_BRANCH"
 
       - name: Reset Steam deploy workspace for main (config.vdf)
-        if: steps.steam-auth.outputs.mode == 'config'
+        if: steps.steam-auth.outputs.mode == 'config' && (env.STEAM_PUBLISH_TARGET == 'both' || env.STEAM_PUBLISH_TARGET == 'main')
         shell: bash
         run: |
           sudo rm -rf BuildOutput client/BuildOutput
 
       - name: Steam Deploy Main (config.vdf)
-        if: steps.steam-auth.outputs.mode == 'config'
+        if: steps.steam-auth.outputs.mode == 'config' && (env.STEAM_PUBLISH_TARGET == 'both' || env.STEAM_PUBLISH_TARGET == 'main')
         uses: game-ci/steam-deploy@v3
         with:
           username: ${{ secrets.STEAM_USERNAME }}
@@ -431,12 +458,12 @@ jobs:
           depot3Path: releases/steam/linux
 
       - name: Promote Main Build Live (config.vdf)
-        if: steps.steam-auth.outputs.mode == 'config'
+        if: steps.steam-auth.outputs.mode == 'config' && env.STEAM_PROMOTE_LIVE == 'true' && (env.STEAM_PUBLISH_TARGET == 'both' || env.STEAM_PUBLISH_TARGET == 'main')
         shell: bash
         env:
           STEAM_PARTNER_KEY: ${{ secrets.STEAM_PARTNER_KEY }}
           STEAM_APPROVER_STEAMID: ${{ secrets.STEAM_APPROVER_STEAMID }}
-          STEAM_BRANCH: public
+          STEAM_BRANCH: ${{ env.STEAM_LIVE_BRANCH }}
         run: |
           if [ -z "$STEAM_PARTNER_KEY" ]; then
             echo "STEAM_PARTNER_KEY not set; skipping main live promotion."
@@ -445,7 +472,7 @@ jobs:
           build_id="$(grep -o 'BuildID [0-9]\+' client/steampipe/output/app_build_4432210.log | tail -n1 | awk '{print $2}')"
           test -n "$build_id"
           cd client
-          node scripts/steam-set-live.mjs main "$build_id" public
+          node scripts/steam-set-live.mjs main "$build_id" "$STEAM_BRANCH"
 
       - name: Steam deploy hint (on failure)
         if: failure()
