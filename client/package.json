@@ -15,9 +15,11 @@
     "electron": "unset ELECTRON_RUN_AS_NODE && electron electron/main.cjs",
     "electron:dev": "concurrently -k \"npm run dev\" \"wait-on tcp:5173 && unset ELECTRON_RUN_AS_NODE && NODE_ENV=development electron electron/main.cjs\"",
     "build": "tsc -b && vite build",
-    "dist": "npm run build && npm run build-server && electron-builder",
-    "dist:steam": "npm run build && npm run build-server && node scripts/build-steam-artifacts.mjs && npm run stage:steam && npm run verify:steam-layout && npm run verify:release-binaries && npm run verify:steam-runtime && npm run smoke:packaged-server && npm run smoke:packaged",
+    "build:native-steam-bridge": "node scripts/build-native-steam-bridge.mjs",
+    "dist": "npm run build && npm run build-server && npm run build:native-steam-bridge && electron-builder",
+    "dist:steam": "npm run build && npm run build-server && npm run build:native-steam-bridge && node scripts/build-steam-artifacts.mjs && npm run stage:steam && npm run verify:steam-layout && npm run verify:release-binaries && npm run verify:steam-runtime && npm run smoke:packaged-server && npm run smoke:packaged",
     "dist:steam:with-wine": "npm run dist:steam && npm run smoke:windows:wine",
+    "profile:steam-perf": "node scripts/profile-steam-performance.mjs",
     "build:steam-store-assets": "node scripts/build-steam-store-assets.mjs",
     "build:steam-news-assets": "node scripts/capture-steam-news-assets.mjs",
     "build:steam-gameplay-assets": "node scripts/capture-steam-gameplay-assets.mjs",
@@ -55,6 +57,9 @@
       "electron/**/*",
       "package.json",
       "steam_appid.txt"
+    ],
+    "asarUnpack": [
+      "electron/native/**/*"
     ],
     "extraResources": [
       {

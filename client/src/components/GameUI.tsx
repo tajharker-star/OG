@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { socket, connectionManager } from '../services/socket';
 import { steamService } from '../services/steam';
+import type { SteamFriend } from '../services/steam';
 import type { SteamMultiplayerDiagnostics } from '../types/steamDiagnostics';
 import type { ConnectionState } from '../services/socket';
 import type { Player, GameMap, Unit } from '../types/game';
@@ -28,6 +29,26 @@ interface BattlePing {
     startTime: number;
     isHQ: boolean;
 }
+
+type PerfProfileSample = {
+    ts: number;
+    iso: string;
+    phase: 'lobby' | 'match';
+    gameStatus: 'waiting' | 'voting' | 'playing';
+    pingMs: number;
+    fps: number;
+    memoryMb: number;
+    unitCount: number;
+    playerCount: number;
+    islandCount: number;
+    mapWidth: number;
+    mapHeight: number;
+    steamInitialized: boolean;
+    steamLobbyId: string | null;
+    isLocalMode: boolean;
+    isDevBypass: boolean;
+    connectionState: ConnectionState;
+};
 
 interface ChatMessage {
     sender: string;
@@ -342,6 +363,7 @@ interface GameUIProps {
     onLeave: () => void;
     roomId: string | null;
     steamLobbyId?: string | null;
+    steamLobbyRole?: 'host' | 'guest' | null;
     steamMultiplayerDiagnostics?: SteamMultiplayerDiagnostics | null;
     initialGameStatus?: 'waiting' | 'voting' | 'playing';
     isLocalMode?: boolean;
@@ -376,11 +398,12 @@ const LOBBY_MAX_WARMUP_MS = 9000;
 const MATCH_MIN_WARMUP_MS = 3200;
 const MATCH_MAX_WARMUP_MS = 18000;
 const MATCH_SERVER_READY_MIN_MS = 2200;
-const ROUND_GUI_BUTTON_SIZE = 56;
-const ROUND_GUI_BUTTON_ROW_TOP = 60;
-const ROUND_GUI_BUTTON_ROW_LEFT = 20;
-const ROUND_GUI_BUTTON_GAP = 12;
-const ROUND_GUI_BUTTON_STORAGE_KEY = 'ag_round_gui_button_positions_v1';
+	const ROUND_GUI_BUTTON_SIZE = 56;
+	const ROUND_GUI_BUTTON_ROW_TOP = 60;
+	const ROUND_GUI_BUTTON_ROW_LEFT = 20;
+	const ROUND_GUI_BUTTON_GAP = 12;
+	const ROUND_GUI_BUTTON_STORAGE_KEY = 'ag_round_gui_button_positions_v1';
+	const MINIMAP_DRAW_INTERVAL_MS = 50;
 
 type RoundGuiButtonKey = 'build' | 'chat';
 
@@ -469,6 +492,7 @@ export const GameUI: React.FC<GameUIProps> = ({
     onLeave,
     roomId,
     steamLobbyId = null,
+    steamLobbyRole = null,
     steamMultiplayerDiagnostics = null,
     initialGameStatus,
     isLocalMode = false,
@@ -481,6 +505,21 @@ export const GameUI: React.FC<GameUIProps> = ({
     currentRankedPoints = 0,
     onMatchResolved,
 }) => {
+    const perfProfilingEnabled = React.useMemo(() => {
+        try {
+            const runtimeEnv = (globalThis as any)?.process?.env;
+            if (runtimeEnv?.AG_PERF_PROFILE === '1') {
+                return true;
+            }
+            if (typeof window !== 'undefined' && window.localStorage.getItem('ag_perf_profile') === '1') {
+                return true;
+            }
+        } catch {
+            // Ignore localStorage access issues and keep profiling disabled.
+        }
+        return false;
+    }, []);
+
     const [player, setPlayer] = useState<Player | null>(null);
     const [hoverInfo, setHoverInfo] = useState<any>(null);
     const [selectedIslandId, setSelectedIslandId] = useState<string | null>(null);
@@ -518,11 +557,13 @@ export const GameUI: React.FC<GameUIProps> = ({
     // Minimap State
     const [allPlayers, setAllPlayers] = useState<Map<string, Player>>(new Map());
     const [mapData, setMapData] = useState<GameMap | null>(null);
-    const [units, setUnits] = useState<Unit[]>([]);
-    const [minimapPos, setMinimapPos] = useState({ x: window.innerWidth - 220, y: 60 });
-    const [isDraggingMinimap, setIsDraggingMinimap] = useState(false);
-    const [viewRect, setViewRect] = useState<{ x: number, y: number, width: number, height: number } | null>(null);
-    const dragOffset = useRef({ x: 0, y: 0 });
+	    const [units, setUnits] = useState<Unit[]>([]);
+	    const [minimapPos, setMinimapPos] = useState({ x: window.innerWidth - 220, y: 60 });
+	    const [isDraggingMinimap, setIsDraggingMinimap] = useState(false);
+	    const [viewRect, setViewRect] = useState<{ x: number, y: number, width: number, height: number } | null>(null);
+	    const lastViewRectRef = useRef<{ x: number, y: number, width: number, height: number } | null>(null);
+	    const lastMinimapDrawAtRef = useRef(0);
+	    const dragOffset = useRef({ x: 0, y: 0 });
 
     // Stats Panel Drag State
     const [statsPanelPos, setStatsPanelPos] = useState<{ x: number, y: number } | null>(null);
@@ -555,6 +596,10 @@ export const GameUI: React.FC<GameUIProps> = ({
     const [queueType, setQueueType] = useState<'standard' | 'ranked_quick_match'>(rankedMatch ? 'ranked_quick_match' : 'standard');
     const [allowBots, setAllowBots] = useState(!rankedMatch);
     const [allowForceStart, setAllowForceStart] = useState(!rankedMatch);
+    const [steamFriends, setSteamFriends] = useState<SteamFriend[]>([]);
+    const [steamFriendsLoading, setSteamFriendsLoading] = useState(false);
+    const [steamFriendsError, setSteamFriendsError] = useState<string | null>(null);
+    const [invitingSteamFriendId, setInvitingSteamFriendId] = useState<string | null>(null);
     const [votingData, setVotingData] = useState<{ timeLeft: number, votes: [string, string][] }>({ timeLeft: 0, votes: [] });
     const [isLobbyLoading, setIsLobbyLoading] = useState(gameStatus !== 'playing');
     const [isMatchLoading, setIsMatchLoading] = useState(gameStatus === 'playing');
@@ -791,6 +836,7 @@ export const GameUI: React.FC<GameUIProps> = ({
     const allPlayersSnapshotRef = useRef<Map<string, Player>>(new Map());
     const onMatchResolvedRef = useRef<GameUIProps['onMatchResolved']>(onMatchResolved);
     const matchStatsSourceRef = useRef<MatchSource>(matchStatsSource);
+    const perfSnapshotRef = useRef<PerfProfileSample | null>(null);
     const isRankedQuickMatchLobby = rankedMatch || queueType === 'ranked_quick_match';
     const steamDiagnosticsRouteLabel = steamMultiplayerDiagnostics?.route === 'steam-relay'
         ? 'Steam Relay'
@@ -799,6 +845,129 @@ export const GameUI: React.FC<GameUIProps> = ({
             : steamMultiplayerDiagnostics?.route === 'pending'
                 ? 'Pending'
                 : 'Idle';
+    const steamDiagnosticsNote = steamMultiplayerDiagnostics
+        && (steamMultiplayerDiagnostics.inviteSurface === 'Steam Overlay Invite Dialog'
+            || steamMultiplayerDiagnostics.inviteSurface === 'Steam Friends Window'
+            || steamMultiplayerDiagnostics.inviteSurface === 'Steam Overlay + Friends Window')
+        ? steamMultiplayerDiagnostics.inviteSurfaceNote || (
+            steamMultiplayerDiagnostics.inviteSurface === 'Steam Overlay Invite Dialog'
+                ? 'Steam opened the native lobby invite dialog.'
+                : 'Steam opened the friends window for inviting.'
+        )
+        : steamMultiplayerDiagnostics
+        && steamLobbyRole === 'host'
+        && steamMultiplayerDiagnostics.route === 'steam-relay'
+        && !steamMultiplayerDiagnostics.relaySessionId
+        ? 'Host is ready. "Relay None" is normal until a friend accepts the Steam invite.'
+        : steamMultiplayerDiagnostics?.route === 'steam-relay' && steamMultiplayerDiagnostics?.relaySessionId
+            ? 'This session is using Steam relay.'
+            : steamMultiplayerDiagnostics?.route === 'direct-endpoint'
+                ? 'This session is using the direct host endpoint.'
+                : null;
+
+    useEffect(() => {
+        const phase: 'lobby' | 'match' = gameStatus === 'playing' ? 'match' : 'lobby';
+        perfSnapshotRef.current = {
+            ts: Date.now(),
+            iso: new Date().toISOString(),
+            phase,
+            gameStatus,
+            pingMs: ping,
+            fps,
+            memoryMb: memory,
+            unitCount: units.length,
+            playerCount: allPlayers.size,
+            islandCount: mapData?.islands.length || 0,
+            mapWidth: mapData?.width || 0,
+            mapHeight: mapData?.height || 0,
+            steamInitialized: steamService.isInitialized,
+            steamLobbyId,
+            isLocalMode,
+            isDevBypass,
+            connectionState,
+        };
+    }, [
+        gameStatus,
+        ping,
+        fps,
+        memory,
+        units.length,
+        allPlayers,
+        mapData?.islands.length,
+        mapData?.width,
+        mapData?.height,
+        steamLobbyId,
+        isLocalMode,
+        isDevBypass,
+        connectionState,
+    ]);
+
+    useEffect(() => {
+        if (!perfProfilingEnabled || typeof window === 'undefined') {
+            return;
+        }
+
+        const profileWindow = window as Window & { __agPerfSamples?: PerfProfileSample[] };
+        if (!Array.isArray(profileWindow.__agPerfSamples)) {
+            profileWindow.__agPerfSamples = [];
+        }
+
+        const pushSample = () => {
+            const latest = perfSnapshotRef.current;
+            if (!latest) return;
+
+            const sample: PerfProfileSample = {
+                ...latest,
+                ts: Date.now(),
+                iso: new Date().toISOString(),
+            };
+            profileWindow.__agPerfSamples!.push(sample);
+
+            // Keep memory bounded when profiling for long sessions.
+            if (profileWindow.__agPerfSamples!.length > 2400) {
+                profileWindow.__agPerfSamples!.splice(0, profileWindow.__agPerfSamples!.length - 2400);
+            }
+
+            console.log(`[AG_PERF_SAMPLE] ${JSON.stringify(sample)}`);
+        };
+
+        pushSample();
+        const timer = window.setInterval(pushSample, 2000);
+        return () => window.clearInterval(timer);
+    }, [perfProfilingEnabled]);
+
+    const loadSteamFriends = async () => {
+        if (!steamLobbyId || !steamService.isInitialized || isRankedQuickMatchLobby) {
+            setSteamFriends([]);
+            setSteamFriendsError(null);
+            return;
+        }
+
+        setSteamFriendsLoading(true);
+        setSteamFriendsError(null);
+        try {
+            const result = await steamService.listFriends();
+            if (!result.success) {
+                setSteamFriends([]);
+                setSteamFriendsError(result.error || 'Failed to load Steam friends.');
+                return;
+            }
+
+            setSteamFriends(result.friends);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to load Steam friends.';
+            setSteamFriends([]);
+            setSteamFriendsError(message);
+        } finally {
+            setSteamFriendsLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        void loadSteamFriends();
+        // Intentionally refresh when the active Steam lobby context changes.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [steamLobbyId, isRankedQuickMatchLobby]);
 
     const buildRankedOverlaySummary = (
         placement?: number | null,
@@ -1443,9 +1612,21 @@ export const GameUI: React.FC<GameUIProps> = ({
             }
         };
 
-        const handleMinimapUpdate = (e: CustomEvent) => {
-            setViewRect(e.detail);
-        };
+	        const handleMinimapUpdate = (e: CustomEvent) => {
+	            const nextRect = e.detail as { x: number, y: number, width: number, height: number };
+	            const previousRect = lastViewRectRef.current;
+	            if (
+	                previousRect &&
+	                Math.abs(previousRect.x - nextRect.x) < 0.75 &&
+	                Math.abs(previousRect.y - nextRect.y) < 0.75 &&
+	                Math.abs(previousRect.width - nextRect.width) < 0.5 &&
+	                Math.abs(previousRect.height - nextRect.height) < 0.5
+	            ) {
+	                return;
+	            }
+	            lastViewRectRef.current = nextRect;
+	            setViewRect(nextRect);
+	        };
 
         const handleChatMessage = (msg: ChatMessage) => {
             setChatMessages(prev => [...prev, msg]);
@@ -1513,10 +1694,15 @@ export const GameUI: React.FC<GameUIProps> = ({
     const flashOverlayRef = useRef<HTMLDivElement>(null);
     const lastPingTimeRef = useRef<Map<string, number>>(new Map());
 
-    const renderMinimap = () => {
-        if (!canvasRef.current || !mapData) return;
-        const ctx = canvasRef.current.getContext('2d');
-        if (!ctx) return;
+	    const renderMinimap = (force = false) => {
+	        if (!canvasRef.current || !mapData) return;
+	        const frameNow = performance.now();
+	        if (!force && frameNow - lastMinimapDrawAtRef.current < MINIMAP_DRAW_INTERVAL_MS) {
+	            return;
+	        }
+	        lastMinimapDrawAtRef.current = frameNow;
+	        const ctx = canvasRef.current.getContext('2d');
+	        if (!ctx) return;
 
         const width = canvasRef.current.width;
         const height = canvasRef.current.height;
@@ -1791,8 +1977,8 @@ export const GameUI: React.FC<GameUIProps> = ({
             animId = requestAnimationFrame(loop);
         };
 
-        // Initial render on data change
-        renderMinimap();
+	        // Initial render on data change
+	        renderMinimap(true);
 
         animId = requestAnimationFrame(loop);
         return () => cancelAnimationFrame(animId);
@@ -2644,17 +2830,77 @@ export const GameUI: React.FC<GameUIProps> = ({
                     {roomId && (
                         <div className="lobby-invite-content">
                             {steamLobbyId && steamService.isInitialized && !isRankedQuickMatchLobby && (
-                                <button
-                                    onClick={async () => {
-                                        const result = await steamService.openInviteDialog(steamLobbyId);
-                                        if (!result.success) {
-                                            alert(`Failed to open Steam invite dialog: ${result.error || 'Unknown error'}`);
-                                        }
-                                    }}
-                                    className="lobby-invite-btn"
-                                >
-                                    Invite via Steam
-                                </button>
+                                <>
+                                    <div className="lobby-steam-actions">
+                                        <button
+                                            onClick={async () => {
+                                                const result = await steamService.openInviteDialog(steamLobbyId);
+                                                if (!result.success) {
+                                                    alert(`Failed to open Steam invite dialog: ${result.error || 'Unknown error'}`);
+                                                }
+                                            }}
+                                            className="lobby-invite-btn"
+                                        >
+                                            Open Steam Invite Dialog
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                void loadSteamFriends();
+                                            }}
+                                            className="lobby-invite-btn lobby-invite-btn-secondary"
+                                            disabled={steamFriendsLoading}
+                                        >
+                                            {steamFriendsLoading ? 'Refreshing Steam Friends...' : 'Refresh Steam Friends'}
+                                        </button>
+                                    </div>
+
+                                    <div className="lobby-steam-friends">
+                                        <div className="lobby-steam-friends__header">
+                                            <span>Steam Friends</span>
+                                            <strong>{steamFriends.length}</strong>
+                                        </div>
+                                        {steamFriendsError && (
+                                            <div className="lobby-steam-friends__empty">{steamFriendsError}</div>
+                                        )}
+                                        {!steamFriendsError && steamFriends.length === 0 && (
+                                            <div className="lobby-steam-friends__empty">
+                                                {steamFriendsLoading ? 'Loading Steam friends...' : 'No Steam friends were returned yet.'}
+                                            </div>
+                                        )}
+                                        {steamFriends.length > 0 && (
+                                            <div className="lobby-steam-friends__list">
+                                                {steamFriends.map((friend) => (
+                                                    <div key={friend.steamId} className="lobby-steam-friends__row">
+                                                        <div className="lobby-steam-friends__identity">
+                                                            <strong>{friend.name}</strong>
+                                                            <span>
+                                                                {friend.state || 'unknown'}
+                                                                {friend.lobbyId ? ' • In a Steam lobby' : ''}
+                                                            </span>
+                                                        </div>
+                                                        <button
+                                                            onClick={async () => {
+                                                                setInvitingSteamFriendId(friend.steamId);
+                                                                try {
+                                                                    const result = await steamService.inviteFriend(friend.steamId, steamLobbyId);
+                                                                    if (!result.success) {
+                                                                        alert(`Failed to invite ${friend.name}: ${result.error || 'Unknown error'}`);
+                                                                    }
+                                                                } finally {
+                                                                    setInvitingSteamFriendId(null);
+                                                                }
+                                                            }}
+                                                            className="lobby-invite-btn lobby-invite-btn-small"
+                                                            disabled={invitingSteamFriendId === friend.steamId}
+                                                        >
+                                                            {invitingSteamFriendId === friend.steamId ? 'Inviting...' : 'Invite'}
+                                                        </button>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                </>
                             )}
 
                             {/* Game ID & Password Display */}
@@ -2722,6 +2968,10 @@ export const GameUI: React.FC<GameUIProps> = ({
                                             <strong>{steamMultiplayerDiagnostics.connectionPhase}</strong>
                                         </div>
                                         <div className="lobby-steam-diagnostics__row">
+                                            <span>Invite Surface</span>
+                                            <strong>{steamMultiplayerDiagnostics.inviteSurface || 'None'}</strong>
+                                        </div>
+                                        <div className="lobby-steam-diagnostics__row">
                                             <span>Lobby</span>
                                             <strong>{steamMultiplayerDiagnostics.lobbyId || steamLobbyId || 'None'}</strong>
                                         </div>
@@ -2731,13 +2981,16 @@ export const GameUI: React.FC<GameUIProps> = ({
                                         </div>
                                     </div>
                                     <div className="lobby-steam-diagnostics__field">
-                                        <span>Endpoint</span>
+                                        <span>{steamLobbyRole === 'host' ? 'Fallback Endpoint' : 'Join Endpoint'}</span>
                                         <code>{steamMultiplayerDiagnostics.endpoint || 'Unavailable'}</code>
                                     </div>
                                     <div className={`lobby-steam-diagnostics__field ${steamMultiplayerDiagnostics.lastError ? 'is-error' : ''}`}>
                                         <span>Last Error</span>
                                         <code>{steamMultiplayerDiagnostics.lastError || 'None'}</code>
                                     </div>
+                                    {steamDiagnosticsNote && (
+                                        <div className="lobby-steam-diagnostics__note">{steamDiagnosticsNote}</div>
+                                    )}
                                     {steamMultiplayerDiagnostics.events.length > 0 && (
                                         <div className="lobby-steam-diagnostics__events">
                                             {steamMultiplayerDiagnostics.events.slice(0, 3).map((event) => (

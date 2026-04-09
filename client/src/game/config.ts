@@ -8,6 +8,11 @@ console.log('[GameConfig] Environment detected:', isElectron ? 'Electron' : 'Web
 export const gameConfig: Phaser.Types.Core.GameConfig = {
   // Use AUTO to allow WebGL rendering for better performance
   type: Phaser.AUTO,
+  render: {
+    antialias: false,
+    powerPreference: 'high-performance',
+    roundPixels: true,
+  },
   parent: 'game-container',
   width: '100%',
   height: '100%',

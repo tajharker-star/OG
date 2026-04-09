@@ -1,5 +1,5 @@
 const electron = require('electron');
-const { app, BrowserWindow, ipcMain, dialog, globalShortcut } = electron;
+const { app, BrowserWindow, ipcMain, globalShortcut } = electron;
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -8,6 +8,7 @@ const http = require('http');
 const https = require('https');
 const { spawn } = require('child_process');
 const { createSteamRelayBridge } = require('./steamRelayBridge.cjs');
+const { createSteamNativeBridge } = require('./steamNativeBridge.cjs');
 
 const brokenStdIoErrorCodes = new Set(['EBADF', 'EINVAL', 'ENXIO']);
 const fallbackConsoleLogPath = path.join(os.tmpdir(), 'conquerors-domination-demo-main.log');
@@ -61,9 +62,10 @@ function writeMainLog(message) {
 }
 
 // In CJS, __dirname and __filename are already defined
-let steamClient;
-let steamworksApi;
-let steamJoinRequestedHandle;
+let steamBridge;
+let steamInitPromise;
+let steamInitError = null;
+let steamBridgeEventsAttached = false;
 let activeSteamLobby;
 let activeSteamLobbyId;
 let steamRelayBridge;
@@ -411,18 +413,27 @@ function normalizeLobbyMetadataEntries(rawValue) {
 }
 
 function rememberActiveSteamLobby(lobby) {
-  activeSteamLobby = lobby || null;
-  activeSteamLobbyId = lobby?.id?.toString?.() || null;
+  const normalizedLobbyId = lobby && typeof lobby === 'object'
+    ? lobby.id?.toString?.() || lobby.lobbyId?.toString?.() || null
+    : lobby
+      ? String(lobby)
+      : null;
+  activeSteamLobby = normalizedLobbyId ? { id: normalizedLobbyId } : null;
+  activeSteamLobbyId = normalizedLobbyId;
   return activeSteamLobbyId;
 }
 
 function leaveActiveSteamLobby(reason = 'unspecified') {
-  if (!activeSteamLobby) {
+  if (!activeSteamLobbyId) {
     return false;
   }
 
   try {
-    activeSteamLobby.leave();
+    if (steamBridge?.isReady()) {
+      void steamBridge.leaveLobby(activeSteamLobbyId).catch((err) => {
+        console.warn('[Steam] Failed to leave active lobby cleanly:', err);
+      });
+    }
     console.log(`[Steam] Left active lobby (${activeSteamLobbyId || 'unknown'}) reason=${reason}`);
   } catch (err) {
     console.warn('[Steam] Failed to leave active lobby cleanly:', err);
@@ -522,108 +533,6 @@ async function waitForPublicTunnelReady(endpoint, attempts = 8, delayMs = 750) {
   return false;
 }
 
-function readLobbySnapshot(lobby) {
-  const requiredPlayers = parseOptionalInteger(lobby?.getData?.('ag_required_players'));
-  const memberCount = Number(lobby?.getMemberCount?.() ?? 0n);
-  const memberLimitRaw = lobby?.getMemberLimit?.();
-  const memberLimit = memberLimitRaw === null || memberLimitRaw === undefined
-    ? undefined
-    : Number(memberLimitRaw);
-
-  return {
-    lobbyId: lobby?.id?.toString?.() || undefined,
-    roomId: lobby?.getData?.('ag_room') || undefined,
-    endpoint: lobby?.getData?.('ag_endpoint') || undefined,
-    hostSteamId: lobby?.getData?.('ag_host_steam_id') || undefined,
-    map: lobby?.getData?.('map') || undefined,
-    mode: lobby?.getData?.('mode') || undefined,
-    queueType: lobby?.getData?.('ag_queue') || undefined,
-    status: lobby?.getData?.('ag_status') || undefined,
-    ranked: lobby?.getData?.('ag_ranked') === '1',
-    requiredPlayers,
-    memberCount,
-    memberLimit,
-  };
-}
-
-function hasRequiredLobbySnapshotData(snapshot, { requireRoomId = true, requireEndpoint = true } = {}) {
-  if (requireRoomId && !snapshot.roomId) {
-    return false;
-  }
-
-  if (requireEndpoint && !snapshot.endpoint) {
-    return false;
-  }
-
-  return true;
-}
-
-async function awaitLobbySnapshot(lobby, options = {}) {
-  const initialSnapshot = readLobbySnapshot(lobby);
-  if (hasRequiredLobbySnapshotData(initialSnapshot, options)) {
-    return initialSnapshot;
-  }
-
-  return await new Promise((resolve) => {
-    let finished = false;
-    let callbackHandle = null;
-    let pollTimer = null;
-    let timeoutTimer = null;
-
-    const finish = (snapshot) => {
-      if (finished) {
-        return;
-      }
-      finished = true;
-      if (callbackHandle?.disconnect) {
-        callbackHandle.disconnect();
-      }
-      if (pollTimer) {
-        clearInterval(pollTimer);
-      }
-      if (timeoutTimer) {
-        clearTimeout(timeoutTimer);
-      }
-      resolve(snapshot);
-    };
-
-    const inspectLobby = () => {
-      const snapshot = readLobbySnapshot(lobby);
-      if (hasRequiredLobbySnapshotData(snapshot, options)) {
-        finish(snapshot);
-      }
-      return snapshot;
-    };
-
-    if (steamClient?.callback?.register && steamworksApi?.SteamCallback) {
-      callbackHandle = steamClient.callback.register(
-        steamworksApi.SteamCallback.LobbyDataUpdate,
-        ({ lobby: updatedLobbyId, success }) => {
-          if (!success) {
-            return;
-          }
-
-          if (String(updatedLobbyId) !== String(lobby.id)) {
-            return;
-          }
-
-          inspectLobby();
-        }
-      );
-    }
-
-    pollTimer = setInterval(() => {
-      inspectLobby();
-    }, options.pollMs || 250);
-
-    timeoutTimer = setTimeout(() => {
-      finish(readLobbySnapshot(lobby));
-    }, options.timeoutMs || 5000);
-
-    inspectLobby();
-  });
-}
-
 async function ensurePublicTunnel(port = '3001') {
   const requestedPort = String(port || '3001').trim() || '3001';
   const parsedPort = Number.parseInt(requestedPort, 10);
@@ -697,15 +606,49 @@ async function ensurePublicTunnel(port = '3001') {
   }
 }
 
-const overlayDialogMap = {
-  Friends: 0,
-  Community: 1,
-  Players: 2,
-  Settings: 3,
-  OfficialGameGroup: 4,
-  Stats: 5,
-  Achievements: 6,
-};
+async function openSteamInviteSurface(targetLobby, reason = 'unspecified') {
+  const result = {
+    success: false,
+    method: null,
+    note: null,
+  };
+
+  const activeWin = mainWindow && !mainWindow.isDestroyed()
+    ? mainWindow
+    : BrowserWindow.getAllWindows().find((candidate) => candidate && !candidate.isDestroyed()) || null;
+  if (activeWin) {
+    presentWindow(activeWin, `steam invite surface (${reason})`);
+  }
+
+  try {
+    const lobbyId = targetLobby && typeof targetLobby === 'object'
+      ? targetLobby.id?.toString?.() || targetLobby.lobbyId?.toString?.() || null
+      : targetLobby
+        ? String(targetLobby)
+        : null;
+
+    if (!steamBridge?.isReady()) {
+      return {
+        success: false,
+        method: null,
+        note: 'Native Steam bridge is unavailable.',
+      };
+    }
+
+    const inviteResult = await steamBridge.openInviteDialog(lobbyId);
+    result.success = Boolean(inviteResult?.success !== false);
+    result.method = inviteResult?.method || 'native-overlay-invite-dialog';
+    result.note = inviteResult?.note || 'Requested the native Steam invite dialog.';
+    return result;
+  } catch (inviteError) {
+    console.warn('[Steam] Native invite dialog attempt failed:', inviteError);
+    return {
+      success: false,
+      method: null,
+      note: inviteError?.message || 'Unable to open the native Steam invite dialog.',
+    };
+  }
+}
 
 function emitSteamJoinLobby(lobbyId) {
   if (!lobbyId) return;
@@ -739,14 +682,25 @@ if (process.env.DISABLE_STEAM === '1') {
 } else {
   try {
     const steamAppId = resolveSteamAppId();
-    steamworksApi = require('steamworks.js');
-    if (typeof steamworksApi.electronEnableSteamOverlay === 'function') {
-      steamworksApi.electronEnableSteamOverlay();
-      console.log('[Steam] Electron overlay bridge enabled.');
-    }
-    steamClient = steamworksApi.init(steamAppId);
-    console.log(`[Steam] Initialized app ${steamAppId}.`);
+    steamBridge = createSteamNativeBridge({
+      appId: steamAppId,
+      log: (...args) => console.log(...args),
+      warn: (...args) => console.warn(...args),
+      error: (...args) => console.error(...args),
+    });
+    steamInitPromise = steamBridge.start()
+      .then(({ user }) => {
+        steamInitError = null;
+        console.log(`[Steam] Native bridge initialized app ${steamAppId} for ${user?.name || 'unknown user'}.`);
+        return user;
+      })
+      .catch((error) => {
+        steamInitError = error?.message || String(error);
+        console.error('[Steam] Native bridge failed to initialize:', error);
+        return null;
+      });
   } catch (e) {
+    steamInitError = e?.message || String(e);
     console.error('[Steam] Failed to load or initialize:', e);
   }
 }
@@ -1234,13 +1188,18 @@ async function createWindow() {
     }
   });
 
-    // --- Steam Integration ---
-  if (steamClient) {
-    console.log('[Steam] Initialized successfully. Player:', steamClient.localplayer.getName());
+  if (steamInitPromise) {
+    await steamInitPromise;
+  }
+
+  // --- Steam Integration ---
+  if (steamBridge?.isReady()) {
+    const currentUser = steamBridge.getCurrentUser();
+    console.log('[Steam] Native bridge initialized successfully. Player:', currentUser?.name || 'Unknown');
+
     if (!steamRelayBridge) {
       steamRelayBridge = createSteamRelayBridge({
-        getSteamClient: () => steamClient,
-        getSteamworksApi: () => steamworksApi,
+        relayTransport: steamBridge,
         getHostServerUrl: () => `http://127.0.0.1:${process.env.PORT || '3001'}`,
         log: (...args) => console.log(...args),
         warn: (...args) => console.warn(...args),
@@ -1249,97 +1208,70 @@ async function createWindow() {
     }
     void steamRelayBridge.activate();
 
-    if (!steamJoinRequestedHandle && steamClient.callback?.register && steamworksApi?.SteamCallback) {
-      steamJoinRequestedHandle = steamClient.callback.register(
-        steamworksApi.SteamCallback.GameLobbyJoinRequested,
-        ({ lobby_steam_id }) => {
-          const lobbyId = lobby_steam_id?.toString?.() || '';
-          console.log('[Steam] GameLobbyJoinRequested callback:', lobbyId);
-          emitSteamJoinLobby(lobbyId);
-        }
-      );
+    if (!steamBridgeEventsAttached) {
+      steamBridge.on('join-lobby-requested', ({ lobbyId, source }) => {
+        console.log('[Steam] Join requested callback:', lobbyId, `source=${source || 'unknown'}`);
+        emitSteamJoinLobby(lobbyId);
+      });
+      steamBridge.on('error', ({ message }) => {
+        console.error('[Steam] Native bridge event error:', message);
+      });
+      steamBridgeEventsAttached = true;
     }
 
-    // Notify renderer of success
     win.webContents.on('did-finish-load', () => {
       win.webContents.send('steam:init-success', {
-        steamId: steamClient.localplayer.getSteamId().steamId64.toString(),
-        name: steamClient.localplayer.getName()
+        steamId: currentUser?.steamId || '',
+        name: currentUser?.name || 'Unknown',
       });
     });
 
-    // Handle Overlay
     ipcMain.removeAllListeners('steam:activate-overlay');
     ipcMain.on('steam:activate-overlay', (_, dialog) => {
-      const dialogId = overlayDialogMap[dialog] ?? overlayDialogMap.Friends;
-      if (typeof steamClient.overlay.activateDialog === 'function') {
-        steamClient.overlay.activateDialog(dialogId);
-        return;
-      }
-
-      if (typeof steamClient.overlay.activate === 'function') {
-        steamClient.overlay.activate(dialog || 'Friends');
-      }
+      void steamBridge.activateOverlay(dialog || 'Friends').catch((err) => {
+        console.error('[Steam] Failed to activate overlay:', err);
+      });
     });
 
-    // Handle Rich Presence
     ipcMain.removeAllListeners('steam:set-rich-presence');
     ipcMain.on('steam:set-rich-presence', (_, data) => {
-      for (const [key, value] of Object.entries(data)) {
-        steamClient.localplayer.setRichPresence(key, value);
-      }
+      void steamBridge.setRichPresence(data || {}).catch((err) => {
+        console.error('[Steam] Failed to set rich presence:', err);
+      });
     });
 
-    // Handle Lobby Creation
     ipcMain.removeHandler('steam:create-lobby');
     ipcMain.handle('steam:create-lobby', async (_, data) => {
       try {
         leaveActiveSteamLobby('hosting a new steam lobby');
-
         const requestedVisibility = typeof data?.lobbyVisibility === 'string'
           ? data.lobbyVisibility.toLowerCase()
           : 'friends';
-        const lobbyType = steamLobbyVisibilityMap[requestedVisibility] ?? steamLobbyVisibilityMap.friends;
         const maxMembers = Math.max(2, Math.min(10, parseOptionalInteger(data?.maxMembers) || 10));
+        const endpoint = data?.endpoint
+          ? resolveAdvertisedLobbyEndpoint(data?.endpoint, process.env.PORT || '3001')
+          : null;
 
-        const lobby = await steamClient.matchmaking.createLobby(lobbyType, maxMembers);
-        if (lobby) {
-          rememberActiveSteamLobby(lobby);
-          const localSteamId = steamClient.localplayer.getSteamId().steamId64.toString();
-          const endpoint = data?.endpoint
-            ? resolveAdvertisedLobbyEndpoint(data?.endpoint, process.env.PORT || '3001')
-            : null;
-          const extraMetadata = normalizeLobbyMetadataEntries(data?.metadata);
+        const result = await steamBridge.createLobby({
+          roomId: String(data?.roomId || ''),
+          map: String(data?.map || 'Unknown'),
+          mode: String(data?.mode || 'Standard'),
+          endpoint,
+          lobbyVisibility: requestedVisibility,
+          maxMembers,
+          metadata: normalizeLobbyMetadataEntries(data?.metadata),
+        });
 
-          lobby.setJoinable(true);
-          const metadata = {
-            ...extraMetadata,
-            ag_room: String(data?.roomId || ''),
-            map: String(data?.map || 'Unknown'),
-            mode: String(data?.mode || 'Standard'),
-            ag_host_steam_id: localSteamId,
-            ag_transport: 'steamrelay',
-          };
-          if (endpoint) {
-            metadata.ag_endpoint = endpoint;
-          }
-          if (!metadata.ag_status) {
-            metadata.ag_status = 'waiting';
-          }
-
-          if (typeof lobby.mergeFullData === 'function') {
-            lobby.mergeFullData(metadata);
-          } else {
-            Object.entries(metadata).forEach(([key, value]) => {
-              lobby.setData(key, value);
-            });
-          }
-
-          console.log('[Steam] Created Lobby:', lobby.id, 'for Room:', data.roomId);
-          console.log('[Steam] Lobby Endpoint:', endpoint || 'none');
-          return { success: true, lobbyId: lobby.id.toString(), endpoint };
+        if (result?.lobbyId) {
+          rememberActiveSteamLobby(result.lobbyId);
         }
-        return { success: false };
+
+        return {
+          success: Boolean(result?.success),
+          lobbyId: result?.lobbyId,
+          endpoint: result?.endpoint || endpoint,
+          error: result?.error,
+        };
       } catch (err) {
         console.error('[Steam] Create Lobby Error:', err);
         return { success: false, error: err.message };
@@ -1349,39 +1281,18 @@ async function createWindow() {
     ipcMain.removeHandler('steam:list-lobbies');
     ipcMain.handle('steam:list-lobbies', async (_, filters) => {
       try {
-        const lobbies = await steamClient.matchmaking.getLobbies();
-        const requireOpenSlot = Boolean(filters?.requireOpenSlot);
-        const expectedQueueType = typeof filters?.queueType === 'string' ? filters.queueType : null;
-        const expectedStatus = typeof filters?.status === 'string' ? filters.status : null;
-        const maxResults = Math.max(1, Math.min(50, parseOptionalInteger(filters?.maxResults) || 20));
-
-        const snapshots = lobbies
-          .map((lobby) => ({ success: true, ...readLobbySnapshot(lobby) }))
-          .filter((snapshot) => Boolean(snapshot.lobbyId && snapshot.roomId && (snapshot.endpoint || snapshot.hostSteamId)))
-          .filter((snapshot) => !expectedQueueType || snapshot.queueType === expectedQueueType)
-          .filter((snapshot) => !expectedStatus || snapshot.status === expectedStatus)
-          .filter((snapshot) => {
-            if (!requireOpenSlot) return true;
-
-            const capacity = snapshot.memberLimit || snapshot.requiredPlayers || 0;
-            if (!capacity) return true;
-            return (snapshot.memberCount || 0) < capacity;
-          })
-          .sort((left, right) => {
-            const countDelta = (right.memberCount || 0) - (left.memberCount || 0);
-            if (countDelta !== 0) return countDelta;
-            return String(left.lobbyId || '').localeCompare(String(right.lobbyId || ''));
-          })
-          .slice(0, maxResults);
-
-        return { success: true, lobbies: snapshots };
+        const result = await steamBridge.listLobbies(filters || {});
+        return {
+          success: Boolean(result?.success),
+          lobbies: Array.isArray(result?.lobbies) ? result.lobbies : [],
+          error: result?.error,
+        };
       } catch (err) {
         console.error('[Steam] List Lobbies Error:', err);
         return { success: false, lobbies: [], error: err.message };
       }
     });
 
-    // Handle Getting Current Lobby Data
     ipcMain.removeHandler('steam:get-lobby-data');
     ipcMain.handle('steam:get-lobby-data', async (_, lobbyId) => {
       try {
@@ -1390,37 +1301,16 @@ async function createWindow() {
           return { success: false, error: 'Invalid Steam lobby ID.' };
         }
 
-        if (activeSteamLobbyId && activeSteamLobbyId !== parsedLobbyId.toString()) {
+        const normalizedLobbyId = parsedLobbyId.toString();
+        if (activeSteamLobbyId && activeSteamLobbyId !== normalizedLobbyId) {
           leaveActiveSteamLobby('switching to another steam lobby');
         }
 
-        let lobby = activeSteamLobby;
-        if (!lobby || activeSteamLobbyId !== parsedLobbyId.toString()) {
-          console.log('[Steam] Joining lobby to read data:', lobbyId);
-          lobby = await steamClient.matchmaking.joinLobby(parsedLobbyId);
-          rememberActiveSteamLobby(lobby);
-        } else {
-          console.log('[Steam] Reusing active lobby to read data:', lobbyId);
+        const result = await steamBridge.getLobbyData(normalizedLobbyId);
+        if (result?.success) {
+          rememberActiveSteamLobby(normalizedLobbyId);
         }
-
-        const snapshot = await awaitLobbySnapshot(lobby, {
-          requireRoomId: true,
-          requireEndpoint: false,
-          timeoutMs: 6000,
-        });
-
-        console.log('[Steam] Got Lobby Data:', snapshot);
-        if (!snapshot.roomId || (!snapshot.endpoint && !snapshot.hostSteamId)) {
-          return {
-            success: false,
-            error: 'Steam lobby metadata is not available yet. Please try the invite again in a moment.',
-          };
-        }
-
-        return {
-          success: true,
-          ...snapshot,
-        };
+        return result;
       } catch (err) {
         console.error('[Steam] Get Lobby Data Error:', err);
         return { success: false, error: err.message };
@@ -1430,32 +1320,55 @@ async function createWindow() {
     ipcMain.removeHandler('steam:open-invite-dialog');
     ipcMain.handle('steam:open-invite-dialog', async (_, lobbyId) => {
       try {
-        let targetLobby = activeSteamLobby;
         const parsedLobbyId = parseSteamLobbyId(lobbyId);
+        const targetLobbyId = parsedLobbyId?.toString?.() || activeSteamLobbyId;
 
-        if (!targetLobby || (parsedLobbyId && activeSteamLobbyId !== parsedLobbyId.toString())) {
-          if (!parsedLobbyId) {
-            return { success: false, error: 'No active Steam lobby is available to invite from.' };
-          }
-          targetLobby = await steamClient.matchmaking.joinLobby(parsedLobbyId);
-          rememberActiveSteamLobby(targetLobby);
-        }
-
-        if (!targetLobby) {
+        if (!targetLobbyId) {
           return { success: false, error: 'No active Steam lobby is available to invite from.' };
         }
 
-        if (steamClient.overlay?.activateInviteDialog) {
-          steamClient.overlay.activateInviteDialog(targetLobby.id);
-        } else if (typeof targetLobby.openInviteDialog === 'function') {
-          targetLobby.openInviteDialog();
-        } else {
-          return { success: false, error: 'Steam invite dialog API is unavailable.' };
-        }
-
-        return { success: true };
+        rememberActiveSteamLobby(targetLobbyId);
+        return await openSteamInviteSurface(targetLobbyId, 'renderer requested invite dialog');
       } catch (err) {
         console.error('[Steam] Open Invite Dialog Error:', err);
+        return { success: false, error: err.message };
+      }
+    });
+
+    ipcMain.removeHandler('steam:list-friends');
+    ipcMain.handle('steam:list-friends', async () => {
+      try {
+        const result = await steamBridge.listFriends();
+        return {
+          success: Boolean(result?.success),
+          friends: Array.isArray(result?.friends) ? result.friends : [],
+          error: result?.error,
+        };
+      } catch (err) {
+        console.error('[Steam] List Friends Error:', err);
+        return { success: false, friends: [], error: err.message };
+      }
+    });
+
+    ipcMain.removeHandler('steam:invite-friend');
+    ipcMain.handle('steam:invite-friend', async (_, friendSteamId, lobbyId) => {
+      try {
+        const parsedLobbyId = parseSteamLobbyId(lobbyId);
+        const targetLobbyId = parsedLobbyId?.toString?.() || activeSteamLobbyId;
+        if (!targetLobbyId) {
+          return { success: false, error: 'No active Steam lobby is available to invite from.' };
+        }
+
+        rememberActiveSteamLobby(targetLobbyId);
+        const result = await steamBridge.inviteFriend(String(friendSteamId || ''), targetLobbyId);
+        return {
+          success: Boolean(result?.success),
+          method: result?.method || null,
+          note: result?.note || null,
+          error: result?.error,
+        };
+      } catch (err) {
+        console.error('[Steam] Invite Friend Error:', err);
         return { success: false, error: err.message };
       }
     });
@@ -1495,62 +1408,28 @@ async function createWindow() {
     ipcMain.removeHandler('steam:update-active-lobby-data');
     ipcMain.handle('steam:update-active-lobby-data', async (_, rawMetadata) => {
       try {
-        if (!activeSteamLobby) {
+        if (!activeSteamLobbyId) {
           return { success: false, error: 'No active Steam lobby is available to update.' };
         }
 
-        const sanitized = normalizeLobbyMetadataEntries(rawMetadata);
-        const source = rawMetadata && typeof rawMetadata === 'object' && !Array.isArray(rawMetadata)
-          ? rawMetadata
-          : {};
-
-        for (const key of Object.keys(source)) {
-          if (typeof key !== 'string' || !key.trim()) continue;
-          const originalValue = source[key];
-          if (originalValue === undefined || originalValue === null || originalValue === '') {
-            if (typeof activeSteamLobby.deleteData === 'function') {
-              activeSteamLobby.deleteData(key);
-            }
-            continue;
-          }
-
-          activeSteamLobby.setData(key, sanitized[key] ?? String(originalValue));
-        }
-
-        return { success: true };
+        return await steamBridge.updateActiveLobbyData(rawMetadata || {});
       } catch (err) {
         console.error('[Steam] Update Lobby Data Error:', err);
         return { success: false, error: err.message };
       }
     });
 
-    // Handle Achievements
     ipcMain.removeAllListeners('steam:activate-achievement');
     ipcMain.on('steam:activate-achievement', (_, achievementId) => {
-      try {
-        if (steamClient.achievement.activate(achievementId)) {
-          console.log('[Steam] Achievement Activated:', achievementId);
-        }
-      } catch (err) {
+      void steamBridge.activateAchievement(achievementId).catch((err) => {
         console.error('[Steam] Failed to activate achievement:', err);
-      }
+      });
     });
 
     ipcMain.removeHandler('steam:get-stats');
     ipcMain.handle('steam:get-stats', async (_, statNames) => {
       try {
-        if (!steamClient?.stats) {
-          return { success: false, stats: {}, error: 'Steam stats interface unavailable.' };
-        }
-
-        const stats = {};
-        const requested = Array.isArray(statNames) ? statNames : [];
-        for (const name of requested) {
-          if (typeof name !== 'string' || !name.trim()) continue;
-          stats[name] = steamClient.stats.getInt(name);
-        }
-
-        return { success: true, stats };
+        return await steamBridge.getStats(Array.isArray(statNames) ? statNames : []);
       } catch (err) {
         console.error('[Steam] Failed to read stats:', err);
         return { success: false, stats: {}, error: err.message };
@@ -1560,33 +1439,7 @@ async function createWindow() {
     ipcMain.removeHandler('steam:set-stats');
     ipcMain.handle('steam:set-stats', async (_, statMap) => {
       try {
-        if (!steamClient?.stats) {
-          return { success: false, stored: false, rejected: [], error: 'Steam stats interface unavailable.' };
-        }
-
-        const rejected = [];
-        const entries = Object.entries(statMap || {});
-        for (const [name, value] of entries) {
-          if (typeof name !== 'string' || !name.trim()) continue;
-          const normalized = Number(value);
-          if (!Number.isFinite(normalized)) {
-            rejected.push(name);
-            continue;
-          }
-
-          const ok = steamClient.stats.setInt(name, Math.trunc(normalized));
-          if (!ok) {
-            rejected.push(name);
-          }
-        }
-
-        const stored = steamClient.stats.store();
-        return {
-          success: rejected.length === 0 && stored,
-          stored,
-          rejected,
-          error: rejected.length > 0 ? `Steam rejected stat keys: ${rejected.join(', ')}` : (!stored ? 'Steam did not confirm StoreStats.' : undefined)
-        };
+        return await steamBridge.setStats(statMap || {});
       } catch (err) {
         console.error('[Steam] Failed to store stats:', err);
         return { success: false, stored: false, rejected: Object.keys(statMap || {}), error: err.message };
@@ -1595,7 +1448,7 @@ async function createWindow() {
   } else {
     console.log('[Steam] Initialization failed or not running.');
     win.webContents.on('did-finish-load', () => {
-      win.webContents.send('steam:init-error', 'Steam is not running or AppID is missing.');
+      win.webContents.send('steam:init-error', steamInitError || 'Steam is not running or AppID is missing.');
       if (isSmokeTest && forceSteamBypassForSmoke && !win.isDestroyed() && !win.webContents.isDestroyed()) {
         setTimeout(() => {
           if (win.isDestroyed() || win.webContents.isDestroyed()) {
@@ -1638,7 +1491,7 @@ app.whenReady().then(() => {
   });
 
   const lobbyId = handleSteamLaunchArgs(process.argv);
-  if (lobbyId && steamClient) {
+  if (lobbyId && steamBridge?.isReady()) {
     emitSteamJoinLobby(lobbyId);
   }
   app.on('activate', () => {
@@ -1659,8 +1512,5 @@ app.on('before-quit', () => {
   closePublicTunnel('app quitting');
   leaveActiveSteamLobby('app quitting');
   steamRelayBridge?.shutdown('app quitting');
-  if (steamJoinRequestedHandle?.disconnect) {
-    steamJoinRequestedHandle.disconnect();
-    steamJoinRequestedHandle = null;
-  }
+  steamBridge?.stop('app quitting');
 });

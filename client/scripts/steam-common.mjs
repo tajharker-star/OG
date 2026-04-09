@@ -117,6 +117,7 @@ export async function runBuildAndVerificationPipeline() {
   const steps = [
     ["npm", ["run", "build"]],
     ["npm", ["run", "build-server"]],
+    ["npm", ["run", "build:native-steam-bridge"]],
     ["node", ["scripts/build-steam-artifacts.mjs"]],
     ["npm", ["run", "stage:steam"]],
     ["npm", ["run", "verify:steam-layout"]],

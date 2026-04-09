@@ -41,6 +41,8 @@ client/logo-preview.gif
 # Generated Steam/store assets
 client/steam-store-assets/
 client/steam-achievements/
+client/electron/native/
+client/native/steam_bridge/target/
 
 # Binary tools
 playit

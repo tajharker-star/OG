@@ -210,6 +210,41 @@
   animation: lobby-sparkle 2.5s ease-in-out infinite 1.45s;
 }
 
+.lobby-logo--performance .lobby-logo__burst,
+.lobby-logo--performance .lobby-logo__ray-fan,
+.lobby-logo--performance .lobby-logo__spark {
+  display: none;
+}
+
+.lobby-logo--performance .lobby-logo__image {
+  animation: none;
+  filter:
+    drop-shadow(0 0 12px rgba(255, 180, 70, 0.16))
+    drop-shadow(0 10px 20px rgba(0, 0, 0, 0.38));
+}
+
+.lobby-logo--performance .lobby-logo__halo {
+  filter: blur(8px);
+  opacity: 0.72;
+  animation-duration: 5.5s;
+}
+
+.lobby-logo--performance .lobby-logo__edge-glow {
+  filter: blur(8px);
+  opacity: 0.68;
+  animation-duration: 5.2s;
+}
+
+.lobby-logo--performance .lobby-logo__star-glint {
+  filter: blur(7px);
+  animation-duration: 4s;
+}
+
+.lobby-logo--performance .lobby-logo__shine::before {
+  opacity: 0.78;
+  animation-duration: 6.2s;
+}
+
 @keyframes lobby-burst-spin {
   0% { transform: rotate(0deg) scale(0.98); }
   50% { transform: rotate(180deg) scale(1.04); }

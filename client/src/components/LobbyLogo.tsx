@@ -4,10 +4,13 @@ import lobbyLogoUrl from '../assets/lobby/conquerors-domination-logo.png';
 
 type LobbyLogoProps = {
     className?: string;
+    performanceMode?: boolean;
 };
 
-export function LobbyLogo({ className = '' }: LobbyLogoProps) {
-    const classes = ['lobby-logo', className].filter(Boolean).join(' ');
+export function LobbyLogo({ className = '', performanceMode }: LobbyLogoProps) {
+    const isElectronRuntime = typeof navigator !== 'undefined' && /electron/i.test(navigator.userAgent);
+    const usePerformanceMode = performanceMode ?? isElectronRuntime;
+    const classes = ['lobby-logo', usePerformanceMode ? 'lobby-logo--performance' : '', className].filter(Boolean).join(' ');
 
     return (
         <div

@@ -491,6 +491,20 @@ function App() {
     const activeSteamRelaySessionRef = useRef<string | null>(null);
     const [steamDiagnostics, setSteamDiagnostics] = useState<SteamMultiplayerDiagnostics>(createDefaultSteamMultiplayerDiagnostics);
 
+    const formatSteamInviteSurface = (method?: string | null) => {
+        switch (method) {
+            case 'native-overlay-invite-dialog':
+            case 'overlay-invite':
+                return 'Steam Overlay Invite Dialog';
+            case 'overlay-plus-steam-client':
+                return 'Steam Overlay + Friends Window';
+            case 'steam-client-friends':
+                return 'Steam Friends Window';
+            default:
+                return null;
+        }
+    };
+
     const updateSteamDiagnostics = (
         updater: Partial<SteamMultiplayerDiagnostics> | ((previous: SteamMultiplayerDiagnostics) => Partial<SteamMultiplayerDiagnostics>)
     ) => {
@@ -972,7 +986,10 @@ function App() {
                                 route: 'steam-relay',
                                 lobbyId: createdLobbyId,
                                 roomId: rid,
+                                inviteSurface: null,
+                                inviteSurfaceNote: null,
                                 endpoint: result.endpoint || hostEndpoint || null,
+                                lastError: null,
                                 status: pendingSteamLobby.openInviteDialog ? 'Opening Steam invite dialog' : 'Steam lobby ready',
                             }
                         );
@@ -980,15 +997,29 @@ function App() {
                         if (pendingSteamLobby.openInviteDialog) {
                             const inviteResult = await steamService.openInviteDialog(createdLobbyId);
                             if (!inviteResult.success) {
-                                pushSteamDiagnosticsEvent('Steam invite dialog failed, falling back to Friends overlay.', {
-                                    status: 'Invite dialog fallback',
+                                pushSteamDiagnosticsEvent('Steam invite UI failed to open.', {
+                                    status: 'Steam invite failed',
                                     lastError: inviteResult.error || 'Steam invite dialog unavailable.',
+                                    inviteSurface: null,
+                                    inviteSurfaceNote: inviteResult.note || null,
                                 });
-                                console.warn('[App] Failed to open Steam invite dialog, falling back to Friends overlay.', inviteResult.error);
-                                steamService.activateOverlay('Friends');
+                                console.warn('[App] Failed to open Steam invite UI.', inviteResult.error);
                             } else {
-                                pushSteamDiagnosticsEvent('Steam invite dialog opened.', {
-                                    status: 'Steam invite dialog open',
+                                const inviteSurface = formatSteamInviteSurface(inviteResult.method);
+                                const inviteOpenedMessage = inviteResult.note
+                                    || (inviteSurface === 'Steam Friends Window'
+                                        ? 'Opened the Steam friends window for inviting.'
+                                        : inviteSurface === 'Steam Overlay + Friends Window'
+                                            ? 'Requested the Steam invite overlay and opened the Steam friends window as a fallback.'
+                                            : 'Steam invite dialog opened.');
+
+                                pushSteamDiagnosticsEvent(inviteOpenedMessage, {
+                                    status: inviteSurface === 'Steam Friends Window' || inviteSurface === 'Steam Overlay + Friends Window'
+                                        ? 'Steam friends window open'
+                                        : 'Steam invite dialog open',
+                                    inviteSurface,
+                                    inviteSurfaceNote: inviteResult.note || null,
+                                    lastError: null,
                                 });
                             }
                         }
@@ -1003,6 +1034,7 @@ function App() {
                                 console.log('[App] Steam Lobby Created:', res.lobbyId);
                                 pushSteamDiagnosticsEvent('Steam lobby host flow completed.', {
                                     status: 'Waiting for invited players',
+                                    lastError: null,
                                 });
                             } else {
                                 setSteamLobbyId(null);
@@ -2274,6 +2306,39 @@ function App() {
         }
     }, [steamDiagnostics.flow]);
 
+    const steamDiagnosticsContextNote = useMemo(() => {
+        if (steamDiagnostics.inviteSurface === 'Steam Friends Window' || steamDiagnostics.inviteSurface === 'Steam Overlay + Friends Window') {
+            return steamDiagnostics.inviteSurfaceNote
+                || 'Steam opened the friends window for inviting. Use that Steam UI to send the invite.';
+        }
+
+        if (steamLobbyRole === 'host' && steamLobbyId && steamDiagnostics.route === 'steam-relay' && !steamDiagnostics.relaySessionId) {
+            if (steamDiagnostics.endpoint) {
+                return 'Host is ready. "Relay None" is normal until a friend accepts the Steam invite. The endpoint below is only the direct fallback path.';
+            }
+
+            return 'Host is ready. "Relay None" is normal until a friend accepts the Steam invite.';
+        }
+
+        if (steamDiagnostics.route === 'steam-relay' && steamDiagnostics.relaySessionId) {
+            return 'This session is currently using Steam relay.';
+        }
+
+        if (steamDiagnostics.route === 'direct-endpoint' && steamDiagnostics.endpoint) {
+            return 'This session fell back to the host endpoint instead of Steam relay.';
+        }
+
+        return null;
+    }, [
+        steamDiagnostics.inviteSurface,
+        steamDiagnostics.inviteSurfaceNote,
+        steamDiagnostics.endpoint,
+        steamDiagnostics.relaySessionId,
+        steamDiagnostics.route,
+        steamLobbyId,
+        steamLobbyRole,
+    ]);
+
     const showSteamDiagnosticsPanel = steamService.isInitialized
         || Boolean(steamDiagnostics.lastError)
         || steamDiagnostics.events.length > 0
@@ -2509,6 +2574,10 @@ function App() {
                                             <strong>{steamDiagnostics.connectionPhase}</strong>
                                         </div>
                                         <div className="steam-diagnostics-row">
+                                            <span>Invite Surface</span>
+                                            <strong>{steamDiagnostics.inviteSurface || 'None'}</strong>
+                                        </div>
+                                        <div className="steam-diagnostics-row">
                                             <span>Lobby ID</span>
                                             <strong>{steamDiagnostics.lobbyId || 'None'}</strong>
                                         </div>
@@ -2530,13 +2599,16 @@ function App() {
                                         <code>{steamDiagnostics.connectionUrl || 'Unavailable'}</code>
                                     </div>
                                     <div className="steam-diagnostics-field">
-                                        <span>Join Endpoint</span>
+                                        <span>{steamLobbyRole === 'host' ? 'Fallback Endpoint' : 'Join Endpoint'}</span>
                                         <code>{steamDiagnostics.endpoint || 'Unavailable'}</code>
                                     </div>
                                     <div className={`steam-diagnostics-field ${steamDiagnostics.lastError ? 'steam-diagnostics-field--error' : ''}`}>
                                         <span>Last Error</span>
                                         <code>{steamDiagnostics.lastError || 'None'}</code>
                                     </div>
+                                    {steamDiagnosticsContextNote && (
+                                        <div className="steam-diagnostics-note">{steamDiagnosticsContextNote}</div>
+                                    )}
                                     <div className="steam-diagnostics-log">
                                         <div className="steam-diagnostics-log__title">Recent Events</div>
                                         {steamDiagnostics.events.length > 0 ? (
@@ -2878,6 +2950,7 @@ function App() {
                     rankedMatch={isRankedMatch}
                     currentRankedPoints={statistics.rankedProgress.points}
                     steamLobbyId={steamLobbyId}
+                    steamLobbyRole={steamLobbyRole}
                     steamMultiplayerDiagnostics={steamDiagnostics}
                     onMatchResolved={handleMatchResolved}
                 />

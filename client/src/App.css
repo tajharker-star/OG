@@ -326,6 +326,14 @@ h3 {
     gap: 10px;
 }
 
+.steam-diagnostics-note {
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: rgba(102, 192, 244, 0.08);
+    color: #d8f0ff;
+    line-height: 1.5;
+}
+
 .steam-diagnostics-log__title {
     font-size: 0.82rem;
     letter-spacing: 0.08em;

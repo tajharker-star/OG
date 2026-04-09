@@ -187,18 +187,31 @@ export class MainScene extends Phaser.Scene {
     private keyCache: Map<string, Phaser.Input.Keyboard.Key> = new Map();
     private lastCameraX: number = 0;
     private lastCameraY: number = 0;
-    private showOilScanner: boolean = false;
-    private analyser: AnalyserNode | null = null;
-    private dataArray: Uint8Array | null = null;
+	    private showOilScanner: boolean = false;
+	    private analyser: AnalyserNode | null = null;
+	    private dataArray: Uint8Array | null = null;
+	    private cachedSettings: Settings = settingsManager.getSettings();
+	    private oilScannerAccumulatorMs: number = 0;
+	    private oilScannerIntervalMs: number = 120;
+	    private rangeRingAccumulatorMs: number = 0;
+	    private rangeRingIntervalMs: number = 90;
+	    private rangeRingsDirty: boolean = true;
+	    private minimapDispatchAccumulatorMs: number = 0;
+	    private minimapDispatchIntervalMs: number = 75;
+	    private lastMinimapDispatchView: { x: number; y: number; width: number; height: number } | null = null;
+	    private menuShakeSampleAccumulatorMs: number = 0;
+	    private latestMenuBassAverage: number = 0;
 
     private cameraInitialized: boolean = false;
     private currentMap: GameMap | null = null;
   private currentMapVersion: string | null = null;
-  private currentMapStateSignature: string | null = null;
-  private activeSkinLoadout: SkinLoadout = { ...DEFAULT_SKIN_LOADOUT };
-  private unitTrailStates: Map<string, UnitTrailState> = new Map();
-  private motionTrailSegments: MotionTrailSegment[] = [];
-  private knownBuildingAudioState: Map<string, BuildingAudioSnapshot> = new Map();
+	  private currentMapStateSignature: string | null = null;
+	  private activeSkinLoadout: SkinLoadout = { ...DEFAULT_SKIN_LOADOUT };
+	  private unitTrailStates: Map<string, UnitTrailState> = new Map();
+	  private motionTrailSegments: MotionTrailSegment[] = [];
+	  private unitById: Map<string, Unit> = new Map();
+	  private buildingRangeIndex: Map<string, { x: number; y: number; range: number }> = new Map();
+	  private knownBuildingAudioState: Map<string, BuildingAudioSnapshot> = new Map();
   private buildingAudioPrimed: boolean = false;
   private rangeGraphics!: Phaser.GameObjects.Graphics;
   private pathGraphics!: Phaser.GameObjects.Graphics;
@@ -233,6 +246,48 @@ export class MainScene extends Phaser.Scene {
 
   constructor() {
     super('MainScene');
+  }
+
+  private applyPerformanceProfile(settings: Settings) {
+    const lowQuality = !settings.graphics.highQuality;
+    const particlesEnabled = settings.graphics.showParticles;
+
+    this.oilScannerIntervalMs = lowQuality ? 140 : 95;
+    this.rangeRingIntervalMs = lowQuality ? 100 : 70;
+    this.minimapDispatchIntervalMs = lowQuality ? 90 : 60;
+
+    if (!particlesEnabled && this.motionTrailSegments.length > 0) {
+      this.motionTrailSegments.forEach((segment) => segment.sprite.destroy());
+      this.motionTrailSegments = [];
+      this.unitTrailStates.clear();
+    }
+  }
+
+  private rebuildBuildingRangeIndex() {
+    this.buildingRangeIndex.clear();
+    if (!this.currentMap) return;
+
+    this.currentMap.islands.forEach((island) => {
+      island.buildings.forEach((building) => {
+        const range = building.range || 0;
+        if (range <= 0) return;
+        this.buildingRangeIndex.set(building.id, {
+          x: island.x + (building.x || 0),
+          y: island.y + (building.y || 0),
+          range,
+        });
+      });
+    });
+
+    (this.currentMap.waterBuildings || []).forEach((building) => {
+      const range = building.range || 0;
+      if (range <= 0) return;
+      this.buildingRangeIndex.set(building.id, {
+        x: building.x || 0,
+        y: building.y || 0,
+        range,
+      });
+    });
   }
 
   private registerAttackFacing(attackerId: string | undefined, x1: number, y1: number, x2: number, y2: number, duration = 240) {
@@ -1954,10 +2009,12 @@ export class MainScene extends Phaser.Scene {
   create() {
     this.cameras.main.setBackgroundColor('#006994'); // Ocean color
 
-    // Apply initial settings
-    const settings = settingsManager.getSettings();
-    this.sound.volume = settings.audio.masterVolume;
-    this.game.loop.targetFps = settings.graphics.targetFps || 60;
+	    // Apply initial settings
+	    const settings = settingsManager.getSettings();
+	    this.cachedSettings = settings;
+	    this.applyPerformanceProfile(settings);
+	    this.sound.volume = settings.audio.masterVolume;
+	    this.game.loop.targetFps = settings.graphics.targetFps || 60;
 
     // Audio
     this.mainMenuMusic = this.sound.add('defcat_main_menu', { loop: true, volume: settings.audio.musicVolume });
@@ -2102,11 +2159,13 @@ export class MainScene extends Phaser.Scene {
     }) as EventListener);
 
     // Toggle Oil Scanner
-    window.addEventListener('toggle-oil-scanner', ((e: CustomEvent) => {
-        this.showOilScanner = e.detail.show;
-        if (!this.showOilScanner) {
-            // Cleanup visuals immediately
-            this.rangeGraphics.clear();
+	    window.addEventListener('toggle-oil-scanner', ((e: CustomEvent) => {
+	        this.showOilScanner = e.detail.show;
+	        this.rangeRingsDirty = true;
+	        this.oilScannerAccumulatorMs = this.oilScannerIntervalMs;
+	        if (!this.showOilScanner) {
+	            // Cleanup visuals immediately
+	            this.rangeGraphics.clear();
             
             // Note: We do NOT hide revealed spots anymore. 
             // Once revealed, they stay revealed (Client-side persistence)
@@ -2143,8 +2202,10 @@ export class MainScene extends Phaser.Scene {
     }
 
     // Listen for settings changes
-    const onSettingsChange = (newSettings: Settings) => {
-        this.sound.volume = newSettings.audio.masterVolume;
+	    const onSettingsChange = (newSettings: Settings) => {
+	        this.cachedSettings = newSettings;
+	        this.applyPerformanceProfile(newSettings);
+	        this.sound.volume = newSettings.audio.masterVolume;
         if (this.mainMenuMusic) {
             (this.mainMenuMusic as any).setVolume(newSettings.audio.musicVolume);
         }
@@ -2183,7 +2244,7 @@ export class MainScene extends Phaser.Scene {
         if ((event.target as HTMLElement).tagName === 'INPUT') return;
 
         const key = event.key.length === 1 ? event.key.toUpperCase() : event.key;
-        const binds = settingsManager.getSettings().keybinds;
+	        const binds = this.cachedSettings.keybinds;
 
         if (key === binds.clearSelection) {
             this.selectedUnitIds.clear();
@@ -2260,9 +2321,11 @@ export class MainScene extends Phaser.Scene {
     // Cleanup when starting a new game (Fixes Ghost Units)
     const handleGameStartCleanup = () => {
         console.log('[MainScene] Clearing Game State for New Game');
-        this.currentUnits = [];
-        this.clearPlacementMode();
-        this.motionTrailSegments.forEach((segment) => segment.sprite.destroy());
+	        this.currentUnits = [];
+	        this.unitById.clear();
+	        this.buildingRangeIndex.clear();
+	        this.clearPlacementMode();
+	        this.motionTrailSegments.forEach((segment) => segment.sprite.destroy());
         this.motionTrailSegments = [];
         this.unitTrailStates.clear();
         this.unitContainers.clear();
@@ -3031,152 +3094,130 @@ export class MainScene extends Phaser.Scene {
     });
   }
 
-    updateOilScanner() {
-        // Detection Logic (ALWAYS RUNS if map exists)
-        if (!this.currentMap) return;
-        
-        const seekers = this.currentUnits.filter(u => u.ownerId === socket.id && u.type === 'oil_seeker');
-        
-        // Scan Range
-        const range = Math.max(this.currentMap.width, this.currentMap.height) * 0.25;
+	    updateOilScanner() {
+	        if (!this.currentMap) return;
 
-        // Visual Range Rendering moved to renderRangeRings()
+	        const seekers: Unit[] = [];
+	        this.currentUnits.forEach((unit) => {
+	            if (unit.ownerId === socket.id && unit.type === 'oil_seeker') {
+	                seekers.push(unit);
+	            }
+	        });
 
+	        const shouldRenderScannerVisuals = this.showOilScanner || seekers.length > 0;
+	        if (!shouldRenderScannerVisuals) {
+	            this.scannerOverlay.clear();
+	            return;
+	        }
 
-        // Determine which spots are currently visible
-        const currentlyVisible = new Set<string>();
-        
-        this.currentMap.oilSpots.forEach(spot => {
-            // If not hidden, always visible
-            if (!spot.id.startsWith('hidden_oil_')) {
-                 currentlyVisible.add(spot.id);
-                 return;
-            }
+	        const range = Math.max(this.currentMap.width, this.currentMap.height) * 0.25;
+	        const currentlyVisible = new Set<string>();
 
-            // If already revealed, keep revealed
-            if (this.revealedOilSpots.has(spot.id)) {
-                currentlyVisible.add(spot.id);
-                return;
-            }
+	        this.currentMap.oilSpots.forEach((spot) => {
+	            if (!spot.id.startsWith('hidden_oil_')) {
+	                currentlyVisible.add(spot.id);
+	                return;
+	            }
 
-            let inRange = false;
-            for (const s of seekers) {
-                if (Math.hypot(spot.x - s.x, spot.y - s.y) <= range) {
-                    inRange = true;
-                    break;
-                }
-            }
+	            if (this.revealedOilSpots.has(spot.id)) {
+	                currentlyVisible.add(spot.id);
+	                return;
+	            }
 
-            if (inRange) {
-                currentlyVisible.add(spot.id);
-            }
-        });
+	            for (const seeker of seekers) {
+	                if (Math.hypot(spot.x - seeker.x, spot.y - seeker.y) <= range) {
+	                    currentlyVisible.add(spot.id);
+	                    break;
+	                }
+	            }
+	        });
 
-        // Update visuals
-        let changed = false;
-        
-        // Clear overlay every frame to redraw pings
-        this.scannerOverlay.clear();
-        
-        // Show spots that are now visible
-        currentlyVisible.forEach(id => {
-            // Logic for revealing (One-time state change)
-            if (!this.revealedOilSpots.has(id)) {
-                const visuals = this.oilSpotVisuals.get(id);
-                if (visuals) {
-                    visuals.main.setVisible(true);
-                    // Use LOCAL coordinates (0,0) for the hit area
-                    visuals.main.setInteractive(new Phaser.Geom.Circle(0, 0, visuals.main.radius), Phaser.Geom.Circle.Contains);
-                    visuals.pulse.setVisible(true);
-                    visuals.main.setAlpha(0.5); // Black oil standard alpha
+	        let changed = false;
+	        this.scannerOverlay.clear();
+	        const pulseTime = Date.now();
 
-                    // Hide original ping (we use overlay now)
-                    if (visuals.ping) {
-                        visuals.ping.setVisible(false); 
-                    }
-                }
-                this.revealedOilSpots.add(id);
-                changed = true;
-            }
+	        currentlyVisible.forEach((id) => {
+	            if (!this.revealedOilSpots.has(id)) {
+	                const visuals = this.oilSpotVisuals.get(id);
+	                if (visuals) {
+	                    visuals.main.setVisible(true);
+	                    visuals.main.setInteractive(
+	                        new Phaser.Geom.Circle(0, 0, visuals.main.radius),
+	                        Phaser.Geom.Circle.Contains
+	                    );
+	                    visuals.pulse.setVisible(true);
+	                    visuals.main.setAlpha(0.5);
+	                    if (visuals.ping) {
+	                        visuals.ping.setVisible(false);
+	                    }
+	                }
+	                this.revealedOilSpots.add(id);
+	                changed = true;
+	            }
 
-            // Continuous Visuals (Every Frame) - Draw Ping on Overlay if it's a HIDDEN spot
-            if (id.startsWith('hidden_oil_')) {
-                 const visuals = this.oilSpotVisuals.get(id);
-                 if (visuals) {
-                     // Pulse Animation for the overlay rect
-                     const time = Date.now();
-                     const scale = 1 + Math.sin(time * 0.005) * 0.3; // 0.7 to 1.3
-                     const size = 30 * scale;
-                     const offset = size / 2;
+	            if (id.startsWith('hidden_oil_')) {
+	                const visuals = this.oilSpotVisuals.get(id);
+	                if (!visuals) return;
 
-                     // Draw Red Ping Rect
-                     this.scannerOverlay.lineStyle(3, 0xFF0000, 1);
-                     this.scannerOverlay.strokeRect(visuals.main.x - offset, visuals.main.y - offset, size, size);
-                     
-                     // Optional: Draw a crosshair or filling
-                     this.scannerOverlay.fillStyle(0xFF0000, 0.2);
-                     this.scannerOverlay.fillRect(visuals.main.x - offset, visuals.main.y - offset, size, size);
-                 }
-            }
-        });
+	                const scale = 1 + Math.sin(pulseTime * 0.005) * 0.3;
+	                const size = 30 * scale;
+	                const offset = size / 2;
 
-        if (changed) {
-             window.dispatchEvent(new CustomEvent('oil-revealed', { 
-                detail: { ids: Array.from(this.revealedOilSpots) } 
-            }));
-        }
-    }
+	                this.scannerOverlay.lineStyle(3, 0xFF0000, 1);
+	                this.scannerOverlay.strokeRect(visuals.main.x - offset, visuals.main.y - offset, size, size);
+	                this.scannerOverlay.fillStyle(0xFF0000, 0.2);
+	                this.scannerOverlay.fillRect(visuals.main.x - offset, visuals.main.y - offset, size, size);
+	            }
+	        });
 
-  renderRangeRings() {
-      if (!this.rangeGraphics) return;
-      this.rangeGraphics.clear();
+	        if (changed) {
+	            window.dispatchEvent(
+	                new CustomEvent('oil-revealed', {
+	                    detail: { ids: Array.from(this.revealedOilSpots) },
+	                })
+	            );
+	        }
+	    }
 
-      // 1. Oil Scanner Ranges
-      if (this.currentMap) {
-          const seekers = this.currentUnits.filter(u => u.ownerId === socket.id && u.type === 'oil_seeker');
-          if (this.showOilScanner || seekers.length > 0) {
-              const range = Math.max(this.currentMap.width, this.currentMap.height) * 0.25;
-              this.rangeGraphics.lineStyle(2, 0xFF0000, 0.5);
-              this.rangeGraphics.fillStyle(0xFF0000, 0.05);
-              seekers.forEach(s => {
-                  this.rangeGraphics.strokeCircle(s.x, s.y, range);
-                  this.rangeGraphics.fillCircle(s.x, s.y, range);
-              });
-          }
-      }
+	  renderRangeRings() {
+	      if (!this.rangeGraphics) return;
+	      this.rangeGraphics.clear();
 
-      // 2. Selected Unit Ranges
-      if (this.selectedUnitIds.size > 0) {
-          this.selectedUnitIds.forEach(id => {
-              const unit = this.currentUnits.find(u => u.id === id);
-              if (unit && unit.ownerId === socket.id && unit.range && unit.range > 0) {
-                  this.rangeGraphics.lineStyle(1, 0xFFFFFF, 0.5); // White ring
-                  this.rangeGraphics.strokeCircle(unit.x, unit.y, unit.range);
-              }
-          });
-      }
+	      // 1. Oil Scanner Ranges
+	      if (this.currentMap) {
+	          const seekers = this.currentUnits.filter((u) => u.ownerId === socket.id && u.type === 'oil_seeker');
+	          if (this.showOilScanner || seekers.length > 0) {
+	              const range = Math.max(this.currentMap.width, this.currentMap.height) * 0.25;
+	              this.rangeGraphics.lineStyle(2, 0xFF0000, 0.5);
+	              this.rangeGraphics.fillStyle(0xFF0000, 0.05);
+	              seekers.forEach((s) => {
+	                  this.rangeGraphics.strokeCircle(s.x, s.y, range);
+	                  this.rangeGraphics.fillCircle(s.x, s.y, range);
+	              });
+	          }
+	      }
 
-      // 3. Selected Building Ranges
-      if (this.selectedBuildingIds.size > 0 && this.currentMap) {
-          this.currentMap.islands.forEach(island => {
-              island.buildings.forEach(b => {
-                  if (this.selectedBuildingIds.has(b.id)) {
-                       // Calculate absolute position
-                       const bx = island.x + (b.x || 0);
-                       const by = island.y + (b.y || 0);
-                       
-                       // Check range property
-                       const range = b.range || 0;
+	      // 2. Selected Unit Ranges
+	      if (this.selectedUnitIds.size > 0) {
+	          this.selectedUnitIds.forEach((id) => {
+	              const unit = this.unitById.get(id);
+	              if (unit && unit.ownerId === socket.id && unit.range && unit.range > 0) {
+	                  this.rangeGraphics.lineStyle(1, 0xFFFFFF, 0.5); // White ring
+	                  this.rangeGraphics.strokeCircle(unit.x, unit.y, unit.range);
+	              }
+	          });
+	      }
 
-                       if (range > 0) {
-                           this.rangeGraphics.lineStyle(1, 0xFFFFFF, 0.5);
-                           this.rangeGraphics.strokeCircle(bx, by, range);
-                       }
-                  }
-              });
-          });
-      }
-  }
+	      // 3. Selected Building Ranges
+	      if (this.selectedBuildingIds.size > 0) {
+	          this.selectedBuildingIds.forEach((id) => {
+	              const indexedRange = this.buildingRangeIndex.get(id);
+	              if (!indexedRange || indexedRange.range <= 0) return;
+	              this.rangeGraphics.lineStyle(1, 0xFFFFFF, 0.5);
+	              this.rangeGraphics.strokeCircle(indexedRange.x, indexedRange.y, indexedRange.range);
+	          });
+	      }
+	  }
 
   centerCameraOnBase(): boolean {
       if (!this.currentMap) return false;
@@ -3302,11 +3343,21 @@ export class MainScene extends Phaser.Scene {
           return;
       }
 
-      const dt = delta / 16.66; // Normalize to ~60FPS
-      const dtSec = delta / 1000;
+	      const dt = delta / 16.66; // Normalize to ~60FPS
+	      const dtSec = delta / 1000;
 
-      this.updateOilScanner();
-      this.renderRangeRings();
+	      this.oilScannerAccumulatorMs += delta;
+	      if (this.oilScannerAccumulatorMs >= this.oilScannerIntervalMs) {
+	          this.oilScannerAccumulatorMs = 0;
+	          this.updateOilScanner();
+	      }
+
+	      this.rangeRingAccumulatorMs += delta;
+	      if (this.rangeRingsDirty || this.rangeRingAccumulatorMs >= this.rangeRingIntervalMs) {
+	          this.rangeRingAccumulatorMs = 0;
+	          this.rangeRingsDirty = false;
+	          this.renderRangeRings();
+	      }
 
     // Unit Interpolation
       const renderTime = Date.now() - 100; // 100ms interpolation delay
@@ -3457,8 +3508,16 @@ export class MainScene extends Phaser.Scene {
           }
       });
 
-      this.syncUnitSkinTrails(time, delta);
-      this.updateMotionTrailVisuals(time);
+	      const canRenderSkinTrails =
+	          this.cachedSettings.graphics.showParticles && this.game.loop.actualFps >= 28;
+	      if (canRenderSkinTrails) {
+	          this.syncUnitSkinTrails(time, delta);
+	          this.updateMotionTrailVisuals(time);
+	      } else if (this.motionTrailSegments.length > 0) {
+	          this.motionTrailSegments.forEach((segment) => segment.sprite.destroy());
+	          this.motionTrailSegments = [];
+	          this.unitTrailStates.clear();
+	      }
 
       this.currentUnits.forEach(unit => {
           const container = this.unitContainers.get(unit.id);
@@ -3572,10 +3631,10 @@ export class MainScene extends Phaser.Scene {
           sparkle.sprite.setScale(0.7 + Math.sin(sparkle.timer * 0.005) * 0.18);
       });
 
-      // Camera Movement
-      // Spectators get faster movement
-      const baseSpeed = this.isSpectating ? 40 : 20;
-      const binds = settingsManager.getSettings().keybinds;
+	      // Camera Movement
+	      // Spectators get faster movement
+	      const baseSpeed = this.isSpectating ? 40 : 20;
+	      const binds = this.cachedSettings.keybinds;
 
       // Broadcast FPS (throttled to every ~500ms to avoid React churn)
       if (this.game.loop.frame % 30 === 0) {
@@ -3601,30 +3660,50 @@ export class MainScene extends Phaser.Scene {
           this.centerCameraOnBase();
       }
 
-      // Minimap update (throttled to camera movement)
-      if (this.cameras.main.scrollX !== this.lastCameraX || this.cameras.main.scrollY !== this.lastCameraY) {
-          this.lastCameraX = this.cameras.main.scrollX;
-          this.lastCameraY = this.cameras.main.scrollY;
-          
-          const worldView = this.cameras.main.worldView;
-          window.dispatchEvent(new CustomEvent('minimap-update', { 
-              detail: { 
-                  x: worldView.x, 
-                  y: worldView.y, 
-                  width: worldView.width, 
-                  height: worldView.height 
-              } 
-          }));
-      }
+	      // Minimap update (throttled for React/UI stability)
+	      this.minimapDispatchAccumulatorMs += delta;
+	      if (this.cameras.main.scrollX !== this.lastCameraX || this.cameras.main.scrollY !== this.lastCameraY) {
+	          this.lastCameraX = this.cameras.main.scrollX;
+	          this.lastCameraY = this.cameras.main.scrollY;
+	          
+	          const worldView = this.cameras.main.worldView;
+	          const movedEnough =
+	              !this.lastMinimapDispatchView ||
+	              Math.abs(worldView.x - this.lastMinimapDispatchView.x) >= 1 ||
+	              Math.abs(worldView.y - this.lastMinimapDispatchView.y) >= 1 ||
+	              Math.abs(worldView.width - this.lastMinimapDispatchView.width) >= 0.5 ||
+	              Math.abs(worldView.height - this.lastMinimapDispatchView.height) >= 0.5;
+
+	          if (movedEnough && this.minimapDispatchAccumulatorMs >= this.minimapDispatchIntervalMs) {
+	              this.minimapDispatchAccumulatorMs = 0;
+	              this.lastMinimapDispatchView = {
+	                  x: worldView.x,
+	                  y: worldView.y,
+	                  width: worldView.width,
+	                  height: worldView.height,
+	              };
+
+	              window.dispatchEvent(new CustomEvent('minimap-update', {
+	                  detail: {
+	                      x: worldView.x,
+	                      y: worldView.y,
+	                      width: worldView.width,
+	                      height: worldView.height
+	                  }
+	              }));
+	          }
+	      } else {
+	          this.minimapDispatchAccumulatorMs = this.minimapDispatchIntervalMs;
+	      }
 
       // Update Path Lines
       this.pathGraphics.clear();
       // Optimization: Only draw paths for selected units to save performance
-      if (this.selectedUnitIds.size > 0) {
-          this.pathGraphics.fillStyle(0x00FF00, 0.5);
-          this.selectedUnitIds.forEach(id => {
-              const unit = this.currentUnits.find(u => u.id === id);
-              if (unit && unit.ownerId === socket.id && unit.status === 'moving' && unit.targetX !== undefined && unit.targetY !== undefined) {
+	      if (this.selectedUnitIds.size > 0) {
+	          this.pathGraphics.fillStyle(0x00FF00, 0.5);
+	          this.selectedUnitIds.forEach(id => {
+	              const unit = this.unitById.get(id);
+	              if (unit && unit.ownerId === socket.id && unit.status === 'moving' && unit.targetX !== undefined && unit.targetY !== undefined) {
                   const pathPoints = [{ x: unit.x, y: unit.y }, ...(unit.path || []), { x: unit.targetX, y: unit.targetY }];
 
                   for (let segmentIndex = 0; segmentIndex < pathPoints.length - 1; segmentIndex++) {
@@ -3688,10 +3767,10 @@ export class MainScene extends Phaser.Scene {
 
         console.log('Issuing move command to:', x, y);
         
-        // Process each unit individually for Hybrid Networking (Intent-based)
-	        this.selectedUnitIds.forEach(id => {
-	            const unit = this.currentUnits.find(u => u.id === id);
-	            if (unit) {
+	        // Process each unit individually for Hybrid Networking (Intent-based)
+		        this.selectedUnitIds.forEach(id => {
+		            const unit = this.unitById.get(id);
+		            if (unit) {
 	                const intentId = `intent_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 	                const adjustedTarget = this.getAdjustedTarget(unit.type, x, y);
 	                const predictedPath = this.buildPredictedBridgeWaypointPath(unit, adjustedTarget);
@@ -3720,7 +3799,7 @@ export class MainScene extends Phaser.Scene {
         });
 
       // Visual feedback (Circle at target)
-      if (settingsManager.getSettings().graphics.showParticles) {
+	      if (this.cachedSettings.graphics.showParticles) {
           const circle = this.add.circle(x, y, 5, 0x00FF00);
           this.tweens.add({
               targets: circle,
@@ -4422,16 +4501,17 @@ export class MainScene extends Phaser.Scene {
       this.unitContainers.set(unit.id, uContainer);
   }
 
-  renderUnits(units: Unit[]) {
-    this.currentUnits = units;
-    this.syncUnitDetailMode(units);
-    this.rangeGraphics.clear();
-    
-    // Track active unit IDs to remove dead ones later
-    const activeUnitIds = new Set<string>();
+	  renderUnits(units: Unit[]) {
+	    this.currentUnits = units;
+	    this.syncUnitDetailMode(units);
+	    this.unitById.clear();
+	    
+	    // Track active unit IDs to remove dead ones later
+	    const activeUnitIds = new Set<string>();
 
-    units.forEach(unit => {
-      activeUnitIds.add(unit.id);
+	    units.forEach(unit => {
+	      activeUnitIds.add(unit.id);
+	      this.unitById.set(unit.id, unit);
       
       const isMine = unit.ownerId === socket.id;
       const isSelected = this.selectedUnitIds.has(unit.id);
@@ -4488,12 +4568,13 @@ export class MainScene extends Phaser.Scene {
           if (!activeUnitIds.has(id)) {
               container.destroy();
               this.unitContainers.delete(id);
-              this.unitUpdates.delete(id);
-              this.attackFacingOverrides.delete(id);
-              this.unitTrailStates.delete(id);
-          }
-      });
-    }
+	              this.unitUpdates.delete(id);
+	              this.attackFacingOverrides.delete(id);
+	              this.unitTrailStates.delete(id);
+	          }
+	      });
+	      this.rangeRingsDirty = true;
+	    }
 
     drawBiomeDetails(island: Island, points: any[]) {
       const detailGraphics = this.add.graphics();
@@ -4508,7 +4589,7 @@ export class MainScene extends Phaser.Scene {
       const polyGeom = new Phaser.Geom.Polygon(points);
       const bounds = Phaser.Geom.Polygon.GetAABB(polyGeom);
       
-      const graphicsSettings = settingsManager.getSettings().graphics;
+	      const graphicsSettings = this.cachedSettings.graphics;
        let numDetails = 0;
 
        if (graphicsSettings.showParticles) {
@@ -4981,7 +5062,7 @@ export class MainScene extends Phaser.Scene {
     }
 
     // Render Islands
-    mapData.islands.forEach((island: Island) => {
+	    mapData.islands.forEach((island: Island) => {
       let color = 0x228B22; // Forest Green
       if (island.type === 'desert') color = 0xF4A460; // Sandy Brown
       if (island.type === 'snow') color = 0xFFFAFA; // Snow
@@ -5284,16 +5365,19 @@ export class MainScene extends Phaser.Scene {
       });
 
       // Hover
-      fillPoly.on('pointerover', () => {
-         // ...
-      });
-    });
-  }
+	      fillPoly.on('pointerover', () => {
+	         // ...
+	      });
+	    });
 
-  createExplosion(x: number, y: number, color: number) {
-      const menuExplosionDensity = this.isMenuMode
-          ? Math.max(0, Math.min(2, settingsManager.getSettings().graphics.menuExplosionDensity ?? 1))
-          : 1;
+	    this.rebuildBuildingRangeIndex();
+	    this.rangeRingsDirty = true;
+	  }
+
+	  createExplosion(x: number, y: number, color: number) {
+	      const menuExplosionDensity = this.isMenuMode
+	          ? Math.max(0, Math.min(2, this.cachedSettings.graphics.menuExplosionDensity ?? 1))
+	          : 1;
 
       if (this.isMenuMode && menuExplosionDensity <= 0) {
           return;
@@ -5427,10 +5511,12 @@ export class MainScene extends Phaser.Scene {
           if (this.selectionGraphics) this.selectionGraphics.clear();
           this.motionTrailSegments.forEach((segment) => segment.sprite.destroy());
           this.motionTrailSegments = [];
-          this.unitTrailStates.clear();
-          this.unitContainers.clear();
-          this.unitUpdates.clear();
-          this.currentUnits = []; // Clear local unit cache
+	          this.unitTrailStates.clear();
+	          this.unitContainers.clear();
+	          this.unitUpdates.clear();
+	          this.currentUnits = []; // Clear local unit cache
+	          this.unitById.clear();
+	          this.buildingRangeIndex.clear();
           
           this.tumbleweeds = [];
         this.weatherParticles = [];
@@ -5463,30 +5549,34 @@ export class MainScene extends Phaser.Scene {
       }
   }
 
-  updateMenuAnimation(_time: number, delta: number) {
-       // Audio Shake Logic
-       if (this.analyser && this.dataArray) {
-           this.analyser.getByteFrequencyData(this.dataArray as any);
-           
-           // Calculate bass intensity (Low frequency bins)
-          let sum = 0;
-          const bassBins = 8; // Focus on deep bass
-          for(let i=0; i<bassBins; i++) {
-              sum += this.dataArray[i];
-          }
-          const avg = sum / bassBins;
-          
-          // Apply shake if loud enough
-          // Scale threshold by volume so shake works at lower volumes too
-          const currentVol = this.sound.volume;
-          const threshold = 120 * currentVol;
-          
-          if (avg > threshold && currentVol > 0.1) {
-              const shakeMultiplier = settingsManager.getSettings().graphics.screenShakeIntensity ?? 1.0;
-              const intensity = Math.pow((avg - threshold) / (255 * currentVol - threshold), 2) * 15 * shakeMultiplier; 
-              this.cameras.main.scrollX = (Math.random() - 0.5) * intensity;
-              this.cameras.main.scrollY = (Math.random() - 0.5) * intensity;
-          } else {
+	  updateMenuAnimation(_time: number, delta: number) {
+	       // Audio Shake Logic
+	       if (this.analyser && this.dataArray) {
+	           this.menuShakeSampleAccumulatorMs -= delta;
+	           if (this.menuShakeSampleAccumulatorMs <= 0) {
+	               this.menuShakeSampleAccumulatorMs = 80;
+	               this.analyser.getByteFrequencyData(this.dataArray as any);
+
+	               let sum = 0;
+	               const bassBins = 8;
+	               for (let i = 0; i < bassBins; i++) {
+	                   sum += this.dataArray[i];
+	               }
+	               this.latestMenuBassAverage = sum / bassBins;
+	           }
+	          const avg = this.latestMenuBassAverage;
+	          
+	          // Apply shake if loud enough
+	          // Scale threshold by volume so shake works at lower volumes too
+	          const currentVol = this.sound.volume;
+	          const threshold = 120 * currentVol;
+	          
+	          if (avg > threshold && currentVol > 0.1) {
+	              const shakeMultiplier = this.cachedSettings.graphics.screenShakeIntensity ?? 1.0;
+	              const intensity = Math.pow((avg - threshold) / (255 * currentVol - threshold), 2) * 15 * shakeMultiplier; 
+	              this.cameras.main.scrollX = (Math.random() - 0.5) * intensity;
+	              this.cameras.main.scrollY = (Math.random() - 0.5) * intensity;
+	          } else {
               this.cameras.main.scrollX = 0;
               this.cameras.main.scrollY = 0;
           }
@@ -5499,20 +5589,27 @@ export class MainScene extends Phaser.Scene {
       const height = this.cameras.main.height / this.cameras.main.zoom;
       const dt = delta / 1000;
 
-      // Spawn
-      this.menuSpawnTimer -= delta;
-      const settings = settingsManager.getSettings();
-      let percent = settings.graphics.menuProjectileMultiplierPercent ?? 100;
-      if (percent < 0) percent = 0;
-      if (percent > 10000) percent = 10000;
-      const density = percent / 100;
+	      // Spawn
+	      this.menuSpawnTimer -= delta;
+	      const settings = this.cachedSettings;
+	      let percent = settings.graphics.menuProjectileMultiplierPercent ?? 100;
+	      if (percent < 0) percent = 0;
+	      if (percent > 10000) percent = 10000;
+	      const density = percent / 100;
+	      const lowQuality = !settings.graphics.highQuality;
+	      const maxProjectiles = lowQuality ? 70 : 110;
+	      const maxSpawnPerFrame = lowQuality ? 20 : 36;
 
-      if (density <= 0) {
-          this.menuSpawnTimer = 500;
-      } else {
-          let spawnedCount = 0;
-          // Allow multiple spawns per frame for high density, but cap to avoid freeze
-          while (this.menuSpawnTimer <= 0 && spawnedCount < 50) {
+	      if (density <= 0) {
+	          this.menuSpawnTimer = 500;
+	      } else {
+	          let spawnedCount = 0;
+	          // Allow multiple spawns per frame for high density, but cap to avoid freeze
+	          while (
+	              this.menuSpawnTimer <= 0 &&
+	              spawnedCount < maxSpawnPerFrame &&
+	              this.menuProjectiles.length < maxProjectiles
+	          ) {
               spawnedCount++;
               // Add to timer instead of reset to maintain average rate
               this.menuSpawnTimer += Phaser.Math.Between(100, 300) / density;
@@ -5578,15 +5675,16 @@ export class MainScene extends Phaser.Scene {
 
           // Trail Logic
           // Add new trail point
-          p.trail.unshift({
-              x: p.x, 
-              y: p.y, 
-              alpha: 1.0, 
-              size: p.type === 'missile' ? 10 : 3
-          });
-          
-          // Limit trail length
-          if (p.trail.length > 20) p.trail.pop();
+	          p.trail.unshift({
+	              x: p.x, 
+	              y: p.y, 
+	              alpha: 1.0, 
+	              size: p.type === 'missile' ? 10 : 3
+	          });
+	          
+	          // Limit trail length
+	          const maxTrailLength = lowQuality ? 8 : 14;
+	          if (p.trail.length > maxTrailLength) p.trail.pop();
 
           // Bounds check
           if (p.x < -100 || p.x > width + 100 || p.y < -100 || p.y > height + 100) {
@@ -5595,13 +5693,14 @@ export class MainScene extends Phaser.Scene {
           }
 
           // Draw Trail
-          if (p.trail.length > 1) {
-              if (p.type === 'bullet') {
-                  // Bullet Tracer (Fading Line)
-                  for (let t = 0; t < p.trail.length - 1; t++) {
-                      const pt1 = p.trail[t];
-                      const pt2 = p.trail[t+1];
-                      const alpha = 1 - (t / p.trail.length);
+	          if (p.trail.length > 1) {
+	              if (p.type === 'bullet') {
+	                  // Bullet Tracer (Fading Line)
+	                  const tracerStep = lowQuality ? 2 : 1;
+	                  for (let t = 0; t < p.trail.length - 1; t += tracerStep) {
+	                      const pt1 = p.trail[t];
+	                      const pt2 = p.trail[t+1];
+	                      const alpha = 1 - (t / p.trail.length);
                       
                       this.menuGraphics.lineStyle(pt1.size * alpha, p.color, alpha);
                       this.menuGraphics.beginPath();
@@ -5609,10 +5708,11 @@ export class MainScene extends Phaser.Scene {
                       this.menuGraphics.lineTo(pt2.x, pt2.y);
                       this.menuGraphics.strokePath();
                   }
-              } else {
-                  // Missile Smoke (Expanding Circles)
-                  for (let t = 0; t < p.trail.length; t++) {
-                      const pt = p.trail[t];
+	              } else {
+	                  // Missile Smoke (Expanding Circles)
+	                  const smokeStep = lowQuality ? 2 : 1;
+	                  for (let t = 0; t < p.trail.length; t += smokeStep) {
+	                      const pt = p.trail[t];
                       // Age the particle
                       const age = t / p.trail.length; // 0 to 1
                       const alpha = (1 - age) * 0.5;
@@ -5679,27 +5779,37 @@ export class MainScene extends Phaser.Scene {
            }
       }
 
-      // Collisions
-      for (let i = 0; i < this.menuProjectiles.length; i++) {
-           for (let j = i + 1; j < this.menuProjectiles.length; j++) {
-               const p1 = this.menuProjectiles[i];
-               const p2 = this.menuProjectiles[j];
-               
-               // Opposing sides only
-               if ((p1.vx > 0 && p2.vx < 0) || (p1.vx < 0 && p2.vx > 0)) {
-                   const dist = Phaser.Math.Distance.Between(p1.x, p1.y, p2.x, p2.y);
-                   if (dist < 20) {
-                       // Explosion
-                       this.createExplosion((p1.x + p2.x)/2, (p1.y + p2.y)/2, 0xFFFF00);
-                       
-                       this.menuProjectiles.splice(j, 1);
-                       this.menuProjectiles.splice(i, 1);
-                       i--;
-                       break;
-                   }
-               }
-           }
-      }
+	      // Collisions
+	      const maxCollisionChecks = lowQuality ? 220 : 420;
+	      let collisionChecks = 0;
+	      outer: for (let i = 0; i < this.menuProjectiles.length; i++) {
+	           for (let j = i + 1; j < this.menuProjectiles.length; j++) {
+	               const p1 = this.menuProjectiles[i];
+	               const p2 = this.menuProjectiles[j];
+
+	               if ((p1.vx > 0 && p2.vx < 0) || (p1.vx < 0 && p2.vx > 0)) {
+	                   // Fast reject when projectiles are far apart vertically.
+	                   if (Math.abs(p1.y - p2.y) > 22) {
+	                       continue;
+	                   }
+
+	                   collisionChecks += 1;
+	                   if (collisionChecks > maxCollisionChecks) {
+	                       break outer;
+	                   }
+
+	                   const dist = Phaser.Math.Distance.Between(p1.x, p1.y, p2.x, p2.y);
+	                   if (dist < 20) {
+	                       this.createExplosion((p1.x + p2.x) / 2, (p1.y + p2.y) / 2, 0xFFFF00);
+
+	                       this.menuProjectiles.splice(j, 1);
+	                       this.menuProjectiles.splice(i, 1);
+	                       i--;
+	                       break;
+	                   }
+	               }
+	           }
+	      }
 
       // Update Explosions
       for (let i = this.menuExplosions.length - 1; i >= 0; i--) {

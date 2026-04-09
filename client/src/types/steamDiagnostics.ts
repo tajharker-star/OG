@@ -12,6 +12,8 @@ export type SteamMultiplayerDiagnostics = {
     flow: SteamMultiplayerFlow;
     route: SteamMultiplayerRoute;
     status: string;
+    inviteSurface: string | null;
+    inviteSurfaceNote: string | null;
     lobbyId: string | null;
     roomId: string | null;
     hostSteamId: string | null;
@@ -28,6 +30,8 @@ export const createDefaultSteamMultiplayerDiagnostics = (): SteamMultiplayerDiag
     flow: 'idle',
     route: 'idle',
     status: 'Idle',
+    inviteSurface: null,
+    inviteSurfaceNote: null,
     lobbyId: null,
     roomId: null,
     hostSteamId: null,

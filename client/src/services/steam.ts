@@ -4,6 +4,16 @@ export interface SteamUser {
     name: string;
 }
 
+export interface SteamFriend {
+    steamId: string;
+    name: string;
+    nickname?: string | null;
+    state?: string;
+    isOnline?: boolean;
+    gameAppId?: string | null;
+    lobbyId?: string | null;
+}
+
 export interface SteamLobbyData {
     success: boolean;
     lobbyId?: string;
@@ -27,6 +37,12 @@ export interface SteamLobbyListResult {
     error?: string;
 }
 
+export interface SteamFriendListResult {
+    success: boolean;
+    friends: SteamFriend[];
+    error?: string;
+}
+
 export interface SteamStatsResult {
     success: boolean;
     stats: Record<string, number | null>;
@@ -43,6 +59,8 @@ export interface SteamStatsUpdateResult {
 export interface SteamLobbyActionResult {
     success: boolean;
     error?: string;
+    method?: string | null;
+    note?: string | null;
 }
 
 export interface SteamRelayConnectionResult extends SteamLobbyActionResult {
@@ -180,6 +198,20 @@ class SteamService {
             return { success: false, error: 'Not initialized' };
         }
         return await ipcRenderer.invoke('steam:open-invite-dialog', lobbyId);
+    }
+
+    public async listFriends(): Promise<SteamFriendListResult> {
+        if (!this.isInitialized || !ipcRenderer) {
+            return { success: false, friends: [], error: 'Not initialized' };
+        }
+        return await ipcRenderer.invoke('steam:list-friends');
+    }
+
+    public async inviteFriend(friendSteamId: string, lobbyId?: string): Promise<SteamLobbyActionResult> {
+        if (!this.isInitialized || !ipcRenderer) {
+            return { success: false, error: 'Not initialized' };
+        }
+        return await ipcRenderer.invoke('steam:invite-friend', friendSteamId, lobbyId);
     }
 
     public async leaveLobby(lobbyId?: string): Promise<SteamLobbyActionResult> {

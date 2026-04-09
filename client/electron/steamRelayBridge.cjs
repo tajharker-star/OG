@@ -74,6 +74,7 @@ function createSteamRelayBridge(options = {}) {
   const getSteamworksApi = typeof options.getSteamworksApi === 'function'
     ? options.getSteamworksApi
     : () => null;
+  const relayTransport = options.relayTransport || null;
   const getHostServerUrl = typeof options.getHostServerUrl === 'function'
     ? options.getHostServerUrl
     : () => null;
@@ -89,6 +90,10 @@ function createSteamRelayBridge(options = {}) {
   let packetCleanupAt = 0;
   let p2pSessionRequestHandle = null;
   let p2pSessionConnectFailHandle = null;
+  let relayTransportAttached = false;
+  let relayPacketListener = null;
+  let relaySessionRequestListener = null;
+  let relaySessionConnectFailListener = null;
 
   const pendingChunks = new Map();
   const guestSessions = new Map();
@@ -99,6 +104,10 @@ function createSteamRelayBridge(options = {}) {
   const getSteamCallbackEnum = () => getSteamworksApi()?.SteamCallback || null;
 
   const canUseRelay = () => {
+    if (relayTransport) {
+      return Boolean(relayTransport.isReady?.());
+    }
+
     const networking = getNetworkingApi();
     return Boolean(
       networking
@@ -221,7 +230,9 @@ function createSteamRelayBridge(options = {}) {
         total: totalChunks,
       }) + '\n', 'utf8');
       const packet = Buffer.concat([header, chunk]);
-      const ok = networking.sendP2PPacket(BigInt(normalizedPeerId), RELAY_SEND_TYPE_RELIABLE, packet);
+      const ok = relayTransport
+        ? relayTransport.sendP2PPacket(normalizedPeerId, RELAY_SEND_TYPE_RELIABLE, packet)
+        : networking.sendP2PPacket(BigInt(normalizedPeerId), RELAY_SEND_TYPE_RELIABLE, packet);
 
       if (!ok) {
         throw new Error(`Failed to send Steam relay packet chunk ${index + 1}/${totalChunks}.`);
@@ -569,7 +580,7 @@ function createSteamRelayBridge(options = {}) {
   };
 
   const ensurePacketPump = () => {
-    if (packetPumpTimer || !canUseRelay()) {
+    if (relayTransport || packetPumpTimer || !canUseRelay()) {
       return;
     }
 
@@ -606,6 +617,54 @@ function createSteamRelayBridge(options = {}) {
 
   const ensureCallbacksRegistered = () => {
     if (!canUseRelay()) {
+      return;
+    }
+
+    if (relayTransport) {
+      if (relayTransportAttached) {
+        return;
+      }
+
+      relayPacketListener = ({ steamId, data }) => {
+        if (!steamId || !Buffer.isBuffer(data)) {
+          return;
+        }
+
+        handleIncomingPacket({
+          steamId,
+          data,
+        });
+      };
+
+      relaySessionRequestListener = ({ steamId }) => {
+        const normalizedPeerId = normalizeSteamId(steamId);
+        if (!normalizedPeerId) {
+          return;
+        }
+
+        try {
+          relayTransport.acceptP2PSession(normalizedPeerId);
+          log('[SteamRelay] Accepted Steam P2P session request from', normalizedPeerId);
+        } catch (acceptError) {
+          warn('[SteamRelay] Failed to accept Steam P2P session request:', acceptError);
+        }
+      };
+
+      relaySessionConnectFailListener = ({ steamId, error: errorCode }) => {
+        const normalizedPeerId = normalizeSteamId(steamId);
+        if (!normalizedPeerId) {
+          return;
+        }
+
+        const message = `Steam P2P session failed (${errorCode}).`;
+        warn('[SteamRelay]', message, normalizedPeerId);
+        cleanupPeerSessions(normalizedPeerId, message);
+      };
+
+      relayTransport.on?.('p2p-packet', relayPacketListener);
+      relayTransport.on?.('p2p-session-request', relaySessionRequestListener);
+      relayTransport.on?.('p2p-session-connect-fail', relaySessionConnectFailListener);
+      relayTransportAttached = true;
       return;
     }
 
@@ -841,6 +900,22 @@ function createSteamRelayBridge(options = {}) {
     if (packetPumpTimer) {
       clearInterval(packetPumpTimer);
       packetPumpTimer = null;
+    }
+
+    if (relayTransport && relayTransportAttached) {
+      if (relayPacketListener && relayTransport.off) {
+        relayTransport.off('p2p-packet', relayPacketListener);
+      }
+      if (relaySessionRequestListener && relayTransport.off) {
+        relayTransport.off('p2p-session-request', relaySessionRequestListener);
+      }
+      if (relaySessionConnectFailListener && relayTransport.off) {
+        relayTransport.off('p2p-session-connect-fail', relaySessionConnectFailListener);
+      }
+      relayPacketListener = null;
+      relaySessionRequestListener = null;
+      relaySessionConnectFailListener = null;
+      relayTransportAttached = false;
     }
 
     if (p2pSessionRequestHandle?.disconnect) {
