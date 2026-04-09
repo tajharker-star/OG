@@ -12,6 +12,18 @@ export interface SteamLobbyData {
     hostSteamId?: string;
     map?: string;
     mode?: string;
+    queueType?: string;
+    status?: string;
+    ranked?: boolean;
+    requiredPlayers?: number;
+    memberCount?: number;
+    memberLimit?: number;
+    error?: string;
+}
+
+export interface SteamLobbyListResult {
+    success: boolean;
+    lobbies: SteamLobbyData[];
     error?: string;
 }
 
@@ -31,6 +43,17 @@ export interface SteamStatsUpdateResult {
 export interface SteamLobbyActionResult {
     success: boolean;
     error?: string;
+}
+
+export interface SteamRelayConnectionResult extends SteamLobbyActionResult {
+    sessionId?: string;
+    endpoint?: string;
+}
+
+export interface SteamLobbyCreateOptions {
+    lobbyVisibility?: 'private' | 'friends' | 'public' | 'invisible';
+    maxMembers?: number;
+    metadata?: Record<string, string | number | boolean | null | undefined>;
 }
 
 // Add type declaration for window.require
@@ -115,14 +138,41 @@ class SteamService {
         ipcRenderer.send('steam:set-rich-presence', { [key]: value });
     }
 
-    public async createLobby(roomId: string, map: string, mode: string, endpoint?: string): Promise<{ success: boolean; lobbyId?: string; error?: string }> {
+    public async createLobby(
+        roomId: string,
+        map: string,
+        mode: string,
+        endpoint?: string,
+        options?: SteamLobbyCreateOptions
+    ): Promise<{ success: boolean; lobbyId?: string; endpoint?: string; error?: string }> {
         if (!this.isInitialized || !ipcRenderer) return { success: false, error: 'Not initialized' };
-        return await ipcRenderer.invoke('steam:create-lobby', { roomId, map, mode, endpoint });
+        return await ipcRenderer.invoke('steam:create-lobby', {
+            roomId,
+            map,
+            mode,
+            endpoint,
+            lobbyVisibility: options?.lobbyVisibility,
+            maxMembers: options?.maxMembers,
+            metadata: options?.metadata,
+        });
     }
 
     public async getLobbyData(lobbyId: string): Promise<SteamLobbyData> {
         if (!this.isInitialized || !ipcRenderer) return { success: false, error: 'Not initialized' };
         return await ipcRenderer.invoke('steam:get-lobby-data', lobbyId);
+    }
+
+    public async listLobbies(filters?: {
+        queueType?: string;
+        status?: string;
+        requireOpenSlot?: boolean;
+        maxResults?: number;
+    }): Promise<SteamLobbyListResult> {
+        if (!this.isInitialized || !ipcRenderer) {
+            return { success: false, lobbies: [], error: 'Not initialized' };
+        }
+
+        return await ipcRenderer.invoke('steam:list-lobbies', filters || {});
     }
 
     public async openInviteDialog(lobbyId?: string): Promise<SteamLobbyActionResult> {
@@ -137,6 +187,27 @@ class SteamService {
             return { success: false, error: 'Not initialized' };
         }
         return await ipcRenderer.invoke('steam:leave-lobby', lobbyId);
+    }
+
+    public async prepareRelayConnection(hostSteamId: string): Promise<SteamRelayConnectionResult> {
+        if (!this.isInitialized || !ipcRenderer) {
+            return { success: false, error: 'Not initialized' };
+        }
+        return await ipcRenderer.invoke('steam:prepare-relay-connection', hostSteamId);
+    }
+
+    public async closeRelayConnection(sessionId?: string): Promise<SteamLobbyActionResult> {
+        if (!this.isInitialized || !ipcRenderer) {
+            return { success: false, error: 'Not initialized' };
+        }
+        return await ipcRenderer.invoke('steam:close-relay-connection', sessionId);
+    }
+
+    public async updateActiveLobbyData(metadata: Record<string, string | number | boolean | null | undefined>): Promise<SteamLobbyActionResult> {
+        if (!this.isInitialized || !ipcRenderer) {
+            return { success: false, error: 'Not initialized' };
+        }
+        return await ipcRenderer.invoke('steam:update-active-lobby-data', metadata);
     }
 
     public activateAchievement(achievementId: string) {

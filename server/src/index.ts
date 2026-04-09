@@ -76,6 +76,14 @@ const io = new Server(httpServer, {
     transports: ['websocket', 'polling'] // Force websocket preference but allow polling fallback
 });
 
+const emitLobbySettingsToSocket = (targetSocket: { emit: (event: string, payload: unknown) => void }, gs: GameState) => {
+    targetSocket.emit('lobbySettings', gs.getLobbySettings());
+};
+
+const emitLobbySettingsToRoom = (roomId: string, gs: GameState) => {
+    io.to(roomId).emit('lobbySettings', gs.getLobbySettings());
+};
+
 const PORT = process.env.PORT || 3001;
 const ENABLE_HEARTBEAT_LOGS = process.env.ENABLE_HEARTBEAT_LOGS === '1';
 
@@ -229,11 +237,23 @@ io.on('connection', (socket) => {
                 existingGs.emitVisibleMapDataToPlayer(io, socket.id);
                 socket.emit('playersData', existingGs.getPlayersSnapshot(true));
                 socket.emit('unitsData', existingGs.getSimplifiedUnitsSnapshot());
-                socket.emit('lobbySettings', { requiredPlayers: existingGs.requiredPlayers });
+                emitLobbySettingsToSocket(socket, existingGs);
                 socket.emit('gameStatus', existingGs.status);
                 socket.emit('joinedRoom', roomId);
                 existingGs.emitPlayerHqStatus(io, socket.id);
             }
+            return;
+        }
+
+        const targetGs = getOrCreateRoom(roomId, mapType);
+        if (!targetGs.canAcceptHumanPlayer(socket.id)) {
+            socket.emit('ROOM_JOIN_FAILED', {
+                roomId,
+                reason: targetGs.isRankedQuickMatch()
+                    ? 'That ranked quick match is already full.'
+                    : 'That lobby is already full.'
+            });
+            cleanupRoom(roomId);
             return;
         }
 
@@ -244,6 +264,8 @@ io.on('connection', (socket) => {
         if (oldGs) {
             oldGs.removePlayer(socket.id);
             io.to(currentRoom).emit('playersData', oldGs.getPlayersSnapshot(true));
+            emitLobbySettingsToRoom(currentRoom, oldGs);
+            oldGs.handleLobbyPopulationChange(io, currentRoom);
             cleanupRoom(currentRoom);
         }
 
@@ -253,7 +275,7 @@ io.on('connection', (socket) => {
             socket.join(roomId + '_fast');
         }
 
-        const gs = getOrCreateRoom(roomId, mapType);
+        const gs = targetGs;
 
         gs.addPlayer(socket.id);
         gs.checkVotingStart(io, roomId);
@@ -263,12 +285,7 @@ io.on('connection', (socket) => {
             io.to(roomId).emit('playersData', gs.getPlayersSnapshot(true));
             io.to(roomId).emit('unitsData', gs.getSimplifiedUnitsSnapshot());
             if (gs.matchState === 'ENDED') {
-                socket.emit('MATCH_ENDED', {
-                    winnerPlayerId: gs.winnerId,
-                    eliminatedPlayerIds: Array.from(gs.eliminatedPlayerIds),
-                    endReason: gs.endReason,
-                    timestamp: Date.now()
-                });
+                socket.emit('MATCH_ENDED', gs.getMatchEndedPayload());
             }
             if (gs.tunnelUrl) {
                 socket.emit('tunnelUrl', gs.tunnelUrl);
@@ -279,7 +296,7 @@ io.on('connection', (socket) => {
                 // LAN: Send local IP as password (valid IPv4)
                 socket.emit('tunnelPassword', getLocalIp());
             }
-            socket.emit('lobbySettings', { requiredPlayers: gs.requiredPlayers });
+            emitLobbySettingsToSocket(socket, gs);
             socket.emit('gameStatus', gs.status);
             socket.emit('joinedRoom', roomId);
         }
@@ -296,17 +313,12 @@ io.on('connection', (socket) => {
         const gs = rooms.get(currentRoom);
         if (gs) {
             socket.emit('gameStatus', gs.status);
-            socket.emit('lobbySettings', { requiredPlayers: gs.requiredPlayers });
+            emitLobbySettingsToSocket(socket, gs);
             gs.emitVisibleMapDataToPlayer(io, socket.id);
             socket.emit('playersData', gs.getPlayersSnapshot(true));
             socket.emit('unitsData', gs.getSimplifiedUnitsSnapshot());
             if (gs.matchState === 'ENDED') {
-                socket.emit('MATCH_ENDED', {
-                    winnerPlayerId: gs.winnerId,
-                    eliminatedPlayerIds: Array.from(gs.eliminatedPlayerIds),
-                    endReason: gs.endReason,
-                    timestamp: Date.now()
-                });
+                socket.emit('MATCH_ENDED', gs.getMatchEndedPayload());
             }
             if (gs.tunnelUrl) {
                 socket.emit('tunnelUrl', gs.tunnelUrl);
@@ -589,17 +601,24 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('quickJoin', (data?: { mapType: string, tunnelUrl?: string, forceNew?: boolean }) => {
+    socket.on('quickJoin', (data?: {
+        mapType: string,
+        tunnelUrl?: string,
+        forceNew?: boolean,
+        queueType?: 'standard' | 'ranked_quick_match',
+        requiredPlayers?: number
+    }) => {
         const requestedType = data?.mapType || 'random';
+        const queueType = data?.queueType === 'ranked_quick_match' ? 'ranked_quick_match' : 'standard';
 
         // Find least-populated public room or create a new one
         let targetId: string | null = null;
-        let minCount = Infinity;
+        let bestScore = queueType === 'ranked_quick_match' ? -Infinity : Infinity;
 
         // If tunnelUrl is provided OR forceNew is true, force a new room to host it
         if (!data?.tunnelUrl && !data?.forceNew) {
             rooms.forEach((gs, id) => {
-                if (id.startsWith('public_') && gs.status === 'waiting') {
+                if (id.startsWith('public_') && gs.status === 'waiting' && gs.queueType === queueType) {
                     let match = true;
                     if (requestedType !== 'random') {
                         if (gs.mapType !== requestedType) match = false;
@@ -607,8 +626,17 @@ io.on('connection', (socket) => {
 
                     if (match) {
                         const humanCount = Array.from(gs.players.values()).filter(p => !p.isBot).length;
-                        if (humanCount < minCount) {
-                            minCount = humanCount;
+                        if (humanCount >= gs.maxHumanPlayers) {
+                            return;
+                        }
+
+                        if (queueType === 'ranked_quick_match') {
+                            if (humanCount > bestScore) {
+                                bestScore = humanCount;
+                                targetId = id;
+                            }
+                        } else if (humanCount < bestScore) {
+                            bestScore = humanCount;
                             targetId = id;
                         }
                     }
@@ -616,7 +644,7 @@ io.on('connection', (socket) => {
             });
         }
 
-        if (!targetId || minCount >= 10 || data?.tunnelUrl) { // cap room size to 10 humans or force new if tunnel
+        if (!targetId || data?.tunnelUrl) {
             targetId = `public_${Math.random().toString(36).slice(2, 8)}`;
         }
 
@@ -630,6 +658,10 @@ io.on('connection', (socket) => {
         // We should set password only if it's a NEW room (or doesn't have one).
 
         const gs = getOrCreateRoom(targetId, requestedType);
+        gs.configureQueueType(queueType);
+        if (queueType !== 'ranked_quick_match' && Number.isFinite(data?.requiredPlayers)) {
+            gs.setRequiredPlayers(Math.trunc(data!.requiredPlayers as number));
+        }
         if (!gs.password) {
             gs.password = Math.random().toString(36).slice(-6).toUpperCase();
         }
@@ -638,6 +670,8 @@ io.on('connection', (socket) => {
         if (data?.tunnelUrl) {
             gs.tunnelUrl = data.tunnelUrl;
         }
+
+        emitLobbySettingsToRoom(targetId, gs);
 
         switchRoom(targetId, requestedType);
     });
@@ -662,6 +696,7 @@ io.on('connection', (socket) => {
     io.to('lobby').emit('mapData', defaultGs.map);
     io.to('lobby').emit('playersData', defaultGs.getPlayersSnapshot(true));
     io.to('lobby').emit('unitsData', defaultGs.getSimplifiedUnitsSnapshot());
+    emitLobbySettingsToRoom('lobby', defaultGs);
     socket.emit('gameStatus', defaultGs.status);
     socket.emit('joinedRoom', 'lobby');
 
@@ -670,7 +705,7 @@ io.on('connection', (socket) => {
         if (gs) {
             console.log(`Setting required players to ${count} for room ${currentRoom}`);
             gs.setRequiredPlayers(count);
-            io.to(currentRoom).emit('lobbySettings', { requiredPlayers: gs.requiredPlayers });
+            emitLobbySettingsToRoom(currentRoom, gs);
             gs.checkVotingStart(io, currentRoom);
         }
     });
@@ -683,6 +718,11 @@ io.on('connection', (socket) => {
         const botCount = Array.from(gs.players.values()).filter(p => p.isBot).length;
         const canAddDuringSetup = gs.status === 'waiting';
         const canAddMidMatch = gs.status === 'playing' && currentRoom.startsWith('custom_');
+
+        if (!gs.allowBots) {
+            console.warn(`[Bots] Ignoring addBot for queueType=${gs.queueType} room=${currentRoom}`);
+            return;
+        }
 
         if (botCount >= 10) {
             return;
@@ -716,7 +756,7 @@ io.on('connection', (socket) => {
 
     socket.on('force_start_match', () => {
         const gs = rooms.get(currentRoom);
-        if (gs && gs.status === 'waiting') {
+        if (gs && gs.status === 'waiting' && gs.allowForceStart) {
             console.log(`Force starting match for room ${currentRoom} by ${socket.id}`);
             gs.forceStart(io, currentRoom);
         }
@@ -777,6 +817,8 @@ io.on('connection', (socket) => {
         if (gs) {
             gs.removePlayer(socket.id);
             io.to(currentRoom).emit('playersData', gs.getPlayersSnapshot(true));
+            emitLobbySettingsToRoom(currentRoom, gs);
+            gs.handleLobbyPopulationChange(io, currentRoom);
             cleanupRoom(currentRoom);
         }
     });

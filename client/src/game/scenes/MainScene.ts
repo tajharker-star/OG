@@ -4,9 +4,11 @@ import { soundEffectsManager } from '../../audio/soundEffects';
 import { settingsManager } from '../SettingsManager';
 import type { Settings } from '../SettingsManager';
 import type { Building, GameMap, Island, Player, Unit } from '../../types/game';
-import { createUnitArt } from '../rendering/unitArt';
+import { createUnitArt, getUnitArtScale, getUnitWeaponMuzzleOffset, resolveUnitFacingTransform } from '../rendering/unitArt';
 import type { UnitArtRenderMode } from '../rendering/unitArt';
 import { createBuildingArt } from '../rendering/buildingArt';
+import { addOuterOutlineToArtContainer, applySkinToArtContainer, createMotionTrailSegment, getMotionTrailStyle } from '../rendering/skinEffects';
+import { SKIN_DEFINITIONS_BY_ID, type SkinId, type SkinLoadout } from '../../utils/playerSkins';
 
 interface MenuProjectile {
     x: number;
@@ -54,6 +56,21 @@ type PredictedMoveState = {
     path?: { x: number; y: number }[];
     vx?: number;
     vy?: number;
+};
+
+type UnitTrailState = {
+    lastX: number;
+    lastY: number;
+    emitX: number;
+    emitY: number;
+};
+
+type MotionTrailSegment = {
+    sprite: Phaser.GameObjects.Container;
+    bornAt: number;
+    lifetimeMs: number;
+    baseAlpha: number;
+    growth: number;
 };
 
 const CLIENT_DEFINITE_PLACEMENT_FAILURE_REASONS = new Set([
@@ -105,6 +122,26 @@ const BUILDING_FOOTPRINTS: Record<string, number> = {
 
 const NON_BLOCKING_BUILDING_TYPES = new Set<string>(['mine', 'bridge_node', 'naval_mine']);
 const BRIDGE_NODE_LAND_ACCESS_EDGE_PADDING = 18;
+const DEFAULT_SKIN_LOADOUT: SkinLoadout = {
+    unitSkinId: 'default',
+    buildingSkinId: 'default',
+};
+
+const WORLD_BUILDING_BASE_DEPTH = 3;
+const WORLD_OIL_SPOT_DEPTH = 10;
+const WORLD_OIL_RIG_DEPTH = WORLD_OIL_SPOT_DEPTH + 2;
+const WORLD_LASER_BEAM_DEPTH = 19;
+
+const blendSceneColor = (from: number, to: number, amount: number): number => {
+    const a = Phaser.Display.Color.ValueToColor(from);
+    const b = Phaser.Display.Color.ValueToColor(to);
+    const t = Phaser.Math.Clamp(amount, 0, 1);
+    return Phaser.Display.Color.GetColor(
+        Math.round(a.red + (b.red - a.red) * t),
+        Math.round(a.green + (b.green - a.green) * t),
+        Math.round(a.blue + (b.blue - a.blue) * t)
+    );
+};
 
 export class MainScene extends Phaser.Scene {
   private islandsGroup!: Phaser.GameObjects.Group;
@@ -158,6 +195,9 @@ export class MainScene extends Phaser.Scene {
     private currentMap: GameMap | null = null;
   private currentMapVersion: string | null = null;
   private currentMapStateSignature: string | null = null;
+  private activeSkinLoadout: SkinLoadout = { ...DEFAULT_SKIN_LOADOUT };
+  private unitTrailStates: Map<string, UnitTrailState> = new Map();
+  private motionTrailSegments: MotionTrailSegment[] = [];
   private knownBuildingAudioState: Map<string, BuildingAudioSnapshot> = new Map();
   private buildingAudioPrimed: boolean = false;
   private rangeGraphics!: Phaser.GameObjects.Graphics;
@@ -240,12 +280,26 @@ export class MainScene extends Phaser.Scene {
     const art = container.getByName('art') as Phaser.GameObjects.Container | null;
     if (!art || typeof targetAngle !== 'number' || Number.isNaN(targetAngle)) return;
 
+    const facing = resolveUnitFacingTransform(targetAngle);
+    if (!facing) return;
+    const baseScale = Number(art.getData('baseScale')) || Math.abs(art.scaleY || art.scaleX || 1);
+    const nextScaleX = facing.mirrored ? -baseScale : baseScale;
+    const currentMirrored = (art.scaleX || 0) < 0;
+
     if (snap) {
-      art.rotation = targetAngle;
+      art.scaleX = nextScaleX;
+      art.rotation = facing.rotation;
       return;
     }
 
-    art.rotation = Phaser.Math.Angle.RotateTo(art.rotation, targetAngle, 8 * dtSec);
+    if (currentMirrored !== facing.mirrored) {
+      art.scaleX = nextScaleX;
+      art.rotation = facing.rotation;
+      return;
+    }
+
+    art.scaleX = nextScaleX;
+    art.rotation = Phaser.Math.Angle.RotateTo(art.rotation, facing.rotation, 8 * dtSec);
   }
 
   private isCrowdInfantryType(type: string) {
@@ -1157,6 +1211,8 @@ export class MainScene extends Phaser.Scene {
             building.isConstructing ? 1 : 0,
             Math.round(building.constructionProgress ?? 0),
             building.hasTesla ? 1 : 0,
+            Math.round(building.radiationStacks ?? 0),
+            Math.round(building.radiationUntil ?? 0),
             queueState
           ].join(':');
         })
@@ -1181,6 +1237,8 @@ export class MainScene extends Phaser.Scene {
           Math.round(building?.maxHealth ?? 0),
           building?.isConstructing ? 1 : 0,
           Math.round(building?.constructionProgress ?? 0),
+          Math.round(building?.radiationStacks ?? 0),
+          Math.round(building?.radiationUntil ?? 0),
           queueState
         ].join(':');
       })
@@ -1196,7 +1254,9 @@ export class MainScene extends Phaser.Scene {
         Math.round(building.health),
         Math.round(building.maxHealth),
         building.isConstructing ? 1 : 0,
-        Math.round(building.constructionProgress ?? 0)
+        Math.round(building.constructionProgress ?? 0),
+        Math.round(building.radiationStacks ?? 0),
+        Math.round(building.radiationUntil ?? 0)
       ].join(':'))
       .join('|');
 
@@ -1390,6 +1450,10 @@ export class MainScene extends Phaser.Scene {
       return 'pirate_ship' as const;
     }
 
+    if (data.type === 'heavy_plane_bomb') {
+      return 'heavy_plane' as const;
+    }
+
     if (data.type === 'bullet') {
       return 'tower' as const;
     }
@@ -1412,16 +1476,23 @@ export class MainScene extends Phaser.Scene {
       return;
     }
 
+    const attackAngle = Math.atan2(data.y2 - data.y1, data.x2 - data.x1);
+    const projectileOrigin = this.getProjectileOrigin(data.attackerId, data.x1, data.y1, attackAngle);
+    const originX = projectileOrigin.x;
+    const originY = projectileOrigin.y;
+
     this.registerAttackFacing(
       data.attackerId,
-      data.x1,
-      data.y1,
+      originX,
+      originY,
       data.x2,
       data.y2,
       data.type === 'rocket_missile'
         ? 420
         : data.type === 'rocketeer_rocket'
           ? 320
+          : data.type === 'heavy_plane_bomb'
+            ? 380
           : data.type === 'cannon_ball'
             ? 320
             : 220
@@ -1430,7 +1501,7 @@ export class MainScene extends Phaser.Scene {
     if (playSound) {
       soundEffectsManager.playUnitFire(
         this.resolveCombatSoundSource(data),
-        this.getSpatialSoundLocation(data.x1, data.y1)
+        this.getSpatialSoundLocation(originX, originY)
       );
     }
 
@@ -1441,17 +1512,17 @@ export class MainScene extends Phaser.Scene {
 
       const points = [];
       const segments = 8;
-      const dx = data.x2 - data.x1;
-      const dy = data.y2 - data.y1;
+      const dx = data.x2 - originX;
+      const dy = data.y2 - originY;
       const dist = Math.sqrt(dx * dx + dy * dy);
       const normalX = -dy / dist;
       const normalY = dx / dist;
 
-      points.push({ x: data.x1, y: data.y1 });
+      points.push({ x: originX, y: originY });
       for (let i = 1; i < segments; i++) {
         const t = i / segments;
-        const px = data.x1 + dx * t;
-        const py = data.y1 + dy * t;
+        const px = originX + dx * t;
+        const py = originY + dy * t;
         const offset = (Math.random() - 0.5) * 20;
         points.push({
           x: px + normalX * offset,
@@ -1474,9 +1545,17 @@ export class MainScene extends Phaser.Scene {
 
     if (data.type === 'rocket_missile' || data.type === 'rocketeer_rocket') {
       const isRocketeerRocket = data.type === 'rocketeer_rocket';
+      const impactColors = this.getProjectileImpactColors(data.attackerId, {
+        core: isRocketeerRocket ? 0xff6f3f : 0xff4500,
+        glow: isRocketeerRocket ? 0xffb472 : 0xff9345,
+        ring: 0xffffc8,
+        smoke: 0x353c45,
+        sparkA: 0xffd27a,
+        sparkB: 0xfff0d0,
+      });
       const rocket = this.add.rectangle(
-        data.x1,
-        data.y1,
+        originX,
+        originY,
         isRocketeerRocket ? 12 : 16,
         isRocketeerRocket ? 4 : 6,
         isRocketeerRocket ? 0x60707c : 0x444444
@@ -1484,10 +1563,10 @@ export class MainScene extends Phaser.Scene {
       rocket.setStrokeStyle(1, 0x000000);
       rocket.setDepth(100);
 
-      const angle = Math.atan2(data.y2 - data.y1, data.x2 - data.x1);
+      const angle = Math.atan2(data.y2 - originY, data.x2 - originX);
       rocket.rotation = angle;
 
-      const dist = Math.hypot(data.x2 - data.x1, data.y2 - data.y1);
+      const dist = Math.hypot(data.x2 - originX, data.y2 - originY);
       const duration = (dist / data.speed) * 1000;
 
       this.tweens.add({
@@ -1496,7 +1575,7 @@ export class MainScene extends Phaser.Scene {
         y: data.y2,
         duration,
         onComplete: () => {
-          const explosion = this.add.circle(data.x2, data.y2, isRocketeerRocket ? 14 : 20, 0xFF4500);
+          const explosion = this.add.circle(data.x2, data.y2, isRocketeerRocket ? 14 : 20, impactColors.core);
           explosion.setDepth(101);
 
           this.tweens.add({
@@ -1507,8 +1586,18 @@ export class MainScene extends Phaser.Scene {
             onComplete: () => explosion.destroy()
           });
 
+          const glow = this.add.circle(data.x2, data.y2, isRocketeerRocket ? 12 : 20, impactColors.glow, 0.26);
+          glow.setDepth(100.5);
+          this.tweens.add({
+            targets: glow,
+            scale: isRocketeerRocket ? 3.4 : 5.8,
+            alpha: 0,
+            duration: isRocketeerRocket ? 260 : 420,
+            onComplete: () => glow.destroy()
+          });
+
           const ring = this.add.circle(data.x2, data.y2, isRocketeerRocket ? 12 : 20, 0xFFFFFF);
-          ring.setStrokeStyle(4, 0xFFFF00);
+          ring.setStrokeStyle(4, impactColors.ring);
           ring.setFillStyle(0xFFFFFF, 0);
           ring.setDepth(101);
 
@@ -1522,7 +1611,7 @@ export class MainScene extends Phaser.Scene {
 
           if (isRocketeerRocket) {
             for (let i = 0; i < 4; i++) {
-              const spark = this.add.circle(data.x2, data.y2, 2, 0xffd27a);
+              const spark = this.add.circle(data.x2, data.y2, 2, i % 2 === 0 ? impactColors.sparkA ?? impactColors.core : impactColors.sparkB ?? impactColors.ring);
               spark.setDepth(101);
               const sparkAngle = (Math.PI * 2 * i) / 4 + Math.random() * 0.4;
               this.tweens.add({
@@ -1544,17 +1633,135 @@ export class MainScene extends Phaser.Scene {
       return;
     }
 
+    if (data.type === 'heavy_plane_bomb') {
+      const blastRadius = data.radius ?? 90;
+      const impactColors = this.getProjectileImpactColors(data.attackerId, {
+        core: 0xff9c3a,
+        glow: 0xffc16b,
+        ring: 0xffe29a,
+        smoke: 0x31373d,
+        sparkA: 0xffd27a,
+        sparkB: 0xff7a2f,
+      });
+      const bomb = this.add.circle(originX, originY, 4, 0x3e464f);
+      bomb.setStrokeStyle(1, 0x0d1217);
+      bomb.setDepth(100);
+
+      const shadow = this.add.ellipse(data.x2, data.y2, 10, 5, 0x000000, 0.12);
+      shadow.setDepth(99);
+      shadow.setScale(0.3);
+
+      const adjustedDist = Math.hypot(data.x2 - originX, data.y2 - originY);
+      const duration = (adjustedDist / data.speed) * 1000;
+      const arcHeight = Math.min(40, Math.max(16, adjustedDist * 0.1));
+      const arc = new Phaser.Curves.QuadraticBezier(
+        new Phaser.Math.Vector2(originX, originY),
+        new Phaser.Math.Vector2((originX + data.x2) / 2, (originY + data.y2) / 2 - arcHeight),
+        new Phaser.Math.Vector2(data.x2, data.y2)
+      );
+      const arcState = { t: 0 };
+
+      this.tweens.add({
+        targets: shadow,
+        scaleX: 1,
+        scaleY: 1,
+        alpha: 0.2,
+        duration
+      });
+
+      this.tweens.add({
+        targets: arcState,
+        t: 1,
+        duration,
+        onUpdate: () => {
+          const point = arc.getPoint(arcState.t);
+          bomb.setPosition(point.x, point.y);
+          bomb.setScale(0.85 + arcState.t * 0.45);
+        },
+        onComplete: () => {
+          const explosion = this.add.circle(data.x2, data.y2, 16, impactColors.core, 0.92);
+          explosion.setDepth(101);
+
+          this.tweens.add({
+            targets: explosion,
+            scale: Math.max(3.4, blastRadius / 18),
+            alpha: 0,
+            duration: 360,
+            onComplete: () => explosion.destroy()
+          });
+
+          const glow = this.add.circle(data.x2, data.y2, Math.max(18, blastRadius * 0.22), impactColors.glow, 0.28);
+          glow.setDepth(100.5);
+          this.tweens.add({
+            targets: glow,
+            scale: Math.max(3.6, blastRadius / 16),
+            alpha: 0,
+            duration: 340,
+            onComplete: () => glow.destroy()
+          });
+
+          const ring = this.add.circle(data.x2, data.y2, 14, 0xffffff, 0);
+          ring.setStrokeStyle(3, impactColors.ring, 0.95);
+          ring.setDepth(101);
+          this.tweens.add({
+            targets: ring,
+            scale: Math.max(4.2, blastRadius / 14),
+            alpha: 0,
+            duration: 320,
+            onComplete: () => ring.destroy()
+          });
+
+          for (let i = 0; i < 6; i++) {
+            const ember = this.add.circle(data.x2, data.y2, 2.2, i % 2 === 0 ? impactColors.sparkA ?? impactColors.core : impactColors.sparkB ?? impactColors.ring);
+            ember.setDepth(101);
+            const emberAngle = (Math.PI * 2 * i) / 6 + Math.random() * 0.35;
+            this.tweens.add({
+              targets: ember,
+              x: data.x2 + Math.cos(emberAngle) * Phaser.Math.Between(18, 34),
+              y: data.y2 + Math.sin(emberAngle) * Phaser.Math.Between(18, 34),
+              alpha: 0,
+              scale: 0.15,
+              duration: 240,
+              onComplete: () => ember.destroy()
+            });
+          }
+
+          const smoke = this.add.circle(data.x2, data.y2, 10, impactColors.smoke ?? 0x31373d, 0.55);
+          smoke.setDepth(100);
+          this.tweens.add({
+            targets: smoke,
+            y: data.y2 - 10,
+            scale: 2.1,
+            alpha: 0,
+            duration: 420,
+            onComplete: () => smoke.destroy()
+          });
+
+          shadow.destroy();
+          bomb.destroy();
+        }
+      });
+
+      return;
+    }
+
     if (data.type === 'cannon_ball') {
-      const cannonBall = this.add.circle(data.x1, data.y1, 4, 0x1f2730);
+      const impactColors = this.getProjectileImpactColors(data.attackerId, {
+        core: 0xd7dde4,
+        glow: 0xf2f7ff,
+        ring: 0xf2f7ff,
+        smoke: 0x353e46,
+      });
+      const cannonBall = this.add.circle(originX, originY, 4, 0x1f2730);
       cannonBall.setStrokeStyle(1, 0x0a1016);
       cannonBall.setDepth(100);
 
-      const dist = Math.hypot(data.x2 - data.x1, data.y2 - data.y1);
+      const dist = Math.hypot(data.x2 - originX, data.y2 - originY);
       const duration = (dist / data.speed) * 1000;
       const arcHeight = Math.min(85, Math.max(24, dist * 0.22));
       const arc = new Phaser.Curves.QuadraticBezier(
-        new Phaser.Math.Vector2(data.x1, data.y1),
-        new Phaser.Math.Vector2((data.x1 + data.x2) / 2, (data.y1 + data.y2) / 2 - arcHeight),
+        new Phaser.Math.Vector2(originX, originY),
+        new Phaser.Math.Vector2((originX + data.x2) / 2, (originY + data.y2) / 2 - arcHeight),
         new Phaser.Math.Vector2(data.x2, data.y2)
       );
       const arcState = { t: 0 };
@@ -1568,9 +1775,9 @@ export class MainScene extends Phaser.Scene {
           cannonBall.setPosition(point.x, point.y);
         },
         onComplete: () => {
-          const splash = this.add.circle(data.x2, data.y2, 9, 0xd7dde4, 0.8);
+          const splash = this.add.circle(data.x2, data.y2, 9, impactColors.core, 0.8);
           splash.setDepth(101);
-          splash.setStrokeStyle(2, 0xf2f7ff);
+          splash.setStrokeStyle(2, impactColors.ring);
           this.tweens.add({
             targets: splash,
             scale: 2.2,
@@ -1579,7 +1786,17 @@ export class MainScene extends Phaser.Scene {
             onComplete: () => splash.destroy()
           });
 
-          const smoke = this.add.circle(data.x2, data.y2, 6, 0x353e46, 0.7);
+          const glow = this.add.circle(data.x2, data.y2, 10, impactColors.glow, 0.18);
+          glow.setDepth(100.5);
+          this.tweens.add({
+            targets: glow,
+            scale: 2,
+            alpha: 0,
+            duration: 220,
+            onComplete: () => glow.destroy()
+          });
+
+          const smoke = this.add.circle(data.x2, data.y2, 6, impactColors.smoke ?? 0x353e46, 0.7);
           smoke.setDepth(101);
           this.tweens.add({
             targets: smoke,
@@ -1597,12 +1814,103 @@ export class MainScene extends Phaser.Scene {
       return;
     }
 
-    const bullet = this.add.circle(data.x1, data.y1, 3, 0xFFFF00);
+    const dist = Math.hypot(data.x2 - originX, data.y2 - originY);
+    const duration = (dist / data.speed) * 1000;
+
+    const attacker = data.attackerId ? this.currentUnits.find((unit) => unit.id === data.attackerId) : undefined;
+    const attackerType = attacker?.type;
+    const isAlienScout = attackerType === 'alien_scout';
+    const isHeavyAlien = attackerType === 'heavy_alien';
+    const impactColors = this.getProjectileImpactColors(data.attackerId, {
+      core: isHeavyAlien ? 0xf2ddff : isAlienScout ? 0xc5fff7 : 0xffc661,
+      glow: isHeavyAlien ? 0xc085ff : isAlienScout ? 0x6ffff1 : 0xffefb6,
+      ring: isHeavyAlien ? 0xf7e8ff : isAlienScout ? 0xdbfff8 : 0xffefb6,
+      smoke: isHeavyAlien ? 0x281f35 : undefined,
+      sparkA: isHeavyAlien ? 0xeeb8ff : isAlienScout ? 0x8ffff7 : undefined,
+      sparkB: isHeavyAlien ? 0xffffff : isAlienScout ? 0xffffff : undefined,
+    });
+
+    if (isAlienScout || isHeavyAlien) {
+      const projectile = this.add.container(originX, originY);
+      projectile.setDepth(100);
+      projectile.setRotation(Math.atan2(data.y2 - originY, data.x2 - originX));
+
+      const halo = this.add.circle(0, 0, isHeavyAlien ? 9.5 : 6.2, impactColors.glow, isHeavyAlien ? 0.28 : 0.24);
+      halo.setBlendMode(Phaser.BlendModes.ADD);
+      const shell = this.add.circle(0, 0, isHeavyAlien ? 5.2 : 3.7, impactColors.glow, 0.88);
+      shell.setStrokeStyle(1, impactColors.ring, 0.82);
+      const core = this.add.circle(0, 0, isHeavyAlien ? 2.6 : 1.9, impactColors.core, 0.96);
+      const spine = this.add.rectangle(isHeavyAlien ? -3.4 : -2.2, 0, isHeavyAlien ? 7 : 4.8, isHeavyAlien ? 1.6 : 1.2, impactColors.ring, 0.72);
+      projectile.add([halo, shell, spine, core]);
+
+      this.tweens.add({
+        targets: projectile,
+        x: data.x2,
+        y: data.y2,
+        duration,
+        ease: 'Linear',
+        onUpdate: () => {
+          halo.setScale(1 + Math.sin(this.time.now * 0.025) * 0.08);
+        },
+        onComplete: () => {
+          const impactGlow = this.add.circle(data.x2, data.y2, isHeavyAlien ? 18 : 12, impactColors.glow, 0.28);
+          impactGlow.setBlendMode(Phaser.BlendModes.ADD);
+          impactGlow.setDepth(100.5);
+          const impactBurst = this.add.circle(data.x2, data.y2, isHeavyAlien ? 11 : 7, impactColors.core, 0.92);
+          impactBurst.setDepth(101);
+          const impactRing = this.add.circle(data.x2, data.y2, isHeavyAlien ? 10 : 7, impactColors.ring, 0);
+          impactRing.setStrokeStyle(isHeavyAlien ? 3 : 2, impactColors.ring, 0.95);
+          impactRing.setDepth(101);
+
+          this.tweens.add({
+            targets: impactBurst,
+            scale: isHeavyAlien ? 2.25 : 1.8,
+            alpha: 0,
+            duration: isHeavyAlien ? 180 : 140,
+            onComplete: () => impactBurst.destroy()
+          });
+          this.tweens.add({
+            targets: impactGlow,
+            scale: isHeavyAlien ? 2.8 : 2.2,
+            alpha: 0,
+            duration: isHeavyAlien ? 240 : 180,
+            onComplete: () => impactGlow.destroy()
+          });
+          this.tweens.add({
+            targets: impactRing,
+            scale: isHeavyAlien ? 2.5 : 2,
+            alpha: 0,
+            duration: isHeavyAlien ? 220 : 170,
+            onComplete: () => impactRing.destroy()
+          });
+
+          if (isHeavyAlien) {
+            for (let i = 0; i < 4; i += 1) {
+              const spark = this.add.circle(data.x2, data.y2, 2.1, i % 2 === 0 ? (impactColors.sparkA ?? impactColors.core) : (impactColors.sparkB ?? impactColors.ring), 0.92);
+              spark.setDepth(101);
+              const sparkAngle = (Math.PI * 2 * i) / 4 + Math.random() * 0.25;
+              this.tweens.add({
+                targets: spark,
+                x: data.x2 + Math.cos(sparkAngle) * Phaser.Math.Between(10, 20),
+                y: data.y2 + Math.sin(sparkAngle) * Phaser.Math.Between(10, 20),
+                scale: 0.2,
+                alpha: 0,
+                duration: 170,
+                onComplete: () => spark.destroy(),
+              });
+            }
+          }
+
+          projectile.destroy();
+        }
+      });
+
+      return;
+    }
+
+    const bullet = this.add.circle(originX, originY, 3, 0xFFFF00);
     bullet.setStrokeStyle(1, 0xFFAA00);
     bullet.setDepth(100);
-
-    const dist = Math.hypot(data.x2 - data.x1, data.y2 - data.y1);
-    const duration = (dist / data.speed) * 1000;
 
     this.tweens.add({
       targets: bullet,
@@ -1610,13 +1918,22 @@ export class MainScene extends Phaser.Scene {
       y: data.y2,
       duration,
       onComplete: () => {
-        const impact = this.add.circle(data.x2, data.y2, 5, 0xFFAA00);
+        const impact = this.add.circle(data.x2, data.y2, 5, impactColors.core);
+        const impactGlow = this.add.circle(data.x2, data.y2, 8, impactColors.glow, 0.26);
+        impactGlow.setDepth(100.5);
         this.tweens.add({
           targets: impact,
           scale: 0,
           alpha: 0,
           duration: 100,
           onComplete: () => impact.destroy()
+        });
+        this.tweens.add({
+          targets: impactGlow,
+          scale: 1.8,
+          alpha: 0,
+          duration: 120,
+          onComplete: () => impactGlow.destroy()
         });
         bullet.destroy();
       }
@@ -1727,6 +2044,35 @@ export class MainScene extends Phaser.Scene {
             if (this.ingameMusic && !this.ingameMusic.isPlaying) {
                 this.ingameMusic.play();
             }
+        }
+    }) as EventListener);
+
+    const initialSkinLoadout = (window as Window & { agSkinLoadout?: SkinLoadout }).agSkinLoadout;
+    if (initialSkinLoadout) {
+        this.activeSkinLoadout = {
+            unitSkinId: initialSkinLoadout.unitSkinId || 'default',
+            buildingSkinId: initialSkinLoadout.buildingSkinId || 'default',
+        };
+    }
+
+    window.addEventListener('ag:skin-loadout-changed', ((e: CustomEvent<SkinLoadout>) => {
+        const nextLoadout = e.detail;
+        if (!nextLoadout) return;
+
+        const sameUnitSkin = nextLoadout.unitSkinId === this.activeSkinLoadout.unitSkinId;
+        const sameBuildingSkin = nextLoadout.buildingSkinId === this.activeSkinLoadout.buildingSkinId;
+        if (sameUnitSkin && sameBuildingSkin) return;
+
+        this.activeSkinLoadout = {
+            unitSkinId: nextLoadout.unitSkinId || 'default',
+            buildingSkinId: nextLoadout.buildingSkinId || 'default',
+        };
+
+        if (this.currentUnits.length > 0) {
+            this.renderUnits(this.currentUnits);
+        }
+        if (this.currentMap) {
+            this.renderMap(this.currentMap);
         }
     }) as EventListener);
 
@@ -1916,6 +2262,9 @@ export class MainScene extends Phaser.Scene {
         console.log('[MainScene] Clearing Game State for New Game');
         this.currentUnits = [];
         this.clearPlacementMode();
+        this.motionTrailSegments.forEach((segment) => segment.sprite.destroy());
+        this.motionTrailSegments = [];
+        this.unitTrailStates.clear();
         this.unitContainers.clear();
         this.unitUpdates.clear();
         this.attackFacingOverrides.clear();
@@ -1986,6 +2335,7 @@ export class MainScene extends Phaser.Scene {
             setTimeout(() => {
                 if (this.isMenuMode) return;
                 if (!socket.id) return;
+                if (!this.currentMap || this.currentMap.islands.length === 0) return;
                 const me = this.players.get(socket.id);
                 if (me && ((me as any).canBuildHQ === false || me.status === 'eliminated' || (me as any).hqSpawnedOnce)) return;
 
@@ -1994,37 +2344,37 @@ export class MainScene extends Phaser.Scene {
 
                 const myBase = this.currentMap?.islands.some(i => i.buildings.some(b => b.type === 'base' && b.ownerId === socket.id));
                 if (!myBase) {
-                    console.error('[SpawnSanity] NO HQ FOUND FOR PLAYER', socket.id);
+                    console.warn('[SpawnSanity] HQ not visible in current client map snapshot yet. Requesting a fresh sync instead of forcing a respawn.', socket.id);
                     
-                    const errorText = this.add.text(this.scale.width/2, 100, 'NO HQ FOUND - ATTEMPTING RESPAWN...', {
-                        fontSize: '32px',
+                    const errorText = this.add.text(this.scale.width/2, 100, 'SYNCING HQ ASSIGNMENT...', {
+                        fontSize: '28px',
                         color: '#ffff00',
                         backgroundColor: '#000000'
                     }).setOrigin(0.5).setScrollFactor(0).setDepth(2000);
 
-                    socket.emit('request_spawn');
+                    socket.emit('request_game_state');
 
                     setTimeout(() => {
                          const retryBase = this.currentMap?.islands.some(i => i.buildings.some(b => b.type === 'base' && b.ownerId === socket.id));
                          if (retryBase) {
                              errorText.destroy();
-                             console.log('[SpawnSanity] Respawn successful.');
+                             console.log('[SpawnSanity] HQ appeared after fresh state sync.');
                              this.centerCameraOnBase();
-                         } else {
-                             errorText.setText('SPAWN ERROR: NO HQ ASSIGNED\nATTEMPTING EMERGENCY RESPAWN...');
-                             errorText.setColor('#ff0000');
-                             socket.emit('force_spawn_hq');
-                             setTimeout(() => {
-                                 if (errorText && (errorText as any).active) {
-                                     errorText.destroy();
-                                 }
-                             }, 10000);
+                             return;
                          }
+
+                         errorText.setText('WAITING FOR HQ SYNC...');
+                         errorText.setColor('#ffcc66');
+                         setTimeout(() => {
+                             if (errorText && (errorText as any).active) {
+                                 errorText.destroy();
+                             }
+                         }, 4000);
                     }, 2000);
                 } else {
                     console.log('[SpawnSanity] HQ confirmed.');
                 }
-            }, 3000);
+            }, 5000);
         });
 
     socket.on('unitsData', (units: Unit[]) => {
@@ -2084,26 +2434,102 @@ export class MainScene extends Phaser.Scene {
     });
 
     socket.on('laserBeam', (data: { attackerId: string, targetId: string, x1: number, y1: number, x2: number, y2: number, duration: number, color: number }) => {
-        this.registerAttackFacing(data.attackerId, data.x1, data.y1, data.x2, data.y2, data.duration);
-        soundEffectsManager.playUnitFire('mothership', this.getSpatialSoundLocation(data.x1, data.y1));
+        const initialAngle = Math.atan2(data.y2 - data.y1, data.x2 - data.x1);
+        const initialOrigin = this.getProjectileOrigin(data.attackerId, data.x1, data.y1, initialAngle);
+        this.registerAttackFacing(data.attackerId, initialOrigin.x, initialOrigin.y, data.x2, data.y2, data.duration);
+        soundEffectsManager.playUnitFire('mothership', this.getSpatialSoundLocation(initialOrigin.x, initialOrigin.y));
+        const beamColors = this.getMothershipBeamColors(data.attackerId, data.color);
         const beam = this.add.graphics();
-        beam.setDepth(9999);
+        beam.setDepth(WORLD_LASER_BEAM_DEPTH);
+
+        const impact = this.add.container(data.x2, data.y2);
+        impact.setDepth(WORLD_LASER_BEAM_DEPTH + 0.1);
+
+        const impactGlow = this.add.circle(0, 0, 54, beamColors.glowColor, 0.34);
+        impactGlow.setBlendMode(Phaser.BlendModes.ADD);
+        const impactBurst = this.add.circle(0, 0, 30, beamColors.impactColor, 0.52);
+        const impactCore = this.add.circle(0, 0, 16, beamColors.coreColor, 0.94);
+        const impactRing = this.add.circle(0, 0, 40, beamColors.beamColor, 0);
+        impactRing.setStrokeStyle(4.2, beamColors.beamColor, 0.96);
+
+        const impactSparkHorizontal = this.add.rectangle(0, 0, 48, 3.4, beamColors.flareColor, 0.74);
+        const impactSparkVertical = this.add.rectangle(0, 0, 3.4, 48, beamColors.flareColor, 0.74);
+        const impactSparkDiagA = this.add.rectangle(0, 0, 42, 2.8, beamColors.flareColor, 0.56);
+        impactSparkDiagA.setRotation(Math.PI / 4);
+        const impactSparkDiagB = this.add.rectangle(0, 0, 42, 2.8, beamColors.flareColor, 0.56);
+        impactSparkDiagB.setRotation(-Math.PI / 4);
+
+        impact.add([
+            impactGlow,
+            impactBurst,
+            impactRing,
+            impactSparkHorizontal,
+            impactSparkVertical,
+            impactSparkDiagA,
+            impactSparkDiagB,
+            impactCore,
+        ]);
+
+        const impactTweens = [
+            this.tweens.add({
+                targets: impactGlow,
+                scale: { from: 0.72, to: 1.28 },
+                alpha: { from: 0.28, to: 0.08 },
+                duration: 260,
+                yoyo: true,
+                repeat: -1,
+                ease: 'Sine.easeInOut'
+            }),
+            this.tweens.add({
+                targets: impactBurst,
+                scale: { from: 0.7, to: 1.42 },
+                alpha: { from: 0.48, to: 0.14 },
+                duration: 220,
+                yoyo: true,
+                repeat: -1,
+                ease: 'Sine.easeInOut'
+            }),
+            this.tweens.add({
+                targets: impactRing,
+                scale: { from: 0.62, to: 1.34 },
+                alpha: { from: 0.98, to: 0.2 },
+                duration: 260,
+                yoyo: true,
+                repeat: -1,
+                ease: 'Sine.easeInOut'
+            }),
+            this.tweens.add({
+                targets: [impactSparkHorizontal, impactSparkVertical, impactSparkDiagA, impactSparkDiagB],
+                alpha: { from: 0.32, to: 0.88 },
+                scaleX: { from: 0.84, to: 1.16 },
+                scaleY: { from: 0.84, to: 1.16 },
+                duration: 180,
+                yoyo: true,
+                repeat: -1,
+                ease: 'Sine.easeInOut'
+            }),
+            this.tweens.add({
+                targets: impactCore,
+                scale: { from: 0.92, to: 1.16 },
+                alpha: { from: 0.82, to: 1 },
+                duration: 180,
+                yoyo: true,
+                repeat: -1,
+                ease: 'Sine.easeInOut'
+            }),
+        ];
         
-        // Initial Draw
-        const drawBeam = (width: number, alpha: number) => {
+        const beamState = { width: 7.8, auraPulse: 1, alpha: 1 };
+        const impactCoverRadius = 52;
+
+        const drawBeam = () => {
             beam.clear();
 
             // Dynamic Positions
-            let x1 = data.x1;
-            let y1 = data.y1;
+            let x1 = initialOrigin.x;
+            let y1 = initialOrigin.y;
             let x2 = data.x2;
             let y2 = data.y2;
-
-            const attacker = this.unitContainers.get(data.attackerId);
-            if (attacker) {
-                x1 = attacker.x;
-                y1 = attacker.y;
-            }
 
             const target = this.unitContainers.get(data.targetId);
             if (target) {
@@ -2111,49 +2537,104 @@ export class MainScene extends Phaser.Scene {
                 y2 = target.y;
             }
 
-            // Outer Glow
-            beam.lineStyle(width * 2, data.color, alpha * 0.5);
+            const attacker = this.unitContainers.get(data.attackerId);
+            if (attacker) {
+                const liveOrigin = this.getProjectileOrigin(
+                    data.attackerId,
+                    attacker.x,
+                    attacker.y,
+                    Math.atan2(y2 - attacker.y, x2 - attacker.x)
+                );
+                x1 = liveOrigin.x;
+                y1 = liveOrigin.y;
+            }
+
+            impact.setPosition(x2, y2);
+
+            const dx = x2 - x1;
+            const dy = y2 - y1;
+            const distance = Math.max(1, Math.hypot(dx, dy));
+            const nx = dx / distance;
+            const ny = dy / distance;
+            const attackerSnapshot = this.getUnitSnapshotById(data.attackerId);
+            const startInset = attackerSnapshot?.type === 'mothership' ? 62 : 18;
+            const beamStartX = x1 + nx * Math.min(startInset, distance * 0.4);
+            const beamStartY = y1 + ny * Math.min(startInset, distance * 0.4);
+            const beamEndX = x2 - nx * impactCoverRadius;
+            const beamEndY = y2 - ny * impactCoverRadius;
+            const outerWidth = beamState.width * (2.7 + beamState.auraPulse * 0.46);
+            const midWidth = beamState.width * (1.84 + beamState.auraPulse * 0.24);
+
+            beam.lineStyle(outerWidth, beamColors.glowColor, beamState.alpha * 0.18);
             beam.beginPath();
-            beam.moveTo(x1, y1);
-            beam.lineTo(x2, y2);
+            beam.moveTo(beamStartX, beamStartY);
+            beam.lineTo(beamEndX, beamEndY);
             beam.strokePath();
 
-            // Main Beam
-            beam.lineStyle(width, data.color, alpha);
+            beam.lineStyle(midWidth, beamColors.glowColor, beamState.alpha * 0.34);
             beam.beginPath();
-            beam.moveTo(x1, y1);
-            beam.lineTo(x2, y2);
+            beam.moveTo(beamStartX, beamStartY);
+            beam.lineTo(beamEndX, beamEndY);
+            beam.strokePath();
+
+            beam.lineStyle(beamState.width, beamColors.beamColor, beamState.alpha * 0.96);
+            beam.beginPath();
+            beam.moveTo(beamStartX, beamStartY);
+            beam.lineTo(beamEndX, beamEndY);
             beam.strokePath();
             
-            // Core (White center for "laser" effect)
-            beam.lineStyle(width / 3, 0xFFFFFF, 1);
+            beam.lineStyle(Math.max(2, beamState.width * 0.34), beamColors.coreColor, beamState.alpha);
             beam.beginPath();
-            beam.moveTo(x1, y1);
-            beam.lineTo(x2, y2);
+            beam.moveTo(beamStartX, beamStartY);
+            beam.lineTo(beamEndX, beamEndY);
             beam.strokePath();
         };
 
-        // Pulse Tween
-        const tween = this.tweens.addCounter({
-            from: 3,
-            to: 8,
-            duration: 100,
+        drawBeam();
+
+        const tween = this.tweens.add({
+            targets: beamState,
+            width: { from: 7.1, to: 12.2 },
+            auraPulse: { from: 0.72, to: 1.24 },
+            duration: 180,
             yoyo: true,
             repeat: -1,
-            onUpdate: (t) => {
+            ease: 'Sine.easeInOut',
+            onUpdate: () => {
                 if (!beam.scene) {
-                    t.stop();
+                    tween.stop();
                     return;
                 }
-                const width = t.getValue() as number;
-                drawBeam(width || 3, 1);
+                drawBeam();
             }
         });
 
-        // Destroy after duration
         this.time.delayedCall(data.duration, () => {
-            if (beam.scene) beam.destroy();
             tween.stop();
+            impactTweens.forEach((impactTween) => impactTween.stop());
+            if (beam.scene) {
+                this.tweens.add({
+                    targets: beamState,
+                    alpha: 0,
+                    duration: 300,
+                    ease: 'Quad.easeOut',
+                    onUpdate: () => drawBeam(),
+                    onComplete: () => {
+                        if (beam.scene) beam.destroy();
+                    }
+                });
+            }
+            if (impact.scene) {
+                this.tweens.add({
+                    targets: impact,
+                    alpha: 0,
+                    duration: 300,
+                    ease: 'Quad.easeOut',
+                    onComplete: () => {
+                        if (impact.scene) impact.destroy();
+                    }
+                });
+            }
         });
     });
 
@@ -2243,6 +2724,7 @@ export class MainScene extends Phaser.Scene {
         this.placementMode = true;
         this.placementType = e.detail.type;
         this.placementGhost = this.drawDetailedBuilding(0, 0, this.placementType!, 0xAAFFAA);
+        applySkinToArtContainer(this, this.placementGhost, this.activeSkinLoadout.buildingSkinId, 'building');
         this.placementGhost.setAlpha(0.6);
         this.placementGhost.setDepth(200);
 
@@ -2975,6 +3457,9 @@ export class MainScene extends Phaser.Scene {
           }
       });
 
+      this.syncUnitSkinTrails(time, delta);
+      this.updateMotionTrailVisuals(time);
+
       this.currentUnits.forEach(unit => {
           const container = this.unitContainers.get(unit.id);
           if (!container) return;
@@ -3177,7 +3662,7 @@ export class MainScene extends Phaser.Scene {
                     const type = u.type;
                     if (['ship', 'destroyer', 'pirate_ship', 'carrier', 'construction_ship', 'ferry', 'oil_tanker'].includes(type)) {
                         waterCount++;
-                    } else if (['light_plane', 'heavy_plane', 'aircraft_carrier', 'mothership'].includes(type)) {
+                    } else if (['light_plane', 'heavy_plane', 'alien_scout', 'heavy_alien', 'aircraft_carrier', 'mothership'].includes(type)) {
                         airCount++;
                     } else {
                         landCount++;
@@ -3431,6 +3916,313 @@ export class MainScene extends Phaser.Scene {
         return closest;
     }
 
+  private getUnitSkinIdForOwner(ownerId?: string | null) {
+      return ownerId === socket.id
+          ? this.activeSkinLoadout.unitSkinId
+          : 'default';
+  }
+
+  private getUnitSnapshotById(unitId?: string | null) {
+      if (!unitId) return undefined;
+      return this.currentUnits.find((unit) => unit.id === unitId);
+  }
+
+  private getMothershipBeamColors(attackerId: string, fallbackColor: number) {
+      const attacker = this.getUnitSnapshotById(attackerId);
+      const skinId = attacker ? this.getUnitSkinIdForOwner(attacker.ownerId) : 'default';
+      const palette = SKIN_DEFINITIONS_BY_ID[skinId]?.palette;
+
+      if (!palette || skinId === 'default') {
+          return {
+              beamColor: fallbackColor,
+              glowColor: fallbackColor,
+              coreColor: 0xffffff,
+              impactColor: blendSceneColor(fallbackColor, 0xffffff, 0.22),
+              flareColor: 0xffffff,
+          };
+      }
+
+      return {
+          beamColor: palette.glow,
+          glowColor: blendSceneColor(palette.primary, palette.glow, 0.62),
+          coreColor: blendSceneColor(palette.secondary, 0xffffff, 0.38),
+          impactColor: blendSceneColor(palette.primary, palette.glow, 0.42),
+          flareColor: blendSceneColor(palette.secondary, 0xffffff, 0.2),
+      };
+  }
+
+  private getProjectileImpactColors(
+      attackerId: string | undefined,
+      defaults: {
+          core: number;
+          glow: number;
+          ring: number;
+          smoke?: number;
+          sparkA?: number;
+          sparkB?: number;
+      }
+  ) {
+      const attacker = this.getUnitSnapshotById(attackerId);
+      const skinId = attacker ? this.getUnitSkinIdForOwner(attacker.ownerId) : 'default';
+      const palette = SKIN_DEFINITIONS_BY_ID[skinId]?.palette;
+
+      if (!palette || skinId === 'default') {
+          return defaults;
+      }
+
+      return {
+          core: blendSceneColor(defaults.core, palette.primary, 0.62),
+          glow: blendSceneColor(defaults.glow, palette.glow, 0.72),
+          ring: blendSceneColor(defaults.ring, palette.secondary, 0.58),
+          smoke: defaults.smoke !== undefined ? blendSceneColor(defaults.smoke, palette.shadow, 0.36) : undefined,
+          sparkA: blendSceneColor(defaults.sparkA ?? defaults.core, palette.glow, 0.64),
+          sparkB: blendSceneColor(defaults.sparkB ?? defaults.ring, palette.secondary, 0.52),
+      };
+  }
+
+  private getUnitRadiationBadgeOffset(unitType: string, displayScale: number) {
+      let hpBarY = -12;
+      switch (unitType) {
+          case 'mothership': hpBarY = -90; break;
+          case 'aircraft_carrier': hpBarY = -50; break;
+          case 'heavy_alien': hpBarY = -36; break;
+          case 'alien_scout': hpBarY = -28; break;
+          case 'heavy_plane': hpBarY = -25; break;
+          case 'destroyer': hpBarY = -15; break;
+          case 'pirate_ship': hpBarY = -15; break;
+          case 'construction_ship': hpBarY = -15; break;
+          case 'ferry': hpBarY = -15; break;
+          case 'missile_launcher': hpBarY = -15; break;
+          case 'tank': hpBarY = -15; break;
+          case 'humvee': hpBarY = -12; break;
+      }
+
+      return (hpBarY * displayScale) - Math.max(14, 18 * displayScale);
+  }
+
+  private syncRadiationBadge(
+      host: Phaser.GameObjects.Container,
+      stacks: number | undefined,
+      yOffset: number,
+      scale: number = 1
+  ) {
+      const existing = host.getByName('radiationBadge') as Phaser.GameObjects.Container | null;
+      if (!stacks || stacks <= 0) {
+          existing?.destroy();
+          return;
+      }
+
+      let badge = existing;
+      if (!badge) {
+          badge = this.add.container(0, yOffset);
+          badge.setName('radiationBadge');
+
+          const glow = this.add.circle(0, 0, 12, 0x8aff66, 0.22);
+          glow.setBlendMode(Phaser.BlendModes.ADD);
+          const ring = this.add.circle(0, 0, 10, 0x7dff55, 0);
+          ring.setStrokeStyle(1.6, 0xc8ff72, 0.82);
+          const symbol = this.add.text(0, -0.5, '☢', {
+              fontFamily: 'Trebuchet MS, sans-serif',
+              fontSize: '15px',
+              color: '#d8ff98',
+              fontStyle: 'bold',
+              stroke: '#091204',
+              strokeThickness: 4,
+          }).setOrigin(0.5);
+          const stackText = this.add.text(13, 9, `${stacks}`, {
+              fontFamily: 'Trebuchet MS, sans-serif',
+              fontSize: '10px',
+              color: '#f6fff3',
+              fontStyle: 'bold',
+              stroke: '#091204',
+              strokeThickness: 3,
+          }).setOrigin(0.5).setName('radiationStackText');
+
+          badge.add([glow, ring, symbol, stackText]);
+          badge.setDepth(40);
+          host.add(badge);
+
+          this.tweens.add({
+              targets: [glow, ring],
+              alpha: { from: 0.22, to: 0.62 },
+              scaleX: { from: 0.92, to: 1.16 },
+              scaleY: { from: 0.92, to: 1.16 },
+              duration: 620,
+              yoyo: true,
+              repeat: -1,
+              ease: 'Sine.easeInOut'
+          });
+      }
+
+      badge.setPosition(0, yOffset);
+      badge.setScale(Math.max(0.82, scale));
+      const stackText = badge.getByName('radiationStackText') as Phaser.GameObjects.Text | null;
+      stackText?.setText(`${stacks}`);
+  }
+
+  private getProjectileOrigin(attackerId: string | undefined, fallbackX: number, fallbackY: number, angleOverride?: number) {
+      if (!attackerId) {
+          return { x: fallbackX, y: fallbackY };
+      }
+
+      const unit = this.getUnitSnapshotById(attackerId);
+      const container = this.unitContainers.get(attackerId);
+      const art = container?.getByName('art') as Phaser.GameObjects.Container | null;
+      if (!unit || !container || !art) {
+          return { x: fallbackX, y: fallbackY };
+      }
+
+      const localOffset = getUnitWeaponMuzzleOffset(unit.type);
+      const facing = resolveUnitFacingTransform(typeof angleOverride === 'number' ? angleOverride : (art.rotation || 0));
+      const baseScale = Number(art.getData('baseScale')) || Math.abs(art.scaleY || art.scaleX || 1);
+      const scaleX = facing?.mirrored ? -baseScale : (art.scaleX || baseScale);
+      const scaleY = art.scaleY || baseScale;
+      const scaledX = localOffset.x * scaleX;
+      const scaledY = localOffset.y * scaleY;
+      const rotation = facing?.rotation ?? (art.rotation || 0);
+
+      return {
+          x: container.x + scaledX * Math.cos(rotation) - scaledY * Math.sin(rotation),
+          y: container.y + scaledX * Math.sin(rotation) + scaledY * Math.cos(rotation),
+      };
+  }
+
+  private updateMotionTrailVisuals(time: number) {
+      if (this.motionTrailSegments.length === 0) return;
+
+      this.motionTrailSegments = this.motionTrailSegments.filter((segment) => {
+          const progress = Phaser.Math.Clamp((time - segment.bornAt) / segment.lifetimeMs, 0, 1);
+          if (progress >= 1) {
+              segment.sprite.destroy();
+              return false;
+          }
+
+          const fade = 1 - progress;
+          segment.sprite.setAlpha(segment.baseAlpha * fade * fade);
+          const scale = 1 + segment.growth * progress;
+          segment.sprite.setScale(scale);
+          return true;
+      });
+  }
+
+  private trimMotionTrailSegmentsForSkin(skinId: SkinId) {
+      const style = getMotionTrailStyle(skinId);
+      if (!style) return;
+
+      const overflow = this.motionTrailSegments.length - style.maxActive;
+      if (overflow <= 0) return;
+
+      const toRemove = this.motionTrailSegments.splice(0, overflow);
+      toRemove.forEach((segment) => segment.sprite.destroy());
+  }
+
+  private syncUnitSkinTrails(time: number, delta: number) {
+      const dtSec = delta / 1000;
+      const activeUnitIds = new Set(this.currentUnits.map((unit) => unit.id));
+
+      this.unitTrailStates.forEach((_, unitId) => {
+          if (!activeUnitIds.has(unitId)) {
+              this.unitTrailStates.delete(unitId);
+          }
+      });
+
+      this.currentUnits.forEach((unit) => {
+          const skinId = this.getUnitSkinIdForOwner(unit.ownerId);
+          const style = getMotionTrailStyle(skinId);
+          const container = this.unitContainers.get(unit.id);
+          if (!container) return;
+
+          const currentX = container.x;
+          const currentY = container.y;
+          const unitScale = Number(container.getData('displayScale')) || getUnitArtScale(unit.type);
+          const existingState = this.unitTrailStates.get(unit.id);
+          if (!style) {
+              this.unitTrailStates.set(unit.id, {
+                  lastX: currentX,
+                  lastY: currentY,
+                  emitX: currentX,
+                  emitY: currentY,
+              });
+              return;
+          }
+
+          if (!existingState) {
+              this.unitTrailStates.set(unit.id, {
+                  lastX: currentX,
+                  lastY: currentY,
+                  emitX: currentX,
+                  emitY: currentY,
+              });
+              return;
+          }
+
+          const dx = currentX - existingState.lastX;
+          const dy = currentY - existingState.lastY;
+          const dist = Math.hypot(dx, dy);
+          const speed = dtSec > 0 ? dist / dtSec : 0;
+          const spacing = Math.max(8, style.spacing * unitScale);
+          const teleportThreshold = Math.max(140, spacing * 8);
+
+          if (dist > teleportThreshold) {
+              existingState.lastX = currentX;
+              existingState.lastY = currentY;
+              existingState.emitX = currentX;
+              existingState.emitY = currentY;
+              return;
+          }
+
+          if (speed >= style.minSpeed && dist >= 0.65) {
+              let anchorX = existingState.emitX;
+              let anchorY = existingState.emitY;
+              let remainingDx = currentX - anchorX;
+              let remainingDy = currentY - anchorY;
+              let remainingDist = Math.hypot(remainingDx, remainingDy);
+              const angle = Math.atan2(remainingDy, remainingDx);
+
+              while (remainingDist >= spacing) {
+                  anchorX += Math.cos(angle) * spacing;
+                  anchorY += Math.sin(angle) * spacing;
+
+                  const segment = createMotionTrailSegment(this, skinId, anchorX, anchorY, angle, unitScale);
+                  if (segment) {
+                      this.motionTrailSegments.push({
+                          sprite: segment.container,
+                          bornAt: time,
+                          lifetimeMs: segment.lifetimeMs,
+                          baseAlpha: segment.baseAlpha,
+                          growth: segment.growth,
+                      });
+                      this.unitsGroup.add(segment.container);
+                  }
+
+                  remainingDx = currentX - anchorX;
+                  remainingDy = currentY - anchorY;
+                  remainingDist = Math.hypot(remainingDx, remainingDy);
+              }
+
+              existingState.emitX = anchorX;
+              existingState.emitY = anchorY;
+              this.trimMotionTrailSegmentsForSkin(skinId);
+          } else {
+              existingState.emitX = currentX;
+              existingState.emitY = currentY;
+          }
+
+          existingState.lastX = currentX;
+          existingState.lastY = currentY;
+      });
+  }
+
+  private getBuildingSkinIdForOwner(ownerId?: string | null) {
+      return ownerId === socket.id
+          ? this.activeSkinLoadout.buildingSkinId
+          : 'default';
+  }
+
+  private getBuildingWorldDepth(type?: string | null) {
+      return type === 'oil_rig' ? WORLD_OIL_RIG_DEPTH : WORLD_BUILDING_BASE_DEPTH;
+  }
+
   drawDetailedBuilding(x: number, y: number, type: string, color: number, data?: any): Phaser.GameObjects.Container {
       return createBuildingArt(this, x, y, type as any, color, data);
   }
@@ -3441,25 +4233,48 @@ export class MainScene extends Phaser.Scene {
       type: string,
       color: number,
       isSelected: boolean,
-      renderMode: UnitArtRenderMode = 'full'
+      renderMode: UnitArtRenderMode = 'full',
+      skinId?: import('../../utils/playerSkins').SkinId
   ): Phaser.GameObjects.Container {
-      return createUnitArt(this, x, y, type, color, isSelected, { renderMode });
+      return createUnitArt(this, x, y, type, color, isSelected, { renderMode, skinId });
   }
 
   createUnitContainer(unit: Unit, isMine: boolean, isSelected: boolean) {
       const player = this.players.get(unit.ownerId);
       const color = player ? parseInt(player.color.replace('#', '0x')) : (isMine ? 0xAAAAFF : 0xFFAAAA);
       const renderMode = this.getUnitRenderMode(unit, isSelected);
+      const skinId = this.getUnitSkinIdForOwner(unit.ownerId);
       
       const uContainer = this.add.container(unit.x, unit.y);
-      const art = this.drawDetailedUnit(0, 0, unit.type, color, isSelected, renderMode);
+      const art = this.drawDetailedUnit(0, 0, unit.type, color, isSelected, renderMode, skinId);
+      const displayScale = getUnitArtScale(unit.type);
+      applySkinToArtContainer(this, art, skinId, 'unit');
+      if (isSelected) {
+          const outlineColor = skinId !== 'default'
+              ? (SKIN_DEFINITIONS_BY_ID[skinId]?.palette.glow ?? 0xfff4ad)
+              : 0xfff4ad;
+          addOuterOutlineToArtContainer(this, art, 'unit', outlineColor, {
+              width: 2.4,
+              alpha: 0.96,
+              expand: 1.12,
+          });
+      }
       art.setName('art');
+      art.setScale(displayScale);
+      art.setData('baseScale', displayScale);
       uContainer.add(art);
       uContainer.setPosition(unit.x, unit.y);
       uContainer.setDepth(20); // Ensure units are above everything else
       uContainer.setData('isSelected', isSelected);
       uContainer.setData('renderMode', renderMode);
       uContainer.setData('unitType', unit.type);
+      uContainer.setData('displayScale', displayScale);
+      this.unitTrailStates.set(unit.id, {
+          lastX: unit.x,
+          lastY: unit.y,
+          emitX: unit.x,
+          emitY: unit.y,
+      });
       
       // Add Health Bar to container
       if (unit.maxHealth > 0) {
@@ -3475,6 +4290,8 @@ export class MainScene extends Phaser.Scene {
          switch (unit.type) {
              case 'mothership': hpBarWidth = 120; hpBarY = -90; break;
              case 'aircraft_carrier': hpBarWidth = 140; hpBarY = -50; break;
+             case 'heavy_alien': hpBarWidth = 64; hpBarY = -36; break;
+             case 'alien_scout': hpBarWidth = 36; hpBarY = -28; break;
              case 'heavy_plane': hpBarWidth = 40; hpBarY = -25; break;
              case 'destroyer': hpBarWidth = 32; hpBarY = -15; break;
              case 'pirate_ship': hpBarWidth = 34; hpBarY = -15; break;
@@ -3485,10 +4302,26 @@ export class MainScene extends Phaser.Scene {
              case 'humvee': hpBarWidth = 20; hpBarY = -12; break;
          }
 
-         const hpBar = this.add.rectangle(0, hpBarY, hpBarWidth * hpPercent, 3, barColor);
+         const scaledHpBarY = hpBarY * displayScale;
+         const scaledHpBarWidth = hpBarWidth * displayScale;
+         const hpBarBg = this.add.rectangle(0, scaledHpBarY, scaledHpBarWidth + 2, 5, 0x000000, 0.62);
+         hpBarBg.setStrokeStyle(1, 0x000000, 1);
+         hpBarBg.setName('hpBarBg');
+         uContainer.add(hpBarBg);
+
+         const hpBar = this.add.rectangle(0, scaledHpBarY, scaledHpBarWidth * hpPercent, 3, barColor);
+         hpBar.setStrokeStyle(1, 0x000000, 1);
          hpBar.setName('hpBar');
+         hpBar.setData('maxBarWidth', scaledHpBarWidth);
          uContainer.add(hpBar);
       }
+
+      this.syncRadiationBadge(
+          uContainer,
+          unit.radiationStacks,
+          this.getUnitRadiationBadgeOffset(unit.type, displayScale),
+          Math.max(0.86, displayScale)
+      );
 
       // Dynamic Hit Area
       let width = 24;
@@ -3497,6 +4330,8 @@ export class MainScene extends Phaser.Scene {
       switch (unit.type) {
           case 'mothership': width = 160; height = 160; break;
           case 'aircraft_carrier': width = 180; height = 80; break;
+          case 'heavy_alien': width = 94; height = 54; break;
+          case 'alien_scout': width = 54; height = 34; break;
           case 'heavy_plane': width = 50; height = 50; break;
           case 'destroyer': width = 40; height = 20; break;
           case 'pirate_ship': width = 42; height = 24; break;
@@ -3507,9 +4342,11 @@ export class MainScene extends Phaser.Scene {
           case 'humvee': width = 30; height = 30; break;
       }
 
-      const hitArea = this.add.rectangle(0, 0, width, height, 0x000000, 0); // Invisible hit area
+      const scaledWidth = width * displayScale;
+      const scaledHeight = height * displayScale;
+      const hitArea = this.add.rectangle(0, 0, scaledWidth, scaledHeight, 0x000000, 0); // Invisible hit area
       uContainer.add(hitArea);
-      uContainer.setSize(width, height);
+      uContainer.setSize(scaledWidth, scaledHeight);
       uContainer.setInteractive(hitArea, Phaser.Geom.Rectangle.Contains);
 
       uContainer.on('pointerdown', (pointer: any) => {
@@ -3624,10 +4461,18 @@ export class MainScene extends Phaser.Scene {
                   if (hpPercent <= 0.3) barColor = 0xFF0000; // Low (Red)
                   else if (hpPercent <= 0.6) barColor = 0xFFFF00; // Medium (Yellow)
                   
-                  const hpBarWidth = unit.type === 'mothership' ? 100 : (unit.type === 'aircraft_carrier' ? 40 : 16);
+                  const hpBarWidth = Number(hpBar.getData('maxBarWidth')) || 16;
                   hpBar.width = hpBarWidth * hpPercent;
                   hpBar.fillColor = barColor;
               }
+
+              const displayScale = Number(container.getData('displayScale')) || 1;
+              this.syncRadiationBadge(
+                  container,
+                  unit.radiationStacks,
+                  this.getUnitRadiationBadgeOffset(unit.type, displayScale),
+                  Math.max(0.86, displayScale)
+              );
           }
       } else {
           // Create new unit
@@ -3645,6 +4490,7 @@ export class MainScene extends Phaser.Scene {
               this.unitContainers.delete(id);
               this.unitUpdates.delete(id);
               this.attackFacingOverrides.delete(id);
+              this.unitTrailStates.delete(id);
           }
       });
     }
@@ -3896,21 +4742,31 @@ export class MainScene extends Phaser.Scene {
                 circle.on('pointerout', () => window.dispatchEvent(new CustomEvent('game-hover', { detail: null })));
 
                 if (spot.occupiedBy) {
-                    const b = (spot as any).building;
-                    if (b) {
-                        const bContainer = this.drawDetailedBuilding(spot.x, spot.y, b.type, 0x555555, b);
-                        bContainer.setDepth(3);
+                        const b = (spot as any).building;
+                        if (b) {
+                            const bContainer = this.drawDetailedBuilding(spot.x, spot.y, b.type, 0x555555, b);
+                            applySkinToArtContainer(this, bContainer, this.getBuildingSkinIdForOwner((spot as any).ownerId), 'building');
+                        bContainer.setDepth(this.getBuildingWorldDepth(b.type));
                         this.islandsGroup.add(bContainer);
+                        this.syncRadiationBadge(bContainer, b.radiationStacks, -34, 0.92);
                         
                         const isMine = (spot as any).ownerId === socket.id;
                         if (b.isConstructing) {
                              const p = b.constructionProgress || 0;
+                             const blueBarBg = this.add.rectangle(spot.x, spot.y - 15, 18, 5, 0x000000, 0.62);
+                             blueBarBg.setStrokeStyle(1, 0x000000, 1);
+                             this.islandsGroup.add(blueBarBg);
                              const blueBar = this.add.rectangle(spot.x, spot.y - 15, 16 * (p/100), 3, 0x0000FF);
+                             blueBar.setStrokeStyle(1, 0x000000, 1);
                              this.islandsGroup.add(blueBar);
                         } else {
                              const hpPercent = Math.max(0, b.health / b.maxHealth);
                              const barColor = isMine ? 0x00FF00 : 0xFF0000;
+                             const hpBarBg = this.add.rectangle(spot.x, spot.y - 15, 18, 5, 0x000000, 0.62);
+                             hpBarBg.setStrokeStyle(1, 0x000000, 1);
+                             this.islandsGroup.add(hpBarBg);
                              const hpBar = this.add.rectangle(spot.x, spot.y - 15, 16 * hpPercent, 3, barColor);
+                             hpBar.setStrokeStyle(1, 0x000000, 1);
                              this.islandsGroup.add(hpBar);
                         }
                     }
@@ -3926,25 +4782,41 @@ export class MainScene extends Phaser.Scene {
             const isMine = building.ownerId === socket.id;
 
             const bContainer = this.drawDetailedBuilding(bx, by, building.type, color, building);
-            bContainer.setDepth(3);
+            applySkinToArtContainer(this, bContainer, this.getBuildingSkinIdForOwner(building.ownerId), 'building');
+            bContainer.setDepth(this.getBuildingWorldDepth(building.type));
             this.islandsGroup.add(bContainer);
+            this.syncRadiationBadge(bContainer, building.radiationStacks, -34, 0.92);
             bContainer.setSize(24, 24);
             bContainer.setInteractive();
 
             const isSelected = this.selectedNodeIds.has(building.id) || this.selectedBuildingIds.has(building.id);
             if (isSelected) {
-                const ring = this.add.circle(0, 0, 18);
-                ring.setStrokeStyle(2, 0x00FF00);
-                bContainer.add(ring);
+                const skinId = this.getBuildingSkinIdForOwner(building.ownerId);
+                const outlineColor = skinId !== 'default'
+                    ? (SKIN_DEFINITIONS_BY_ID[skinId]?.palette.glow ?? 0x00FF00)
+                    : 0x00FF00;
+                addOuterOutlineToArtContainer(this, bContainer, 'building', outlineColor, {
+                    width: 2.6,
+                    alpha: 0.96,
+                    expand: 1.08,
+                });
             }
 
             if (building.isConstructing) {
                 const p = building.constructionProgress || 0;
+                const blueBarBg = this.add.rectangle(bx, by - 15, 18, 5, 0x000000, 0.62);
+                blueBarBg.setStrokeStyle(1, 0x000000, 1);
+                this.islandsGroup.add(blueBarBg);
                 const blueBar = this.add.rectangle(bx, by - 15, 16 * (p / 100), 3, 0x0000FF);
+                blueBar.setStrokeStyle(1, 0x000000, 1);
                 this.islandsGroup.add(blueBar);
             } else {
                 const hpPercent = Math.max(0, building.health / building.maxHealth);
+                const hpBarBg = this.add.rectangle(bx, by - 15, 18, 5, 0x000000, 0.62);
+                hpBarBg.setStrokeStyle(1, 0x000000, 1);
+                this.islandsGroup.add(hpBarBg);
                 const hpBar = this.add.rectangle(bx, by - 15, 16 * hpPercent, 3, isMine ? 0x00FF00 : 0xFF0000);
+                hpBar.setStrokeStyle(1, 0x000000, 1);
                 this.islandsGroup.add(hpBar);
             }
 
@@ -4207,8 +5079,10 @@ export class MainScene extends Phaser.Scene {
         if ((b.type === 'wall_node' || b.type === 'bridge_node') && !bPlayer) bColor = 0x666666;
         
         const bContainer = this.drawDetailedBuilding(bx, by, b.type, bColor, b);
-        bContainer.setDepth(3);
+        applySkinToArtContainer(this, bContainer, this.getBuildingSkinIdForOwner(bOwnerId), 'building');
+        bContainer.setDepth(this.getBuildingWorldDepth(b.type));
         this.islandsGroup.add(bContainer);
+        this.syncRadiationBadge(bContainer, b.radiationStacks, -34, 0.92);
 
         bContainer.setSize(24, 24);
         bContainer.setInteractive();
@@ -4217,9 +5091,15 @@ export class MainScene extends Phaser.Scene {
         const isHovered = (this as any).hoveredBuildingId === b.id;
 
         if (isSelected) {
-            const ring = this.add.circle(0, 0, 18);
-            ring.setStrokeStyle(2, 0x00FF00);
-            bContainer.add(ring);
+            const skinId = this.getBuildingSkinIdForOwner(bOwnerId);
+            const outlineColor = skinId !== 'default'
+                ? (SKIN_DEFINITIONS_BY_ID[skinId]?.palette.glow ?? 0x00FF00)
+                : 0x00FF00;
+            addOuterOutlineToArtContainer(this, bContainer, 'building', outlineColor, {
+                width: 2.6,
+                alpha: 0.96,
+                expand: 1.08,
+            });
         }
 
         // --- BARS IMPLEMENTATION ---
@@ -4230,23 +5110,41 @@ export class MainScene extends Phaser.Scene {
         // Add Construction Bar
         if (b.isConstructing) {
              const p = b.constructionProgress || 0;
+             const blueBarBg = this.add.rectangle(0, -20, barW + 2, barH + 2, 0x000000, 0.62);
+             blueBarBg.setStrokeStyle(1.25, 0x000000, 1);
+             blueBarBg.setName('constructionBarBg');
+             bContainer.add(blueBarBg);
              const blueBar = this.add.rectangle(0, -20, barW * (p/100), barH, 0x0000FF);
+             blueBar.setStrokeStyle(1.25, 0x000000, 1);
              blueBar.setName('constructionBar');
+             blueBar.setData('maxBarWidth', barW);
              bContainer.add(blueBar);
         } else {
              const hpPercent = Math.max(0, b.health / b.maxHealth);
              const isMine = bOwnerId === socket.id;
              const hpColor = isMine ? 0x00FF00 : 0xFF0000;
+             const hpBarBg = this.add.rectangle(0, -20, barW + 2, barH + 2, 0x000000, 0.62);
+             hpBarBg.setStrokeStyle(1.25, 0x000000, 1);
+             hpBarBg.setName('hpBarBg');
+             bContainer.add(hpBarBg);
              const hpBar = this.add.rectangle(0, -20, barW * hpPercent, barH, hpColor);
+             hpBar.setStrokeStyle(1.25, 0x000000, 1);
              hpBar.setName('hpBar');
+             hpBar.setData('maxBarWidth', barW);
              bContainer.add(hpBar);
              
              // Recruitment Bar
              if (b.recruitmentQueue && b.recruitmentQueue.length > 0) {
                  const item = b.recruitmentQueue[0];
                  const rp = Math.min(1, item.progress / item.totalTime);
+                 const recBarBg = this.add.rectangle(0, -26, barW + 2, barH + 1, 0x000000, 0.62);
+                 recBarBg.setStrokeStyle(1.25, 0x000000, 1);
+                 recBarBg.setName('recruitBarBg');
+                 bContainer.add(recBarBg);
                  const recBar = this.add.rectangle(0, -26, barW * rp, barH - 1, 0xFFFF00);
+                 recBar.setStrokeStyle(1.25, 0x000000, 1);
                  recBar.setName('recruitBar');
+                 recBar.setData('maxBarWidth', barW);
                  bContainer.add(recBar);
              }
         }
@@ -4254,15 +5152,30 @@ export class MainScene extends Phaser.Scene {
         // Update function for hover/select
         const updateBars = (active: boolean) => {
             const scale = active ? 1.5 : 1.0; // 50% larger on hover/select
+            const cBarBg = bContainer.getByName('constructionBarBg') as Phaser.GameObjects.Rectangle;
+            if (cBarBg) {
+                cBarBg.setScale(scale);
+                cBarBg.y = active ? -26 : -20;
+            }
             const cBar = bContainer.getByName('constructionBar') as Phaser.GameObjects.Rectangle;
             if (cBar) {
                 cBar.setScale(scale);
                 cBar.y = active ? -26 : -20;
             }
+            const hBarBg = bContainer.getByName('hpBarBg') as Phaser.GameObjects.Rectangle;
+            if (hBarBg) {
+                hBarBg.setScale(scale);
+                hBarBg.y = active ? -26 : -20;
+            }
             const hBar = bContainer.getByName('hpBar') as Phaser.GameObjects.Rectangle;
             if (hBar) {
                 hBar.setScale(scale);
                 hBar.y = active ? -26 : -20;
+            }
+            const rBarBg = bContainer.getByName('recruitBarBg') as Phaser.GameObjects.Rectangle;
+            if (rBarBg) {
+                rBarBg.setScale(scale);
+                rBarBg.y = active ? -34 : -26;
             }
             const rBar = bContainer.getByName('recruitBar') as Phaser.GameObjects.Rectangle;
             if (rBar) {
@@ -4512,6 +5425,9 @@ export class MainScene extends Phaser.Scene {
           if (this.rangeGraphics) this.rangeGraphics.clear();
           if (this.pathGraphics) this.pathGraphics.clear();
           if (this.selectionGraphics) this.selectionGraphics.clear();
+          this.motionTrailSegments.forEach((segment) => segment.sprite.destroy());
+          this.motionTrailSegments = [];
+          this.unitTrailStates.clear();
           this.unitContainers.clear();
           this.unitUpdates.clear();
           this.currentUnits = []; // Clear local unit cache

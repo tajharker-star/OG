@@ -89,6 +89,8 @@ const getIconForType = (type?: string) => {
         case 'repair_dock': return '🔧';
         case 'light_plane': return '🛩';
         case 'heavy_plane': return '✈';
+        case 'alien_scout': return '👽';
+        case 'heavy_alien': return '🛸';
         case 'aircraft_carrier': return '🛳';
         case 'mothership': return '🛸';
         case 'oil_well': return '⛽';

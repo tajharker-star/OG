@@ -17,6 +17,8 @@ export interface Building {
   hasTesla?: boolean;
   range?: number;
   hiddenFromEnemies?: boolean;
+  radiationStacks?: number;
+  radiationUntil?: number;
 }
 
 export interface GoldDeposit {
@@ -82,7 +84,7 @@ export interface GameMap {
 export interface Unit {
   id: string;
   ownerId: string;
-  type: 'soldier' | 'destroyer' | 'pirate_ship' | 'construction_ship' | 'sniper' | 'rocketeer' | 'builder' | 'ferry' | 'tank' | 'humvee' | 'missile_launcher' | 'oil_seeker' | 'light_plane' | 'heavy_plane' | 'aircraft_carrier' | 'mothership';
+  type: 'soldier' | 'destroyer' | 'pirate_ship' | 'construction_ship' | 'sniper' | 'rocketeer' | 'builder' | 'ferry' | 'tank' | 'humvee' | 'missile_launcher' | 'oil_seeker' | 'light_plane' | 'heavy_plane' | 'alien_scout' | 'heavy_alien' | 'aircraft_carrier' | 'mothership';
   x: number;
   y: number;
   targetIslandId?: string;
@@ -109,6 +111,8 @@ export interface Unit {
   vy?: number;
   path?: { x: number; y: number }[];
   facingAngle?: number;
+  radiationStacks?: number;
+  radiationUntil?: number;
 }
 
 export interface Player {

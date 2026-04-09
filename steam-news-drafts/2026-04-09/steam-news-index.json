@@ -1,0 +1,55 @@
+{
+  "generatedAt": "2026-04-09",
+  "draftRoot": "/Users/codyharker/Desktop/cody/OG/steam-news-drafts/2026-04-09",
+  "imageRoot": "/Users/codyharker/Desktop/cody/OG/images/steam-news/2026-04-09",
+  "posts": [
+    {
+      "slug": "steam-multiplayer-ranked-quick-match",
+      "title": "Steam multiplayer, ranked quick match, and RP tracking",
+      "hoverInfo": "Steam multiplayer now has a cleaner command hub, ranked quick match, and friend-ready lobby tools.",
+      "shortDescription": "Multiplayer now runs through a proper Steam-hosted flow with working lobby support, a dedicated ranked quick-match queue, and RP tracking that feeds directly into match results and long-term progression.",
+      "image": "/Users/codyharker/Desktop/cody/OG/images/steam-news/2026-04-09/01-multiplayer-ranked-quick-match.png",
+      "draft": "/Users/codyharker/Desktop/cody/OG/steam-news-drafts/2026-04-09/01-steam-multiplayer-ranked-quick-match.md"
+    },
+    {
+      "slug": "skins-showroom-and-premium-effects",
+      "title": "Skins showroom, premium effects, and prestige loadouts",
+      "hoverInfo": "The armory now behaves like a real showroom, with richer effects and clearer prestige progression.",
+      "shortDescription": "The skins system now includes a dedicated showroom, stronger premium visual treatment, cleaner prestige progression, and a much clearer live armory presentation in the lobby.",
+      "image": "/Users/codyharker/Desktop/cody/OG/images/steam-news/2026-04-09/02-skins-showroom-and-premium-effects.png",
+      "draft": "/Users/codyharker/Desktop/cody/OG/steam-news-drafts/2026-04-09/02-skins-showroom-and-premium-effects.md"
+    },
+    {
+      "slug": "stats-achievements-and-ranked-rp",
+      "title": "Stats, achievements, and ranked progression",
+      "hoverInfo": "Progress is easier to read now, with lifetime stats, ranked RP, and achievement tracking all in one place.",
+      "shortDescription": "The lobby now tracks long-term performance with lifetime, mode-specific, co-op, and ranked stat buckets, plus a stronger achievement layer that ties into tutorial completion and higher bot-difficulty milestones.",
+      "image": "/Users/codyharker/Desktop/cody/OG/images/steam-news/2026-04-09/03-stats-achievements-and-ranked-rp.png",
+      "draft": "/Users/codyharker/Desktop/cody/OG/steam-news-drafts/2026-04-09/03-stats-achievements-and-ranked-rp.md"
+    },
+    {
+      "slug": "patch-notes-archive-and-lobby-refresh",
+      "title": "Patch notes archive, wishlist CTA, and lobby refresh",
+      "hoverInfo": "The menu now carries a quick-scan patch archive so players can see what changed without leaving the game.",
+      "shortDescription": "The lobby presentation has been refreshed with a built-in patch notes archive, faster icon-first scanning, a Steam wishlist CTA, and a more cohesive Conquerors: Domination identity across the main menu.",
+      "image": "/Users/codyharker/Desktop/cody/OG/images/steam-news/2026-04-09/04-patch-notes-archive-and-lobby-refresh.png",
+      "draft": "/Users/codyharker/Desktop/cody/OG/steam-news-drafts/2026-04-09/04-patch-notes-archive-and-lobby-refresh.md"
+    },
+    {
+      "slug": "tutorial-map-playbooks",
+      "title": "Map-specific tutorial playbooks and onboarding flow",
+      "hoverInfo": "Tutorial onboarding now changes with the map, teaching different economy and logistics paths instead of one generic lesson.",
+      "shortDescription": "The tutorial now branches by map type, with dedicated playbooks for Desert, Grasslands, and Islands so new players learn the economy, logistics, and production flow that actually fits the terrain they are playing on.",
+      "image": "/Users/codyharker/Desktop/cody/OG/images/steam-news/2026-04-09/05-tutorial-map-playbooks.png",
+      "draft": "/Users/codyharker/Desktop/cody/OG/steam-news-drafts/2026-04-09/05-tutorial-map-playbooks.md"
+    },
+    {
+      "slug": "tutorial-build-previews-and-placement-help",
+      "title": "Tutorial sandbox, build previews, and placement guidance",
+      "hoverInfo": "Build cards now explain what to place, where to place it, and why it matters while you learn.",
+      "shortDescription": "The tutorial sandbox now gives players clearer live guidance with build previews, placement callouts, safer practice flow, and better support for learning economy, production, and expansion before committing to a real fight.",
+      "image": "/Users/codyharker/Desktop/cody/OG/images/steam-news/2026-04-09/06-tutorial-build-hover-and-placement-help.png",
+      "draft": "/Users/codyharker/Desktop/cody/OG/steam-news-drafts/2026-04-09/06-tutorial-build-previews-and-placement-help.md"
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { GameCanvas } from './components/GameCanvas';
 import { GameUI } from './components/GameUI';
 import { SettingsModal } from './components/SettingsModal';
@@ -7,11 +7,13 @@ import { ConnectionLostOverlay } from './components/ConnectionLostOverlay';
 import { LobbyLogo } from './components/LobbyLogo';
 import { PatchNotesModal } from './components/PatchNotesModal';
 import { StatisticsPanel } from './components/StatisticsPanel';
+import { SkinsPanel } from './components/SkinsPanel';
 import { socket, connectToServer, connectionManager } from './services/socket';
 import { steamService } from './services/steam';
 import { soundEffectsManager } from './audio/soundEffects';
 import {
     bucketMatches,
+    RANKED_QUICK_MATCH_PLAYER_COUNT,
     STEAM_STAT_KEYS,
     createDefaultPlayerStatistics,
     mergeSteamStatistics,
@@ -34,6 +36,19 @@ import {
     TUTORIAL_MAP_OPTIONS,
     type TutorialMapType,
 } from './data/tutorialGuide';
+import {
+    createDefaultPlayerSkinProfile,
+    getUnlockedSkinIds,
+    normalizePlayerSkinProfile,
+    sanitizeSkinProfile,
+    type PlayerSkinProfile,
+    type SkinId,
+    type SkinTarget,
+} from './utils/playerSkins';
+import {
+    createDefaultSteamMultiplayerDiagnostics,
+    type SteamMultiplayerDiagnostics,
+} from './types/steamDiagnostics';
 import './App.css';
 
 const LOCAL_STATISTICS_BACKUP_KEY = 'ag_statistics_backup_v1';
@@ -47,6 +62,47 @@ const SETTINGS_FLOAT_BUTTON_SIZE = 56;
 const SETTINGS_FLOAT_BUTTON_MARGIN = 24;
 const SETTINGS_FLOAT_BUTTON_STORAGE_KEY = 'ag_settings_float_button_position_v1';
 const DEFAULT_TUTORIAL_MAP: TutorialMapType = 'desert';
+const DEVELOPER_SKIN_ALLOWED_NAMES = new Set(['cody harker', 'thecoadstar1234567890']);
+const DEVELOPER_SKIN_ALLOWED_OS_USERS = new Set(['codyharker']);
+const RANKED_QUICK_QUEUE_TYPE = 'ranked_quick_match';
+
+type PendingSteamLobbyConfig = {
+    lobbyVisibility: 'private' | 'friends' | 'public' | 'invisible';
+    maxMembers: number;
+    map: string;
+    mode: string;
+    openInviteDialog: boolean;
+    ranked: boolean;
+    metadata: Record<string, string | number | boolean | null | undefined>;
+};
+
+const getCurrentOsUsername = (): string | null => {
+    try {
+        const electronRequire = (window as any)?.require;
+        if (!electronRequire) {
+            return null;
+        }
+
+        const os = electronRequire('os');
+        const username = os?.userInfo?.()?.username;
+        return typeof username === 'string' ? username.trim().toLowerCase() : null;
+    } catch {
+        return null;
+    }
+};
+
+const canUseDeveloperSkin = (steamIdentity?: { name?: string | null; steamId?: string | null } | null): boolean => {
+    const normalizedName = typeof steamIdentity?.name === 'string'
+        ? steamIdentity.name.trim().toLowerCase()
+        : '';
+
+    if (normalizedName && DEVELOPER_SKIN_ALLOWED_NAMES.has(normalizedName)) {
+        return true;
+    }
+
+    const osUsername = getCurrentOsUsername();
+    return !!osUsername && DEVELOPER_SKIN_ALLOWED_OS_USERS.has(osUsername);
+};
 
 const getDefaultSettingsButtonPosition = () => ({
     x: SETTINGS_FLOAT_BUTTON_MARGIN,
@@ -220,6 +276,24 @@ const timeoutConnectAttempt = async (
     return connectToServer(targetUrl, timeoutMs);
 };
 
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+const getErrorMessage = (error: unknown): string => {
+    if (error instanceof Error) {
+        return error.message;
+    }
+
+    return typeof error === 'string' ? error : 'Unknown error';
+};
+
+const createDiagnosticsTimestamp = () => (
+    new Date().toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+    })
+);
+
 const openExternalUrl = async (url: string, fallbackUrl?: string) => {
     const electronRequire = (window as any).require;
     if (electronRequire) {
@@ -369,11 +443,14 @@ function App() {
     const statisticsRef = useRef<PlayerStatistics>(createDefaultPlayerStatistics());
     const [achievementUnlocks, setAchievementUnlocks] = useState<AchievementUnlockState>(createDefaultAchievementUnlockState);
     const achievementUnlocksRef = useRef<AchievementUnlockState>(createDefaultAchievementUnlockState());
+    const [skinsProfile, setSkinsProfile] = useState<PlayerSkinProfile>(createDefaultPlayerSkinProfile);
+    const skinsProfileRef = useRef<PlayerSkinProfile>(createDefaultPlayerSkinProfile());
     const [didLoadSave, setDidLoadSave] = useState(false);
     const [matchStatsSource, setMatchStatsSource] = useState<MatchSource>('lan');
+    const [isRankedMatch, setIsRankedMatch] = useState(false);
 
     // New Menu States
-    const [menuView, setMenuView] = useState<'main' | 'campaign' | 'multiplayer' | 'host_public' | 'statistics'>('main');
+    const [menuView, setMenuView] = useState<'main' | 'campaign' | 'multiplayer' | 'host_public' | 'statistics' | 'skins'>('main');
     const [showPatchNotes, setShowPatchNotes] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
     const [settingsButtonPos, setSettingsButtonPos] = useState(readSavedSettingsButtonPosition);
@@ -403,6 +480,49 @@ function App() {
     const [isLocalEngineReady, setIsLocalEngineReady] = useState(false);
     const [isLocalEngineBooting, setIsLocalEngineBooting] = useState(true);
     const [localEngineBootError, setLocalEngineBootError] = useState<string | null>(null);
+    const [steamError, setSteamError] = useState<string | null>(null);
+    const [steamUser, setSteamUser] = useState<{ name: string, steamId: string } | null>(null);
+    const [steamLobbyId, setSteamLobbyId] = useState<string | null>(null);
+    const [steamLobbyRole, setSteamLobbyRole] = useState<'host' | 'guest' | null>(null);
+    const [creatingSteamLobby, setCreatingSteamLobby] = useState(false);
+    const [isRankedQueueing, setIsRankedQueueing] = useState(false);
+    const creatingSteamLobbyRef = useRef(false);
+    const pendingSteamLobbyConfigRef = useRef<PendingSteamLobbyConfig | null>(null);
+    const activeSteamRelaySessionRef = useRef<string | null>(null);
+    const [steamDiagnostics, setSteamDiagnostics] = useState<SteamMultiplayerDiagnostics>(createDefaultSteamMultiplayerDiagnostics);
+
+    const updateSteamDiagnostics = (
+        updater: Partial<SteamMultiplayerDiagnostics> | ((previous: SteamMultiplayerDiagnostics) => Partial<SteamMultiplayerDiagnostics>)
+    ) => {
+        setSteamDiagnostics((previous) => {
+            const patch = typeof updater === 'function' ? updater(previous) : updater;
+            return {
+                ...previous,
+                ...patch,
+                updatedAt: patch.updatedAt === undefined ? previous.updatedAt : patch.updatedAt,
+            };
+        });
+    };
+
+    const pushSteamDiagnosticsEvent = (
+        message: string,
+        patch: Partial<SteamMultiplayerDiagnostics> = {}
+    ) => {
+        setSteamDiagnostics((previous) => {
+            const event = {
+                id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+                at: createDiagnosticsTimestamp(),
+                message,
+            };
+
+            return {
+                ...previous,
+                ...patch,
+                updatedAt: new Date().toISOString(),
+                events: [event, ...previous.events].slice(0, 8),
+            };
+        });
+    };
 
     const clampSettingsButtonPosition = (position: { x: number; y: number }) => ({
         x: Math.max(0, Math.min(position.x, window.innerWidth - SETTINGS_FLOAT_BUTTON_SIZE)),
@@ -536,6 +656,23 @@ function App() {
         void openExternalUrl(MAIN_GAME_STEAM_DEEP_LINK, MAIN_GAME_STEAM_STORE_URL);
     };
 
+    const handleEquipSkin = (target: SkinTarget, skinId: SkinId) => {
+        if (!unlockedSkinIds.has(skinId)) {
+            return;
+        }
+
+        const nextProfile: PlayerSkinProfile = {
+            ...skinsProfileRef.current,
+            loadout: {
+                ...skinsProfileRef.current.loadout,
+                unitSkinId: target === 'unit' ? skinId : skinsProfileRef.current.loadout.unitSkinId,
+                buildingSkinId: target === 'building' ? skinId : skinsProfileRef.current.loadout.buildingSkinId,
+            },
+        };
+
+        void commitSkinsProfile(nextProfile);
+    };
+
     const unlockAchievementsByIds = async (
         achievementIds: string[],
         unlockedAt: string = new Date().toISOString()
@@ -593,6 +730,13 @@ function App() {
         return nextAchievementUnlocks;
     };
 
+    const commitSkinsProfile = async (nextSkinsProfile: PlayerSkinProfile) => {
+        skinsProfileRef.current = nextSkinsProfile;
+        setSkinsProfile(nextSkinsProfile);
+        await triggerSave({ skins: nextSkinsProfile });
+        return nextSkinsProfile;
+    };
+
     const pushStatisticsToSteam = async (baseStatistics: PlayerStatistics) => {
         if (!steamService.isInitialized) {
             return baseStatistics;
@@ -625,6 +769,20 @@ function App() {
     const evaluatedAchievements = evaluateAchievements(
         { statistics },
         achievementUnlocks
+    );
+
+    const unlockedAchievementCount = useMemo(
+        () => evaluatedAchievements.filter((achievement) => achievement.unlocked).length,
+        [evaluatedAchievements]
+    );
+    const totalAchievementCount = evaluatedAchievements.length;
+    const hasDeveloperSkinAccess = useMemo(
+        () => canUseDeveloperSkin(steamUser),
+        [steamUser?.name, steamUser?.steamId]
+    );
+    const unlockedSkinIds = useMemo(
+        () => getUnlockedSkinIds(skinsProfile, unlockedAchievementCount, totalAchievementCount, hasDeveloperSkinAccess),
+        [skinsProfile, unlockedAchievementCount, totalAchievementCount, hasDeveloperSkinAccess]
     );
 
     const releaseBootSplash = (delayMs: number = 320) => {
@@ -710,6 +868,17 @@ function App() {
     // Reconnection Logic
     useEffect(() => {
         const unsubscribe = connectionManager.subscribe((state) => {
+            updateSteamDiagnostics({
+                connectionPhase: state.phase,
+                connectionUrl: normalizeNetworkEndpoint(state.url),
+                lastError: state.phase === 'FAILED'
+                    ? (state.error || state.details || null)
+                    : state.phase === 'READY'
+                        ? null
+                        : undefined,
+                updatedAt: new Date().toISOString(),
+            });
+
             if (!bootSplashReleasedRef.current) {
                 if (state.phase === 'CONNECTING') {
                     emitBootStatus(
@@ -755,29 +924,73 @@ function App() {
                 setLastJoinedRoom(rid);
 
                 // If we initiated a Steam Lobby Host
-                if (creatingSteamLobbyRef.current) {
+                if (creatingSteamLobbyRef.current && pendingSteamLobbyConfigRef.current) {
                     console.log('[App] Creating Steam Lobby for Room:', rid);
                     creatingSteamLobbyRef.current = false;
+                    const pendingSteamLobby = pendingSteamLobbyConfigRef.current;
+                    pendingSteamLobbyConfigRef.current = null;
+                    pushSteamDiagnosticsEvent('Joined local host room, creating Steam lobby.', {
+                        flow: pendingSteamLobby.ranked ? 'ranked' : 'hosting',
+                        route: 'pending',
+                        roomId: rid,
+                        lobbyId: null,
+                        endpoint: null,
+                        relaySessionId: null,
+                        lastError: null,
+                        status: 'Creating Steam lobby',
+                    });
 
                     (async () => {
                         const hostEndpoint = await resolveSteamHostEndpoint({ preferPublicTunnel: true });
-                        if (!hostEndpoint) {
-                            throw new Error('Unable to resolve host endpoint for Steam lobby');
-                        }
-                        const result = await steamService.createLobby(rid, 'Random', 'Standard', hostEndpoint);
+                        const result = await steamService.createLobby(
+                            rid,
+                            pendingSteamLobby.map,
+                            pendingSteamLobby.mode,
+                            hostEndpoint || undefined,
+                            {
+                                lobbyVisibility: pendingSteamLobby.lobbyVisibility,
+                                maxMembers: pendingSteamLobby.maxMembers,
+                                metadata: pendingSteamLobby.metadata,
+                            }
+                        );
                         if (!result.success || !result.lobbyId) {
                             return result;
                         }
 
                         const createdLobbyId = String(result.lobbyId);
                         setSteamLobbyId(createdLobbyId);
+                        setSteamLobbyRole('host');
+                        setIsRankedMatch(pendingSteamLobby.ranked);
                         steamService.setRichPresence('steam_display', '#Status_WaitingForPlayers');
                         steamService.setRichPresence('connect', `+connect_lobby ${createdLobbyId}`);
+                        pushSteamDiagnosticsEvent(
+                            pendingSteamLobby.openInviteDialog
+                                ? 'Steam lobby created and preparing invite dialog.'
+                                : 'Steam lobby created and ready for players.',
+                            {
+                                flow: pendingSteamLobby.ranked ? 'ranked' : 'hosting',
+                                route: 'steam-relay',
+                                lobbyId: createdLobbyId,
+                                roomId: rid,
+                                endpoint: result.endpoint || hostEndpoint || null,
+                                status: pendingSteamLobby.openInviteDialog ? 'Opening Steam invite dialog' : 'Steam lobby ready',
+                            }
+                        );
 
-                        const inviteResult = await steamService.openInviteDialog(createdLobbyId);
-                        if (!inviteResult.success) {
-                            console.warn('[App] Failed to open Steam invite dialog, falling back to Friends overlay.', inviteResult.error);
-                            steamService.activateOverlay('Friends');
+                        if (pendingSteamLobby.openInviteDialog) {
+                            const inviteResult = await steamService.openInviteDialog(createdLobbyId);
+                            if (!inviteResult.success) {
+                                pushSteamDiagnosticsEvent('Steam invite dialog failed, falling back to Friends overlay.', {
+                                    status: 'Invite dialog fallback',
+                                    lastError: inviteResult.error || 'Steam invite dialog unavailable.',
+                                });
+                                console.warn('[App] Failed to open Steam invite dialog, falling back to Friends overlay.', inviteResult.error);
+                                steamService.activateOverlay('Friends');
+                            } else {
+                                pushSteamDiagnosticsEvent('Steam invite dialog opened.', {
+                                    status: 'Steam invite dialog open',
+                                });
+                            }
                         }
 
                         return {
@@ -788,27 +1001,43 @@ function App() {
                         .then(res => {
                             if (res.success) {
                                 console.log('[App] Steam Lobby Created:', res.lobbyId);
+                                pushSteamDiagnosticsEvent('Steam lobby host flow completed.', {
+                                    status: 'Waiting for invited players',
+                                });
                             } else {
                                 setSteamLobbyId(null);
+                                setSteamLobbyRole(null);
                                 steamService.setRichPresence('connect', null);
                                 if (ipc?.invoke) {
                                     void ipc.invoke('network:close-public-tunnel');
                                 }
+                                pushSteamDiagnosticsEvent('Steam lobby creation failed.', {
+                                    route: 'idle',
+                                    status: 'Steam lobby failed',
+                                    lastError: res.error || 'Unknown Steam lobby creation error.',
+                                });
                                 console.error('[App] Failed to create Steam Lobby:', res.error);
                                 alert(`Failed to create Steam Lobby: ${res.error || 'Unknown error'}`);
                             }
                         })
-                        .catch((err: any) => {
+                        .catch((err: unknown) => {
                             setSteamLobbyId(null);
+                            setSteamLobbyRole(null);
                             steamService.setRichPresence('connect', null);
                             if (ipc?.invoke) {
                                 void ipc.invoke('network:close-public-tunnel');
                             }
+                            pushSteamDiagnosticsEvent('Steam lobby host setup threw an error.', {
+                                route: 'idle',
+                                status: 'Steam lobby setup failed',
+                                lastError: getErrorMessage(err),
+                            });
                             console.error('[App] Steam lobby host setup failed:', err);
-                            alert(`Failed to create Steam Lobby: ${err?.message || 'Unknown error'}`);
+                            alert(`Failed to create Steam Lobby: ${getErrorMessage(err)}`);
                         })
                         .finally(() => {
                             setCreatingSteamLobby(false);
+                            setIsRankedQueueing(false);
                         });
                 } else {
                     // Check if we are just joining?
@@ -851,19 +1080,40 @@ function App() {
             clientMatchState.current = 'IN_MATCH';
             setGameStatus('playing');
             setIsPlaying(true);
+            pushSteamDiagnosticsEvent('Match started.', {
+                status: 'Match in progress',
+            });
         }
         const handleStartFailed = (data: { reason: string }) => {
             console.warn('[CLIENT] MATCH_START_FAILED:', data.reason);
             clientMatchState.current = 'LOBBY';
             setGameStatus('waiting');
+            pushSteamDiagnosticsEvent('Match start failed.', {
+                status: 'Match start failed',
+                lastError: data.reason,
+            });
             alert(`Failed to start match: ${data.reason}`);
-        }
+        };
+
+        const handleRoomJoinFailed = (data: { reason?: string }) => {
+            clientMatchState.current = 'LOBBY';
+            setGameStatus('waiting');
+            setIsPlaying(false);
+            setIsRankedQueueing(false);
+            pushSteamDiagnosticsEvent('Room join failed after transport connection.', {
+                status: 'Room join failed',
+                lastError: data.reason || 'Failed to join room.',
+            });
+            void leaveActiveSteamLobby();
+            alert(data.reason || 'Failed to join room.');
+        };
 
         socket.on('joinedRoom', handleJoinedRoom);
         socket.on('gameStatus', handleGameStatus);
         socket.on('votingUpdate', handleVoting);
         socket.on('gameStarted', handleStarted);
         socket.on('MATCH_START_FAILED', handleStartFailed);
+        socket.on('ROOM_JOIN_FAILED', handleRoomJoinFailed);
 
         // Load initial save data
         const loadSave = async () => {
@@ -900,6 +1150,11 @@ function App() {
                         achievementUnlocksRef.current = loadedAchievements;
                         setAchievementUnlocks(loadedAchievements);
                     }
+                    if (res.data.skins !== undefined) {
+                        const loadedSkinsProfile = normalizePlayerSkinProfile(res.data.skins);
+                        skinsProfileRef.current = loadedSkinsProfile;
+                        setSkinsProfile(loadedSkinsProfile);
+                    }
                 } else if (backupStatistics) {
                     statisticsRef.current = backupStatistics;
                     setStatistics(backupStatistics);
@@ -917,6 +1172,7 @@ function App() {
             socket.off('votingUpdate', handleVoting);
             socket.off('gameStarted', handleStarted);
             socket.off('MATCH_START_FAILED', handleStartFailed);
+            socket.off('ROOM_JOIN_FAILED', handleRoomJoinFailed);
         };
     }, [ipc]); // Dependency on ipc to ensure it runs when available
 
@@ -934,28 +1190,81 @@ function App() {
         achievementUnlocksRef.current = achievementUnlocks;
     }, [achievementUnlocks]);
 
-    // --- Steam Integration ---
-    const [steamError, setSteamError] = useState<string | null>(null);
-    const [steamUser, setSteamUser] = useState<{ name: string, steamId: string } | null>(null);
-    const [steamLobbyId, setSteamLobbyId] = useState<string | null>(null);
-    const [creatingSteamLobby, setCreatingSteamLobby] = useState(false);
-    const creatingSteamLobbyRef = useRef(false);
+    useEffect(() => {
+        skinsProfileRef.current = skinsProfile;
+        (window as Window & { agSkinLoadout?: PlayerSkinProfile['loadout'] }).agSkinLoadout = skinsProfile.loadout;
+        window.dispatchEvent(new CustomEvent('ag:skin-loadout-changed', { detail: skinsProfile.loadout }));
+    }, [skinsProfile]);
+
+    useEffect(() => {
+        if (!didLoadSave) {
+            return;
+        }
+
+        const sanitizedProfile = sanitizeSkinProfile(skinsProfileRef.current, unlockedSkinIds);
+        const unitChanged = sanitizedProfile.loadout.unitSkinId !== skinsProfileRef.current.loadout.unitSkinId;
+        const buildingChanged = sanitizedProfile.loadout.buildingSkinId !== skinsProfileRef.current.loadout.buildingSkinId;
+
+        if (!unitChanged && !buildingChanged) {
+            return;
+        }
+
+        void commitSkinsProfile(sanitizedProfile);
+    }, [didLoadSave, unlockedSkinIds]);
 
     useEffect(() => {
         creatingSteamLobbyRef.current = creatingSteamLobby;
     }, [creatingSteamLobby]);
 
+    const closeActiveSteamRelayConnection = async () => {
+        const activeRelaySessionId = activeSteamRelaySessionRef.current;
+        activeSteamRelaySessionRef.current = null;
+
+        if (!activeRelaySessionId || !steamService.isInitialized) {
+            return;
+        }
+
+        const result = await steamService.closeRelayConnection(activeRelaySessionId);
+        if (!result.success) {
+            console.warn('[App] Failed to close Steam relay session cleanly.', result.error);
+            pushSteamDiagnosticsEvent('Steam relay session failed to close cleanly.', {
+                relaySessionId: null,
+                lastError: result.error || 'Steam relay close failed.',
+                status: 'Relay close warning',
+            });
+            return;
+        }
+
+        pushSteamDiagnosticsEvent('Closed active Steam relay session.', {
+            relaySessionId: null,
+            status: 'Relay session closed',
+        });
+    };
+
     const leaveActiveSteamLobby = async () => {
         const activeLobbyId = steamLobbyId;
 
+        pendingSteamLobbyConfigRef.current = null;
         setSteamLobbyId(null);
+        setSteamLobbyRole(null);
+        setIsRankedQueueing(false);
         steamService.setRichPresence('connect', null);
+        await closeActiveSteamRelayConnection();
+        pushSteamDiagnosticsEvent('Leaving active Steam lobby.', {
+            lobbyId: null,
+            route: 'idle',
+            status: 'Leaving Steam lobby',
+        });
 
         if (ipc?.invoke) {
             try {
                 await ipc.invoke('network:close-public-tunnel');
             } catch (error) {
                 console.warn('[App] Failed to close public tunnel cleanly.', error);
+                pushSteamDiagnosticsEvent('Public tunnel close reported a warning.', {
+                    lastError: getErrorMessage(error),
+                    status: 'Tunnel close warning',
+                });
             }
         }
 
@@ -966,7 +1275,16 @@ function App() {
         const result = await steamService.leaveLobby(activeLobbyId);
         if (!result.success) {
             console.warn('[App] Failed to leave active Steam lobby cleanly.', result.error);
+            pushSteamDiagnosticsEvent('Steam lobby leave reported a warning.', {
+                lastError: result.error || 'Steam lobby leave failed.',
+                status: 'Steam lobby leave warning',
+            });
+            return;
         }
+
+        pushSteamDiagnosticsEvent('Steam lobby left cleanly.', {
+            status: 'Steam lobby closed',
+        });
     };
 
     const handleLeaveToMenu = async () => {
@@ -998,20 +1316,7 @@ function App() {
             }
         }
 
-        if (options?.preferPublicTunnel && ipc?.invoke) {
-            const tunnelResult = await ipc.invoke('network:ensure-public-tunnel', { port: fallbackPort });
-            const publicEndpoint = normalizeNetworkEndpoint(tunnelResult?.endpoint);
-
-            if (!tunnelResult?.success || !publicEndpoint) {
-                console.error('[App] Failed to provision public tunnel for Steam hosting.', tunnelResult?.error);
-                return null;
-            }
-
-            socket.emit('set_tunnel_url', publicEndpoint);
-            return publicEndpoint;
-        }
-
-        return await new Promise((resolve) => {
+        const discoverExistingEndpoint = async () => await new Promise<string | null>((resolve) => {
             let settled = false;
             let timeoutId = 0;
 
@@ -1042,6 +1347,365 @@ function App() {
 
             timeoutId = window.setTimeout(() => finish(null), 1200);
         });
+
+        if (options?.preferPublicTunnel && ipc?.invoke) {
+            try {
+                const tunnelResult = await ipc.invoke('network:ensure-public-tunnel', { port: fallbackPort });
+                const publicEndpoint = normalizeNetworkEndpoint(tunnelResult?.endpoint);
+
+                if (tunnelResult?.success && publicEndpoint) {
+                    socket.emit('set_tunnel_url', publicEndpoint);
+                    pushSteamDiagnosticsEvent('Resolved public host endpoint for Steam lobby.', {
+                        endpoint: publicEndpoint,
+                        status: 'Public host endpoint ready',
+                    });
+                    return publicEndpoint;
+                }
+
+                pushSteamDiagnosticsEvent('Public tunnel unavailable, falling back to direct endpoint discovery.', {
+                    status: 'Tunnel fallback',
+                    lastError: tunnelResult?.error || 'No tunnel endpoint returned.',
+                });
+                console.warn(
+                    '[App] Public tunnel unavailable for Steam hosting. Falling back to LAN/local endpoint.',
+                    tunnelResult?.error || 'No tunnel endpoint returned.'
+                );
+            } catch (error) {
+                pushSteamDiagnosticsEvent('Public tunnel provisioning threw, falling back to direct endpoint discovery.', {
+                    status: 'Tunnel fallback',
+                    lastError: getErrorMessage(error),
+                });
+                console.warn('[App] Public tunnel provisioning threw. Falling back to LAN/local endpoint.', error);
+            }
+        }
+
+        const discoveredEndpoint = await discoverExistingEndpoint();
+        if (discoveredEndpoint || fallbackEndpoint) {
+            pushSteamDiagnosticsEvent('Resolved fallback host endpoint for Steam lobby.', {
+                endpoint: discoveredEndpoint || fallbackEndpoint || null,
+                status: 'Fallback host endpoint ready',
+            });
+        }
+        return discoveredEndpoint || fallbackEndpoint || null;
+    };
+
+    const fetchSteamLobbyDataWithRetry = async (
+        lobbyId: string,
+        attempts: number = 5,
+        delayMs: number = 1000
+    ) => {
+        let lastResult: Awaited<ReturnType<typeof steamService.getLobbyData>> = {
+            success: false,
+            error: 'Steam lobby lookup did not run.',
+        };
+
+        for (let attempt = 0; attempt < attempts; attempt += 1) {
+            lastResult = await steamService.getLobbyData(lobbyId);
+            if (lastResult.success && lastResult.roomId && (lastResult.endpoint || lastResult.hostSteamId)) {
+                return lastResult;
+            }
+
+            if (attempt < attempts - 1) {
+                await delay(delayMs);
+            }
+        }
+
+        return lastResult;
+    };
+
+    const connectToSteamEndpointWithRetry = async (
+        endpoint: string,
+        attempts: number = 4,
+        timeoutMs: number = 12000,
+        delayMs: number = 1500
+    ) => {
+        let lastResult: { success: boolean; error?: string } = {
+            success: false,
+            error: 'Connection attempt did not run.',
+        };
+
+        for (let attempt = 0; attempt < attempts; attempt += 1) {
+            lastResult = await connectToServer(endpoint, timeoutMs);
+            if (lastResult.success) {
+                return lastResult;
+            }
+
+            if (attempt < attempts - 1) {
+                await delay(delayMs);
+            }
+        }
+
+        return lastResult;
+    };
+
+    const joinSteamLobbyById = async (
+        lobbyId: string,
+        options?: { suppressAlert?: boolean }
+    ): Promise<boolean> => {
+        console.log('[App] Joining Steam Lobby:', lobbyId);
+        await closeActiveSteamRelayConnection();
+        pushSteamDiagnosticsEvent('Starting Steam lobby join.', {
+            flow: isRankedQueueing ? 'ranked' : 'joining',
+            route: 'pending',
+            lobbyId,
+            roomId: null,
+            hostSteamId: null,
+            endpoint: null,
+            relaySessionId: null,
+            lastError: null,
+            status: 'Reading Steam lobby data',
+        });
+        const data = await fetchSteamLobbyDataWithRetry(lobbyId);
+        if (!data.success || !data.roomId) {
+            pushSteamDiagnosticsEvent('Steam lobby metadata lookup failed.', {
+                status: 'Steam lobby lookup failed',
+                lastError: data.error || 'Steam lobby metadata unavailable.',
+            });
+            console.error('[App] Failed to get room from Steam Lobby', data.error);
+            if (!options?.suppressAlert) {
+                alert('Failed to join Steam Lobby: ' + (data.error || 'Unknown error'));
+            }
+            return false;
+        }
+
+        pushSteamDiagnosticsEvent('Steam lobby metadata loaded.', {
+            lobbyId: String(data.lobbyId || lobbyId),
+            roomId: data.roomId,
+            hostSteamId: data.hostSteamId || null,
+            endpoint: data.endpoint || null,
+            status: 'Steam lobby resolved',
+        });
+
+        const connectionCandidates: Array<{
+            label: 'steam-relay' | 'direct-endpoint';
+            endpoint: string;
+            sessionId?: string;
+        }> = [];
+        let relayPreparationError: string | null = null;
+
+        if (data.hostSteamId) {
+            pushSteamDiagnosticsEvent('Preparing Steam relay session from lobby host metadata.', {
+                hostSteamId: data.hostSteamId,
+                status: 'Preparing Steam relay',
+            });
+            const relayResult = await steamService.prepareRelayConnection(data.hostSteamId);
+            if (relayResult.success && relayResult.endpoint && relayResult.sessionId) {
+                pushSteamDiagnosticsEvent('Steam relay session prepared.', {
+                    route: 'steam-relay',
+                    endpoint: relayResult.endpoint,
+                    relaySessionId: relayResult.sessionId,
+                    status: 'Steam relay ready',
+                });
+                connectionCandidates.push({
+                    label: 'steam-relay',
+                    endpoint: relayResult.endpoint,
+                    sessionId: relayResult.sessionId,
+                });
+            } else if (relayResult.error) {
+                relayPreparationError = relayResult.error;
+                pushSteamDiagnosticsEvent('Steam relay preparation failed, direct endpoint fallback will be tried if available.', {
+                    route: 'pending',
+                    status: 'Steam relay failed',
+                    lastError: relayResult.error,
+                });
+                console.warn('[App] Steam relay preparation failed, falling back to direct endpoint if available.', relayResult.error);
+            }
+        }
+
+        const endpoint = normalizeNetworkEndpoint(data.endpoint);
+        if (endpoint) {
+            connectionCandidates.push({
+                label: 'direct-endpoint',
+                endpoint,
+            });
+        }
+
+        if (connectionCandidates.length === 0) {
+            pushSteamDiagnosticsEvent('No usable Steam join path was available from lobby metadata.', {
+                route: 'idle',
+                status: 'No join path available',
+            });
+            if (!options?.suppressAlert) {
+                const reason = relayPreparationError
+                    ? `Steam relay failed: ${relayPreparationError}`
+                    : 'Host endpoint is missing in this Steam lobby. Ask the host to recreate it.';
+                alert(reason);
+            }
+            return false;
+        }
+
+        let activeConnection:
+            | { label: 'steam-relay' | 'direct-endpoint'; endpoint: string; sessionId?: string }
+            | null = null;
+        let lastConnectionError = relayPreparationError || 'Connection attempt did not run.';
+
+        for (const candidate of connectionCandidates) {
+            pushSteamDiagnosticsEvent(
+                candidate.label === 'steam-relay'
+                    ? 'Attempting Steam relay connection.'
+                    : 'Attempting direct host endpoint connection.',
+                {
+                    route: candidate.label,
+                    endpoint: candidate.endpoint,
+                    relaySessionId: candidate.sessionId || null,
+                    status: candidate.label === 'steam-relay' ? 'Connecting through Steam relay' : 'Connecting directly to host endpoint',
+                }
+            );
+            const connectionResult = await connectToSteamEndpointWithRetry(candidate.endpoint);
+            if (connectionResult.success) {
+                activeConnection = candidate;
+                pushSteamDiagnosticsEvent(
+                    candidate.label === 'steam-relay'
+                        ? 'Steam relay connection established.'
+                        : 'Direct host endpoint connection established.',
+                    {
+                        route: candidate.label,
+                        status: candidate.label === 'steam-relay' ? 'Steam relay connected' : 'Direct endpoint connected',
+                    }
+                );
+                break;
+            }
+
+            lastConnectionError = connectionResult.error || `${candidate.label} failed`;
+            pushSteamDiagnosticsEvent(
+                candidate.label === 'steam-relay'
+                    ? 'Steam relay connection attempt failed.'
+                    : 'Direct host endpoint connection attempt failed.',
+                {
+                    route: candidate.label,
+                    status: candidate.label === 'steam-relay' ? 'Steam relay connect failed' : 'Direct endpoint connect failed',
+                    lastError: lastConnectionError,
+                }
+            );
+            console.warn('[App] Failed to connect through Steam lobby candidate.', candidate.label, candidate.endpoint, connectionResult.error);
+
+            if (candidate.sessionId) {
+                const relayCloseResult = await steamService.closeRelayConnection(candidate.sessionId);
+                if (!relayCloseResult.success) {
+                    console.warn('[App] Failed to close unsuccessful Steam relay session cleanly.', relayCloseResult.error);
+                }
+            }
+        }
+
+        if (!activeConnection) {
+            pushSteamDiagnosticsEvent('All Steam join paths failed.', {
+                route: 'idle',
+                status: 'Steam join failed',
+                lastError: lastConnectionError,
+            });
+            if (!options?.suppressAlert) {
+                alert(`Failed to connect to host endpoint: ${lastConnectionError}`);
+            }
+            return false;
+        }
+
+        activeSteamRelaySessionRef.current = activeConnection.sessionId || null;
+
+        const activeLobbyId = String(data.lobbyId || lobbyId);
+        const ranked = Boolean(data.ranked || data.queueType === RANKED_QUICK_QUEUE_TYPE);
+        console.log('[App] Steam Lobby mapped to Room:', data.roomId, 'Endpoint:', activeConnection.endpoint, 'Mode:', activeConnection.label);
+        setIsLocalMode(false);
+        setMatchStatsSource('steam');
+        setIsRankedMatch(ranked);
+        setSteamLobbyRole('guest');
+        setSteamLobbyId(activeLobbyId);
+        steamService.setRichPresence('connect', `+connect_lobby ${activeLobbyId}`);
+        setLastJoinedRoom(data.roomId);
+        socket.emit('joinByCode', data.roomId);
+        pushSteamDiagnosticsEvent('Steam lobby join finished and room join was requested.', {
+            route: activeConnection.label,
+            lobbyId: activeLobbyId,
+            roomId: data.roomId,
+            hostSteamId: data.hostSteamId || null,
+            endpoint: activeConnection.endpoint,
+            relaySessionId: activeConnection.sessionId || null,
+            status: `Joined via ${activeConnection.label === 'steam-relay' ? 'Steam relay' : 'direct endpoint'}`,
+            lastError: null,
+        });
+        setIsPlaying(true);
+        setIsRankedQueueing(false);
+        return true;
+    };
+
+    const startRankedQuickMatch = async () => {
+        if (!steamUser || !steamService.isInitialized) {
+            alert('Steam is required for ranked quick match.');
+            return;
+        }
+
+        setIsCampaignMode(false);
+        setIsTutorialMode(false);
+        setIsLocalMode(false);
+        setMatchStatsSource('steam');
+        setIsRankedMatch(true);
+        pushSteamDiagnosticsEvent('Starting ranked quick match search.', {
+            flow: 'ranked',
+            route: 'pending',
+            status: 'Searching ranked Steam lobbies',
+            lobbyId: null,
+            roomId: null,
+            endpoint: null,
+            relaySessionId: null,
+            lastError: null,
+        });
+
+        await leaveActiveSteamLobby();
+        setIsRankedQueueing(true);
+
+        const lobbyResult = await steamService.listLobbies({
+            queueType: RANKED_QUICK_QUEUE_TYPE,
+            status: 'waiting',
+            requireOpenSlot: true,
+            maxResults: 12,
+        });
+
+        if (lobbyResult.success) {
+            pushSteamDiagnosticsEvent(`Steam lobby search returned ${lobbyResult.lobbies.length} ranked candidates.`, {
+                status: 'Ranked lobby search complete',
+            });
+            for (const candidate of lobbyResult.lobbies) {
+                if (!candidate.lobbyId) continue;
+                const joined = await joinSteamLobbyById(candidate.lobbyId, { suppressAlert: true });
+                if (joined) {
+                    pushSteamDiagnosticsEvent('Joined an existing ranked Steam lobby.', {
+                        flow: 'ranked',
+                    });
+                    return;
+                }
+            }
+        } else {
+            pushSteamDiagnosticsEvent('Ranked Steam lobby search failed.', {
+                status: 'Ranked lobby search failed',
+                lastError: lobbyResult.error || 'Steam lobby search failed.',
+            });
+            console.warn('[App] Steam ranked quick match lobby search failed.', lobbyResult.error);
+        }
+
+        pendingSteamLobbyConfigRef.current = {
+            lobbyVisibility: 'public',
+            maxMembers: RANKED_QUICK_MATCH_PLAYER_COUNT,
+            map: 'Random',
+            mode: 'Ranked Quick Match',
+            openInviteDialog: false,
+            ranked: true,
+            metadata: {
+                ag_queue: RANKED_QUICK_QUEUE_TYPE,
+                ag_status: 'waiting',
+                ag_required_players: RANKED_QUICK_MATCH_PLAYER_COUNT,
+                ag_ranked: true,
+            },
+        };
+        creatingSteamLobbyRef.current = true;
+        setCreatingSteamLobby(true);
+        pushSteamDiagnosticsEvent('No ranked candidate was joinable, hosting a new ranked Steam lobby.', {
+            flow: 'ranked',
+            status: 'Hosting ranked Steam lobby',
+        });
+        await quickJoin('random', true, 'steam', {
+            queueType: RANKED_QUICK_QUEUE_TYPE,
+            requiredPlayers: RANKED_QUICK_MATCH_PLAYER_COUNT,
+            ranked: true,
+        });
     };
 
     useEffect(() => {
@@ -1052,46 +1716,25 @@ function App() {
             // Set Rich Presence to Main Menu
             steamService.setRichPresence('steam_display', '#Status_MainMenu');
             steamService.setRichPresence('connect', null);
+            pushSteamDiagnosticsEvent(`Steam initialized for ${user.name}.`, {
+                status: 'Steam ready',
+                lastError: null,
+            });
         };
 
         const onSteamError = (err: string) => {
             console.error('[App] Steam Error:', err);
+            pushSteamDiagnosticsEvent('Steam initialization error reported.', {
+                status: 'Steam unavailable',
+                lastError: err,
+            });
             if (!isDevBypass) {
                 setSteamError(err);
             }
         };
 
         const onJoinLobby = async (lobbyId: string) => {
-            console.log('[App] Joining Steam Lobby:', lobbyId);
-            const data = await steamService.getLobbyData(lobbyId);
-            if (!data.success || !data.roomId) {
-                console.error('[App] Failed to get room from Steam Lobby', data.error);
-                alert('Failed to join Steam Lobby: ' + (data.error || 'Unknown error'));
-                return;
-            }
-
-            const endpoint = normalizeNetworkEndpoint(data.endpoint);
-            if (!endpoint) {
-                alert('Host endpoint is missing in this Steam lobby. Ask the host to recreate it.');
-                return;
-            }
-
-            const connectionResult = await connectToServer(endpoint);
-            if (!connectionResult.success) {
-                console.error('[App] Failed to connect to Steam host endpoint', endpoint, connectionResult.error);
-                alert(`Failed to connect to host endpoint: ${connectionResult.error || endpoint}`);
-                return;
-            }
-
-            const activeLobbyId = String(data.lobbyId || lobbyId);
-            console.log('[App] Steam Lobby mapped to Room:', data.roomId, 'Endpoint:', endpoint);
-            setIsLocalMode(false);
-            setMatchStatsSource('steam');
-            setSteamLobbyId(activeLobbyId);
-            steamService.setRichPresence('connect', `+connect_lobby ${activeLobbyId}`);
-            setLastJoinedRoom(data.roomId);
-            socket.emit('joinByCode', data.roomId);
-            setIsPlaying(true);
+            await joinSteamLobbyById(lobbyId);
         };
 
         steamService.on('initialized', onSteamInit);
@@ -1112,6 +1755,19 @@ function App() {
             steamService.off('join-lobby', onJoinLobby);
         };
     }, [isDevBypass]);
+
+    useEffect(() => {
+        if (!steamLobbyId || !steamService.isInitialized || steamLobbyRole !== 'host') {
+            return;
+        }
+
+        void steamService.updateActiveLobbyData({
+            ag_status: gameStatus,
+            ag_queue: isRankedMatch ? RANKED_QUICK_QUEUE_TYPE : 'friends_hosted',
+            ag_required_players: isRankedMatch ? RANKED_QUICK_MATCH_PLAYER_COUNT : undefined,
+            ag_ranked: isRankedMatch,
+        });
+    }, [gameStatus, isRankedMatch, steamLobbyId, steamLobbyRole]);
 
     useEffect(() => {
         if (!didLoadSave || !steamUser || !steamService.isInitialized) {
@@ -1242,17 +1898,33 @@ function App() {
     };
 
 
-    const quickJoin = async (mapType: string = 'random', forceNew: boolean = false, source: MatchSource = 'lan') => {
+    const quickJoin = async (
+        mapType: string = 'random',
+        forceNew: boolean = false,
+        source: MatchSource = 'lan',
+        options?: {
+            queueType?: 'standard' | 'ranked_quick_match';
+            requiredPlayers?: number;
+            ranked?: boolean;
+        }
+    ) => {
         if (!(await bootstrapLocalEngine())) {
             creatingSteamLobbyRef.current = false;
             setCreatingSteamLobby(false);
+            setIsRankedQueueing(false);
             alert('Failed to start the local game engine. Please restart the game.');
             return;
         }
 
         setIsLocalMode(false);
         setMatchStatsSource(source);
-        socket.emit('quickJoin', { mapType, forceNew });
+        setIsRankedMatch(Boolean(options?.ranked));
+        socket.emit('quickJoin', {
+            mapType,
+            forceNew,
+            queueType: options?.queueType,
+            requiredPlayers: options?.requiredPlayers,
+        });
         setIsPlaying(true);
     };
 
@@ -1265,6 +1937,8 @@ function App() {
             if (result.success) {
                 setIsLocalMode(false);
                 setMatchStatsSource('lan');
+                setIsRankedMatch(false);
+                setSteamLobbyRole(null);
                 setIsPlaying(true);
                 setLastJoinedRoom(code);
             } else {
@@ -1276,6 +1950,8 @@ function App() {
             }
             setIsLocalMode(false);
             setMatchStatsSource('lan');
+            setIsRankedMatch(false);
+            setSteamLobbyRole(null);
             socket.emit('joinByCode', code);
             setIsPlaying(true);
             setLastJoinedRoom(code);
@@ -1292,6 +1968,8 @@ function App() {
         setIsTutorialMode(false);
         setIsLocalMode(false);
         setMatchStatsSource('lan');
+        setIsRankedMatch(false);
+        setSteamLobbyRole(null);
         setIsPlaying(true);
 
         socket.emit('quickJoin', {
@@ -1491,6 +2169,8 @@ function App() {
         setShowCampaignModal(null);
         setGameStatus('playing');
         setIsLocalMode(true);
+        setIsRankedMatch(false);
+        setSteamLobbyRole(null);
 
         // Trigger Save
         triggerSave({ campaignLevel: levelIndex });
@@ -1522,6 +2202,8 @@ function App() {
         setIsTutorialMode(false);
         setIsLocalMode(true);
         setMatchStatsSource('custom');
+        setIsRankedMatch(false);
+        setSteamLobbyRole(null);
 
         if (!(await bootstrapLocalEngine())) {
             setIsLocalMode(false);
@@ -1566,6 +2248,38 @@ function App() {
         void unlockAchievementById('TUTORIAL_GRADUATE');
     };
 
+    const steamDiagnosticsRouteLabel = useMemo(() => {
+        switch (steamDiagnostics.route) {
+            case 'steam-relay':
+                return 'Steam Relay';
+            case 'direct-endpoint':
+                return 'Direct Endpoint';
+            case 'pending':
+                return 'Pending';
+            default:
+                return 'Idle';
+        }
+    }, [steamDiagnostics.route]);
+
+    const steamDiagnosticsFlowLabel = useMemo(() => {
+        switch (steamDiagnostics.flow) {
+            case 'hosting':
+                return 'Hosting';
+            case 'joining':
+                return 'Joining';
+            case 'ranked':
+                return 'Ranked';
+            default:
+                return 'Idle';
+        }
+    }, [steamDiagnostics.flow]);
+
+    const showSteamDiagnosticsPanel = steamService.isInitialized
+        || Boolean(steamDiagnostics.lastError)
+        || steamDiagnostics.events.length > 0
+        || steamDiagnostics.route !== 'idle'
+        || steamDiagnostics.flow !== 'idle';
+
     return (
         <div className="App">
             <GameCanvas />
@@ -1602,7 +2316,7 @@ function App() {
                         </span>
                     </button>
 
-                    <div className={`menu ${menuView === 'statistics' ? 'menu--statistics' : ''}`}>
+                    <div className={`menu ${menuView === 'statistics' ? 'menu--statistics' : ''} ${menuView === 'skins' ? 'menu--skins' : ''}`}>
                         <h1 className="menu-title-accessible">Conquerors: Dominion</h1>
                         <LobbyLogo />
 
@@ -1624,6 +2338,7 @@ function App() {
                         <div className="menu-column menu-main-actions">
                             <button onClick={() => setMenuView('multiplayer')} className="menu-btn menu-btn-main">Multiplayer</button>
                             <button onClick={() => setMenuView('campaign')} className="menu-btn menu-btn-main" disabled={!isLocalEngineReady}>Campaign & Custom</button>
+                            <button onClick={() => setMenuView('skins')} className="menu-btn menu-btn-main">Skins</button>
                             <button onClick={() => setMenuView('statistics')} className="menu-btn menu-btn-main">Stats & Achievements</button>
                         </div>
                     )}
@@ -1635,6 +2350,26 @@ function App() {
                             <p className="menu-section-copy">
                                 Host on your local network, invite Steam friends, or route the match onto the public internet.
                             </p>
+
+                            <section className="menu-feature-card menu-feature-card--ranked-hero">
+                                <div className="menu-feature-card__header">
+                                    <div>
+                                        <div className="menu-feature-card__badge menu-feature-card__badge--ranked">Ranked</div>
+                                        <h4 className="menu-feature-card__title">Quick Match</h4>
+                                    </div>
+                                    <div className="ranked-points-chip">{statistics.rankedProgress.points} RP</div>
+                                </div>
+                                <p className="menu-feature-card__copy">
+                                    Queue into a Steam-backed 6-player free-for-all. The match starts once all 6 commanders are present, and placements award +25, +12, +6, -10, -15, and -20 RP.
+                                </p>
+                                <button
+                                    onClick={startRankedQuickMatch}
+                                    className="menu-btn menu-btn-ranked menu-btn-feature"
+                                    disabled={!steamUser || !isLocalEngineReady || isRankedQueueing}
+                                >
+                                    {isRankedQueueing ? 'Queueing Ranked Match...' : 'Quick Match'}
+                                </button>
+                            </section>
 
                             <div className="multiplayer-grid">
                                 <section className="menu-feature-card">
@@ -1672,9 +2407,36 @@ function App() {
                                                 alert("Steam is required to host a Steam Lobby.");
                                                 return;
                                             }
+                                            pushSteamDiagnosticsEvent('Preparing friends-only Steam lobby host flow.', {
+                                                flow: 'hosting',
+                                                route: 'pending',
+                                                status: 'Preparing Steam host',
+                                                lobbyId: null,
+                                                roomId: null,
+                                                endpoint: null,
+                                                relaySessionId: null,
+                                                lastError: null,
+                                            });
                                             await leaveActiveSteamLobby();
+                                            pendingSteamLobbyConfigRef.current = {
+                                                lobbyVisibility: 'friends',
+                                                maxMembers: 10,
+                                                map: 'Random',
+                                                mode: 'Standard',
+                                                openInviteDialog: true,
+                                                ranked: false,
+                                                metadata: {
+                                                    ag_queue: 'friends_hosted',
+                                                    ag_status: 'waiting',
+                                                    ag_ranked: false,
+                                                },
+                                            };
+                                            creatingSteamLobbyRef.current = true;
                                             setCreatingSteamLobby(true);
-                                            await quickJoin('random', true, 'steam');
+                                            await quickJoin('random', true, 'steam', {
+                                                queueType: 'standard',
+                                                ranked: false,
+                                            });
                                         }}
                                         className="menu-btn menu-btn-steam menu-btn-feature"
                                         disabled={!isLocalEngineReady}
@@ -1723,6 +2485,75 @@ function App() {
                                     <button onClick={handleJoinWithCode} className="menu-btn menu-btn-main menu-btn-compact">Join</button>
                                 </div>
                             </section>
+
+                            {showSteamDiagnosticsPanel && (
+                                <section className="menu-feature-card menu-feature-card--steam-diagnostics">
+                                    <div className="menu-feature-card__header">
+                                        <div>
+                                            <div className="menu-feature-card__badge menu-feature-card__badge--steam">Steam</div>
+                                            <h4 className="menu-feature-card__title">Multiplayer Diagnostics</h4>
+                                        </div>
+                                        <div className="steam-diagnostics-status-chip">{steamDiagnostics.status}</div>
+                                    </div>
+                                    <div className="steam-diagnostics-grid">
+                                        <div className="steam-diagnostics-row">
+                                            <span>Flow</span>
+                                            <strong>{steamDiagnosticsFlowLabel}</strong>
+                                        </div>
+                                        <div className="steam-diagnostics-row">
+                                            <span>Route</span>
+                                            <strong>{steamDiagnosticsRouteLabel}</strong>
+                                        </div>
+                                        <div className="steam-diagnostics-row">
+                                            <span>Socket Phase</span>
+                                            <strong>{steamDiagnostics.connectionPhase}</strong>
+                                        </div>
+                                        <div className="steam-diagnostics-row">
+                                            <span>Lobby ID</span>
+                                            <strong>{steamDiagnostics.lobbyId || 'None'}</strong>
+                                        </div>
+                                        <div className="steam-diagnostics-row">
+                                            <span>Room ID</span>
+                                            <strong>{steamDiagnostics.roomId || 'None'}</strong>
+                                        </div>
+                                        <div className="steam-diagnostics-row">
+                                            <span>Relay Session</span>
+                                            <strong>{steamDiagnostics.relaySessionId || 'None'}</strong>
+                                        </div>
+                                    </div>
+                                    <div className="steam-diagnostics-field">
+                                        <span>Host Steam ID</span>
+                                        <code>{steamDiagnostics.hostSteamId || 'Unavailable'}</code>
+                                    </div>
+                                    <div className="steam-diagnostics-field">
+                                        <span>Connection URL</span>
+                                        <code>{steamDiagnostics.connectionUrl || 'Unavailable'}</code>
+                                    </div>
+                                    <div className="steam-diagnostics-field">
+                                        <span>Join Endpoint</span>
+                                        <code>{steamDiagnostics.endpoint || 'Unavailable'}</code>
+                                    </div>
+                                    <div className={`steam-diagnostics-field ${steamDiagnostics.lastError ? 'steam-diagnostics-field--error' : ''}`}>
+                                        <span>Last Error</span>
+                                        <code>{steamDiagnostics.lastError || 'None'}</code>
+                                    </div>
+                                    <div className="steam-diagnostics-log">
+                                        <div className="steam-diagnostics-log__title">Recent Events</div>
+                                        {steamDiagnostics.events.length > 0 ? (
+                                            <div className="steam-diagnostics-log__list">
+                                                {steamDiagnostics.events.map((event) => (
+                                                    <div key={event.id} className="steam-diagnostics-log__entry">
+                                                        <span>{event.at}</span>
+                                                        <span>{event.message}</span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        ) : (
+                                            <div className="steam-diagnostics-log__empty">No Steam multiplayer events yet.</div>
+                                        )}
+                                    </div>
+                                </section>
+                            )}
 
                             <button onClick={() => setMenuView('main')} className="menu-btn secondary">Back</button>
                         </div>
@@ -1949,6 +2780,21 @@ function App() {
                         </div>
                     )}
 
+                    {menuView === 'skins' && (
+                        <div className="menu-column menu-column--skins">
+                            <h3 className="menu-section-title">Skins</h3>
+                            <SkinsPanel
+                                profile={skinsProfile}
+                                unlockedSkinIds={unlockedSkinIds}
+                                unlockedAchievementCount={unlockedAchievementCount}
+                                totalAchievementCount={totalAchievementCount}
+                                showDeveloperSkin={hasDeveloperSkinAccess}
+                                onEquip={handleEquipSkin}
+                            />
+                            <button onClick={() => setMenuView('main')} className="menu-btn secondary">Back</button>
+                        </div>
+                    )}
+
 
 
                         {lastJoinedRoom && (
@@ -2029,7 +2875,10 @@ function App() {
                     tutorialMapType={selectedTutorialMap}
                     onTutorialObjectivesCompleted={handleTutorialObjectivesCompleted}
                     matchStatsSource={matchStatsSource}
+                    rankedMatch={isRankedMatch}
+                    currentRankedPoints={statistics.rankedProgress.points}
                     steamLobbyId={steamLobbyId}
+                    steamMultiplayerDiagnostics={steamDiagnostics}
                     onMatchResolved={handleMatchResolved}
                 />
 

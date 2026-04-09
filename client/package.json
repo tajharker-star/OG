@@ -19,6 +19,7 @@
     "dist:steam": "npm run build && npm run build-server && node scripts/build-steam-artifacts.mjs && npm run stage:steam && npm run verify:steam-layout && npm run verify:release-binaries && npm run verify:steam-runtime && npm run smoke:packaged-server && npm run smoke:packaged",
     "dist:steam:with-wine": "npm run dist:steam && npm run smoke:windows:wine",
     "build:steam-store-assets": "node scripts/build-steam-store-assets.mjs",
+    "build:steam-news-assets": "node scripts/capture-steam-news-assets.mjs",
     "build:steam-gameplay-assets": "node scripts/capture-steam-gameplay-assets.mjs",
     "build:achievement-icons": "node scripts/build-achievement-icons.mjs",
     "steam:probe:partner": "node scripts/steam-partner-probe.mjs",

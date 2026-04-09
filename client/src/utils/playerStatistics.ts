@@ -1,6 +1,17 @@
 export type MatchSource = 'campaign' | 'custom' | 'lan' | 'steam';
 export type MatchResult = 'win' | 'loss' | 'draw';
 export type StatsBucketKey = 'lifetime' | 'campaign' | 'custom' | 'multiplayer' | 'coop' | 'ranked';
+export const RANKED_QUICK_MATCH_PLAYER_COUNT = 6;
+export const RANKED_DIVISION_SIZE = 100;
+
+const RANKED_POINTS_BY_PLACEMENT: Record<number, number> = {
+    1: 25,
+    2: 12,
+    3: 6,
+    4: -10,
+    5: -15,
+    6: -20,
+};
 
 export interface StatsBucket {
     wins: number;
@@ -18,6 +29,27 @@ export interface MatchStatisticsSummary {
     maxBotDifficulty?: number;
     ranked?: boolean;
     coop?: boolean;
+    rankedPlacement?: number;
+    rankedParticipantCount?: number;
+    rankedPointsDelta?: number;
+    rankedPointsBefore?: number;
+    rankedPointsAfter?: number;
+}
+
+export interface RankedProgress {
+    points: number;
+    bestPoints: number;
+    lastDelta: number;
+    lastPlacement: number | null;
+    lastParticipantCount: number | null;
+}
+
+export interface RankedProgressBarState {
+    points: number;
+    floor: number;
+    ceiling: number;
+    progressPercent: number;
+    tier: number;
 }
 
 export interface PlayerStatistics {
@@ -32,6 +64,7 @@ export interface PlayerStatistics {
     multiplayer: StatsBucket;
     coop: StatsBucket;
     ranked: StatsBucket;
+    rankedProgress: RankedProgress;
     steamSync: {
         available: boolean;
         lastAttemptAt: string | null;
@@ -70,8 +103,69 @@ const createBucket = (): StatsBucket => ({
     bestWinStreak: 0,
 });
 
+const createRankedProgress = (): RankedProgress => ({
+    points: 0,
+    bestPoints: 0,
+    lastDelta: 0,
+    lastPlacement: null,
+    lastParticipantCount: null,
+});
+
+const clampRankedPoints = (value: number): number => Math.max(0, Math.trunc(value));
+
+const readNullableNumber = (value: unknown): number | null => {
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+};
+
+const normalizeRankedProgress = (value: unknown): RankedProgress => {
+    if (!isObject(value)) return createRankedProgress();
+
+    const points = clampRankedPoints(readNumber(value.points));
+    return {
+        points,
+        bestPoints: Math.max(points, clampRankedPoints(readNumber(value.bestPoints))),
+        lastDelta: Math.trunc(readNumber(value.lastDelta)),
+        lastPlacement: readNullableNumber(value.lastPlacement),
+        lastParticipantCount: readNullableNumber(value.lastParticipantCount),
+    };
+};
+
+export const getRankedPointsDelta = (
+    placement?: number | null,
+    participantCount: number = RANKED_QUICK_MATCH_PLAYER_COUNT
+): number => {
+    if (!placement || !Number.isFinite(placement)) {
+        return 0;
+    }
+
+    if (participantCount !== RANKED_QUICK_MATCH_PLAYER_COUNT) {
+        return 0;
+    }
+
+    return RANKED_POINTS_BY_PLACEMENT[Math.trunc(placement)] ?? 0;
+};
+
+export const applyRankedPointsDelta = (currentPoints: number, delta: number): number => {
+    return clampRankedPoints(currentPoints + delta);
+};
+
+export const getRankedProgressBarState = (points: number): RankedProgressBarState => {
+    const normalizedPoints = clampRankedPoints(points);
+    const floor = Math.floor(normalizedPoints / RANKED_DIVISION_SIZE) * RANKED_DIVISION_SIZE;
+    const ceiling = floor + RANKED_DIVISION_SIZE;
+    const progressPercent = ((normalizedPoints - floor) / RANKED_DIVISION_SIZE) * 100;
+
+    return {
+        points: normalizedPoints,
+        floor,
+        ceiling,
+        progressPercent,
+        tier: Math.floor(normalizedPoints / RANKED_DIVISION_SIZE) + 1,
+    };
+};
+
 export const createDefaultPlayerStatistics = (): PlayerStatistics => ({
-    version: 1,
+    version: 2,
     updatedAt: null,
     lastPlayedAt: null,
     lastResult: null,
@@ -82,6 +176,7 @@ export const createDefaultPlayerStatistics = (): PlayerStatistics => ({
     multiplayer: createBucket(),
     coop: createBucket(),
     ranked: createBucket(),
+    rankedProgress: createRankedProgress(),
     steamSync: {
         available: false,
         lastAttemptAt: null,
@@ -126,6 +221,7 @@ export const normalizePlayerStatistics = (value: unknown): PlayerStatistics => {
         multiplayer: normalizeBucket(value.multiplayer),
         coop: normalizeBucket(value.coop),
         ranked: normalizeBucket(value.ranked),
+        rankedProgress: normalizeRankedProgress(value.rankedProgress),
         steamSync: {
             available: typeof steamSync.available === 'boolean' ? steamSync.available : defaults.steamSync.available,
             lastAttemptAt: typeof steamSync.lastAttemptAt === 'string' ? steamSync.lastAttemptAt : defaults.steamSync.lastAttemptAt,
@@ -180,6 +276,7 @@ export const recordMatchResult = (
         multiplayer: current.multiplayer,
         coop: current.coop,
         ranked: current.ranked,
+        rankedProgress: current.rankedProgress,
     };
 
     if (summary.source === 'campaign') {
@@ -200,6 +297,16 @@ export const recordMatchResult = (
 
     if (summary.ranked) {
         next.ranked = applyResultToBucket(current.ranked, summary.result);
+        const participantCount = summary.rankedParticipantCount || RANKED_QUICK_MATCH_PLAYER_COUNT;
+        const rankedDelta = summary.rankedPointsDelta ?? getRankedPointsDelta(summary.rankedPlacement, participantCount);
+        const rankedPointsAfter = applyRankedPointsDelta(current.rankedProgress.points, rankedDelta);
+        next.rankedProgress = {
+            points: rankedPointsAfter,
+            bestPoints: Math.max(current.rankedProgress.bestPoints, rankedPointsAfter),
+            lastDelta: rankedDelta,
+            lastPlacement: summary.rankedPlacement ?? null,
+            lastParticipantCount: summary.rankedPlacement ? participantCount : null,
+        };
     }
 
     return next;
@@ -257,6 +364,7 @@ export const mergeSteamStatistics = (
         multiplayer: { ...current.multiplayer },
         coop: { ...current.coop },
         ranked: { ...current.ranked },
+        rankedProgress: { ...current.rankedProgress },
     };
 
     next.lifetime.wins = mergeBucketValue(next.lifetime.wins, steamStats[STEAM_STAT_KEYS.lifetimeWins]);

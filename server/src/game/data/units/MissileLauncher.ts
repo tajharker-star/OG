@@ -5,11 +5,11 @@ export const MissileLauncherStats: UnitStats = {
     name: 'Missile Launcher',
     health: 150,
     maxHealth: 150,
-    damage: 300,
+    damage: 110,
     range: 500,
     speed: 60,
-    fireRate: 3000, // Very slow firing
+    fireRate: 5200, // Long reload after unloading a 6-missile salvo
     cost: { gold: 250, oil: 100 },
     constructionTime: 600, // 20s
-    description: 'Long-range artillery. Devastating against buildings, but cannot attack units.'
+    description: 'Long-range artillery. Fires a 6-missile salvo into buildings, then reloads for a long cooldown.'
 };

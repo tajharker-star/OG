@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { REDESIGNED_UNIT_TYPES, UNIT_PREVIEW_LABELS, createUnitArt } from './game/rendering/unitArt';
+import { REDESIGNED_UNIT_TYPES, UNIT_PREVIEW_LABELS, createUnitArt, getUnitArtScale } from './game/rendering/unitArt';
 
 const PREVIEW_COLORS: Record<string, number> = {
   soldier: 0xd97706,
@@ -15,13 +15,23 @@ const PREVIEW_COLORS: Record<string, number> = {
   ferry: 0x14b8a6,
   builder: 0xf43f5e,
   light_plane: 0x0ea5e9,
-  heavy_plane: 0x6366f1
+  heavy_plane: 0x6366f1,
+  alien_scout: 0x5eead4,
+  heavy_alien: 0xc084fc,
+  aircraft_carrier: 0x64748b,
+  mothership: 0x8b5cf6
 };
 
 function getPreviewScale(type: string) {
-  if (type === 'destroyer' || type === 'pirate_ship' || type === 'construction_ship' || type === 'ferry') return 1.15;
-  if (type === 'heavy_plane') return 1.1;
-  return 1.2;
+  let base = 3.25;
+  if (type === 'destroyer' || type === 'pirate_ship' || type === 'construction_ship' || type === 'ferry') base = 3.1;
+  else if (type === 'light_plane' || type === 'heavy_plane') base = 3.15;
+  else if (type === 'alien_scout') base = 2.85;
+  else if (type === 'heavy_alien') base = 1.9;
+  else if (type === 'aircraft_carrier') base = 1.45;
+  else if (type === 'mothership') base = 1.5;
+  else if (type === 'soldier' || type === 'sniper' || type === 'rocketeer' || type === 'builder') base = 2.5;
+  return base * getUnitArtScale(type);
 }
 
 class UnitPreviewScene extends Phaser.Scene {
@@ -63,7 +73,7 @@ class UnitPreviewScene extends Phaser.Scene {
     const subtitle = this.add.text(
       width / 2,
       82,
-      'Updated silhouettes with movement and aim-facing support. Mothership and aircraft carrier intentionally left unchanged.',
+      'Humanoid troops left unchanged. Non-humanoid units rebuilt around one dominant body with attached functional parts.',
       {
         fontFamily: 'Trebuchet MS, sans-serif',
         fontSize: '14px',
@@ -72,11 +82,11 @@ class UnitPreviewScene extends Phaser.Scene {
     );
     subtitle.setOrigin(0.5);
 
-    const cols = 4;
-    const cardWidth = 255;
-    const cardHeight = 155;
-    const gapX = 30;
-    const gapY = 24;
+    const cols = 2;
+    const cardWidth = 560;
+    const cardHeight = 280;
+    const gapX = 34;
+    const gapY = 28;
     const rows = Math.ceil(REDESIGNED_UNIT_TYPES.length / cols);
     const totalWidth = cols * cardWidth + (cols - 1) * gapX;
     const totalHeight = rows * cardHeight + (rows - 1) * gapY;
@@ -110,19 +120,19 @@ class UnitPreviewScene extends Phaser.Scene {
       });
       chipText.setOrigin(0.5);
 
-      const art = createUnitArt(this, 0, -6, type, accent, false);
+      const art = createUnitArt(this, 0, -8, type, accent, false);
       art.setScale(getPreviewScale(type));
 
-      const name = this.add.text(0, cardHeight / 2 - 34, UNIT_PREVIEW_LABELS[type], {
+      const name = this.add.text(0, cardHeight / 2 - 44, UNIT_PREVIEW_LABELS[type], {
         fontFamily: 'Georgia, serif',
-        fontSize: '20px',
+        fontSize: '26px',
         color: '#f6efe0'
       });
       name.setOrigin(0.5);
 
-      const role = this.add.text(0, cardHeight / 2 - 14, type.replaceAll('_', ' ').toUpperCase(), {
+      const role = this.add.text(0, cardHeight / 2 - 18, type.replaceAll('_', ' ').toUpperCase(), {
         fontFamily: 'Trebuchet MS, sans-serif',
-        fontSize: '11px',
+        fontSize: '13px',
         color: '#9ec1d8',
         letterSpacing: 1
       });
@@ -144,8 +154,8 @@ class UnitPreviewScene extends Phaser.Scene {
 
 new Phaser.Game({
   type: Phaser.AUTO,
-  width: 1200,
-  height: 1020,
+  width: 1320,
+  height: 2300,
   backgroundColor: '#08131b',
   parent: 'app',
   scene: [UnitPreviewScene]

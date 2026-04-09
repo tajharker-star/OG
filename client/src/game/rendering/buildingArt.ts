@@ -55,6 +55,157 @@ function darken(color: number, amount: number) {
   return mixColor(color, 0x000000, amount);
 }
 
+function markAuraLine<T extends Phaser.GameObjects.GameObject>(object: T) {
+  if ('setData' in object && typeof object.setData === 'function') {
+    object.setData('skinAuraLine', true);
+  }
+  return object;
+}
+
+function createAuraStrip(
+  scene: Phaser.Scene,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  color: number,
+  alpha = 0.42,
+  rotation = 0
+) {
+  const strip = scene.add.rectangle(x, y, width, height, color, alpha);
+  if (rotation) strip.setRotation(rotation);
+  return markAuraLine(strip);
+}
+
+function createAuraLine(
+  scene: Phaser.Scene,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  color: number,
+  alpha = 0.46,
+  width = 1
+) {
+  const line = scene.add.line(0, 0, x1, y1, x2, y2, color, alpha);
+  line.setLineWidth(width, width);
+  return markAuraLine(line);
+}
+
+function addBuildingDesignLines(
+  scene: Phaser.Scene,
+  container: Phaser.GameObjects.Container,
+  type: Building['type'] | string,
+  accent: number
+) {
+  const details: Phaser.GameObjects.GameObject[] = [];
+
+  switch (type) {
+    case 'mine':
+      details.push(
+        createAuraStrip(scene, 0, -4, 18, 0.9, accent, 0.3),
+        createAuraStrip(scene, 0, -15, 14, 0.85, accent, 0.28),
+      );
+      break;
+    case 'tower':
+      details.push(
+        createAuraStrip(scene, 0, -1, 1.2, 16, accent, 0.32),
+        createAuraStrip(scene, 0, -13, 12, 0.9, accent, 0.26),
+      );
+      break;
+    case 'barracks':
+      details.push(
+        createAuraStrip(scene, 0, -8.8, 18, 0.95, accent, 0.32),
+        createAuraStrip(scene, 0, -1, 16, 0.8, accent, 0.24),
+      );
+      break;
+    case 'hospital':
+      details.push(
+        createAuraStrip(scene, 0, -7, 16, 0.9, accent, 0.32),
+        createAuraStrip(scene, -12, 1, 1, 8, accent, 0.24),
+        createAuraStrip(scene, 12, 1, 1, 8, accent, 0.24),
+      );
+      break;
+    case 'repair_dock':
+      details.push(
+        createAuraStrip(scene, 8, 7, 10, 0.8, accent, 0.3),
+        createAuraLine(scene, -10, -8, 7, -8, accent, 0.28, 0.9),
+      );
+      break;
+    case 'dock':
+      details.push(
+        createAuraStrip(scene, 0, 4, 14, 0.8, accent, 0.3),
+        createAuraStrip(scene, -10, -10, 6, 0.85, accent, 0.24),
+      );
+      break;
+    case 'base':
+      details.push(
+        createAuraStrip(scene, 0, -3, 14, 1, accent, 0.34),
+        createAuraStrip(scene, -13, 4, 1, 8, accent, 0.24),
+        createAuraStrip(scene, 13, 4, 1, 8, accent, 0.24),
+      );
+      break;
+    case 'oil_rig':
+      details.push(
+        createAuraStrip(scene, 0, 2, 14, 0.8, accent, 0.32),
+        createAuraLine(scene, -5, -10, 5, -10, accent, 0.26, 0.9),
+      );
+      break;
+    case 'naval_mine':
+      details.push(
+        createAuraStrip(scene, 0, 0, 10, 0.9, accent, 0.3),
+        createAuraStrip(scene, 0, 0, 0.9, 10, accent, 0.24),
+      );
+      break;
+    case 'oil_well':
+      details.push(
+        createAuraStrip(scene, 0, -9, 14, 0.9, accent, 0.32),
+        createAuraStrip(scene, 11, 7, 1, 7, accent, 0.24),
+      );
+      break;
+    case 'farm':
+      details.push(
+        createAuraStrip(scene, -10, -13, 10, 0.8, accent, 0.26),
+        createAuraStrip(scene, 10, -4, 1, 10, accent, 0.22),
+      );
+      break;
+    case 'wall':
+      details.push(createAuraStrip(scene, 0, 0, 18, 0.8, accent, 0.24));
+      break;
+    case 'bridge_node':
+      details.push(
+        createAuraStrip(scene, 0, 0, 7, 0.9, accent, 0.24, Math.PI / 4),
+        createAuraStrip(scene, 0, 0, 7, 0.9, accent, 0.18, -Math.PI / 4),
+      );
+      break;
+    case 'wall_node':
+      details.push(
+        createAuraStrip(scene, 0, 2, 7, 0.9, accent, 0.26),
+        createAuraStrip(scene, 0, -7, 12, 0.85, accent, 0.22),
+      );
+      break;
+    case 'tank_factory':
+      details.push(
+        createAuraStrip(scene, 6, 4, 18, 0.9, accent, 0.3),
+        createAuraStrip(scene, 0, -7, 18, 0.9, accent, 0.24),
+      );
+      break;
+    case 'air_base':
+      details.push(
+        createAuraStrip(scene, 5, 8, 18, 0.85, accent, 0.28),
+        createAuraStrip(scene, -10, -12, 14, 0.85, accent, 0.24),
+        createAuraStrip(scene, 3, -8, 10, 0.75, accent, 0.18),
+      );
+      break;
+    default:
+      break;
+  }
+
+  if (details.length) {
+    container.add(details);
+  }
+}
+
 function getRecruitmentProgress(data?: Building) {
   const item = data?.recruitmentQueue?.[0];
   if (!item) return 0;
@@ -253,6 +404,7 @@ export function createBuildingArt(
   data?: Building
 ) {
   const container = scene.add.container(x, y);
+  container.setData('buildingArtType', type);
   const accent = lighten(color, 0.18);
   const hull = darken(accent, 0.62);
   const panel = darken(accent, 0.38);
@@ -262,6 +414,7 @@ export function createBuildingArt(
   const shadowWidth = type === 'wall' ? 32 : type === 'bridge_node' || type === 'wall_node' ? 24 : 42;
   const shadowHeight = type === 'wall' ? 10 : type === 'bridge_node' || type === 'wall_node' ? 12 : 14;
   const shadow = scene.add.ellipse(0, 17, shadowWidth, shadowHeight, 0x000000, 0.16);
+  shadow.setData('skinEffectIgnore', true);
   container.add(shadow);
 
   if (type === 'mine') {
@@ -271,12 +424,19 @@ export function createBuildingArt(
     const deck = scene.add.rectangle(0, -4, 26, 10, 0x6a5038);
     const railLeft = scene.add.rectangle(-8, 8, 3, 18, 0x4d3929);
     const railRight = scene.add.rectangle(8, 8, 3, 18, 0x4d3929);
+    const braceLeft = scene.add.line(-6, -5, 0, 0, -6, 11, 0x59412d);
+    const braceRight = scene.add.line(6, -5, 0, 0, 6, 11, 0x59412d);
     const crossbar = scene.add.rectangle(0, -15, 24, 3, metal);
     const hoist = scene.add.rectangle(0, -12, 6, 16, metal);
     const cable = scene.add.line(0, -4, 0, 0, 0, 10, 0x1a1a1a);
     const ore = scene.add.circle(0, 7, 5, 0xe2b44a);
-    const beacon = scene.add.rectangle(10, -10, 5, 4, accent);
-    container.add([rim, pit, platform, deck, railLeft, railRight, crossbar, hoist, cable, ore, beacon]);
+    const beaconMast = scene.add.rectangle(10, -11, 2, 9, metal);
+    const beaconHousing = scene.add.rectangle(10, -15, 6, 4, darken(accent, 0.28));
+    const beacon = scene.add.circle(10, -15, 2, accent);
+    container.add([
+      rim, pit, platform, deck, railLeft, railRight, braceLeft, braceRight,
+      crossbar, hoist, cable, ore, beaconMast, beaconHousing, beacon
+    ]);
   } else if (type === 'tower') {
     const plinth = scene.add.rectangle(0, 12, 24, 6, darken(hull, 0.08));
     const footing = scene.add.rectangle(0, 8, 20, 10, hull);
@@ -306,6 +466,7 @@ export function createBuildingArt(
     const slab = scene.add.rectangle(0, 13, 40, 6, darken(hull, 0.08));
     const base = scene.add.rectangle(0, 5, 36, 20, hull);
     const roof = scene.add.rectangle(0, -7, 30, 10, panel);
+    const roofCap = scene.add.rectangle(0, -12, 20, 3, trim);
     const wingLeft = scene.add.rectangle(-12, 1, 8, 14, darken(panel, 0.12));
     const wingRight = scene.add.rectangle(12, 1, 8, 14, darken(panel, 0.12));
     const door = scene.add.rectangle(0, 9, 8, 10, 0x111927);
@@ -313,8 +474,13 @@ export function createBuildingArt(
     const crossHorizontal = scene.add.rectangle(0, -4, 14, 4, accent);
     const windowLeft = scene.add.rectangle(-8, 3, 5, 5, windowColor);
     const windowRight = scene.add.rectangle(8, 3, 5, 5, windowColor);
-    const beacon = scene.add.circle(14, -10, 3, accent);
-    container.add([slab, base, roof, wingLeft, wingRight, door, crossVertical, crossHorizontal, windowLeft, windowRight, beacon]);
+    const beaconMast = scene.add.rectangle(14, -11, 2, 7, metal);
+    const beaconBase = scene.add.rectangle(14, -14, 6, 3, darken(panel, 0.18));
+    const beacon = scene.add.circle(14, -17, 2.4, accent);
+    container.add([
+      slab, base, roof, roofCap, wingLeft, wingRight, door, crossVertical, crossHorizontal,
+      windowLeft, windowRight, beaconMast, beaconBase, beacon
+    ]);
   } else if (type === 'repair_dock') {
     const foundation = scene.add.rectangle(0, 13, 40, 6, darken(hull, 0.08));
     const floor = scene.add.rectangle(0, 6, 36, 18, hull);
@@ -323,14 +489,22 @@ export function createBuildingArt(
     const gantryHook = scene.add.line(8, -8, 0, 0, 0, 12, trim);
     const servicePad = scene.add.rectangle(8, 7, 14, 8, darken(panel, 0.1));
     const toolRack = scene.add.rectangle(0, -8, 14, 6, metal);
-    const spark1 = scene.add.circle(6, -6, 2, accent);
-    const spark2 = scene.add.circle(10, -9, 2, lighten(accent, 0.3));
+    const workLampStem = scene.add.rectangle(5, -4, 2, 7, metal);
+    const workLampHead = scene.add.rectangle(8, -8, 8, 3, accent);
+    const weldGlow = scene.add.ellipse(10, 7, 9, 5, accent, 0.24);
+    const weldCore = scene.add.circle(10, 7, 1.8, lighten(accent, 0.3));
     const beacon = scene.add.circle(-14, -10, 3, accent);
-    container.add([foundation, floor, gantryBase, gantryArm, gantryHook, servicePad, toolRack, spark1, spark2, beacon]);
+    const beaconMast = scene.add.rectangle(-14, -8, 2, 8, metal);
+    container.add([
+      foundation, floor, gantryBase, gantryArm, gantryHook, servicePad, toolRack,
+      workLampStem, workLampHead, weldGlow, weldCore, beaconMast, beacon
+    ]);
     scene.tweens.add({
-      targets: [spark1, spark2],
-      alpha: 0.2,
-      duration: 500,
+      targets: [weldGlow, weldCore],
+      alpha: 0.18,
+      scaleX: 1.18,
+      scaleY: 1.18,
+      duration: 520,
       yoyo: true,
       repeat: -1
     });
@@ -347,8 +521,12 @@ export function createBuildingArt(
     const craneArm = scene.add.line(-10, -8, 0, 0, 12, -10, accent);
     const craneBrace = scene.add.line(-10, -3, 0, 0, 10, -10, metal);
     const craneCable = scene.add.line(2, -14, 0, 0, 0, 10, 0x0f1720);
-    const navLight = scene.add.circle(11, -8, 3, accent);
-    container.add([foundation, pier, slip, pilingLeft, pilingRight, bollard1, bollard2, craneBase, craneCab, craneArm, craneBrace, craneCable, navLight]);
+    const navMast = scene.add.rectangle(11, -9, 2, 6, metal);
+    const navLight = scene.add.circle(11, -13, 2.4, accent);
+    container.add([
+      foundation, pier, slip, pilingLeft, pilingRight, bollard1, bollard2,
+      craneBase, craneCab, craneArm, craneBrace, craneCable, navMast, navLight
+    ]);
   } else if (type === 'base') {
     const podium = scene.add.rectangle(0, 14, 42, 6, darken(hull, 0.08));
     const lower = scene.add.rectangle(0, 7, 38, 20, hull);
@@ -508,15 +686,17 @@ export function createBuildingArt(
     const hangarRoof = scene.add.polygon(-10, -12, [-12, 4, 0, -8, 12, 4], trim);
     const tower = scene.add.rectangle(14, -6, 9, 16, metal);
     const towerGlass = scene.add.rectangle(14, -13, 10, 6, windowColor);
-    const beacon = scene.add.circle(14, -20, 3, accent);
+    const beaconMast = scene.add.rectangle(14, -18, 2, 7, metal);
+    const beacon = scene.add.circle(14, -22, 2.4, accent);
     const serviceBridge = scene.add.rectangle(3, -8, 16, 3, panel);
-    container.add([slab, tarmac, runway, runwayLine, hangarFrame, hangar, hangarRoof, tower, towerGlass, serviceBridge, beacon]);
+    container.add([slab, tarmac, runway, runwayLine, hangarFrame, hangar, hangarRoof, tower, towerGlass, serviceBridge, beaconMast, beacon]);
   } else {
     const fallback = scene.add.rectangle(0, 0, 24, 24, hull);
     const core = scene.add.rectangle(0, 0, 10, 10, accent);
     container.add([fallback, core]);
   }
 
+  addBuildingDesignLines(scene, container, type as Building['type'], accent);
   addConstructionEffect(scene, container, accent, data);
   addRecruitmentEffect(scene, container, type as Building['type'], accent, data);
 

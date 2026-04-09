@@ -1,9 +1,16 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { socket, connectionManager } from '../services/socket';
 import { steamService } from '../services/steam';
+import type { SteamMultiplayerDiagnostics } from '../types/steamDiagnostics';
 import type { ConnectionState } from '../services/socket';
 import type { Player, GameMap, Unit } from '../types/game';
-import type { MatchResult, MatchSource, MatchStatisticsSummary } from '../utils/playerStatistics';
+import {
+    getRankedPointsDelta,
+    RANKED_QUICK_MATCH_PLAYER_COUNT,
+    type MatchResult,
+    type MatchSource,
+    type MatchStatisticsSummary,
+} from '../utils/playerStatistics';
 import type { TutorialMapType } from '../data/tutorialGuide';
 import { SettingsModal } from './SettingsModal';
 import { ActionGuidePanel } from './ActionGuidePanel';
@@ -335,6 +342,7 @@ interface GameUIProps {
     onLeave: () => void;
     roomId: string | null;
     steamLobbyId?: string | null;
+    steamMultiplayerDiagnostics?: SteamMultiplayerDiagnostics | null;
     initialGameStatus?: 'waiting' | 'voting' | 'playing';
     isLocalMode?: boolean;
     isDevBypass?: boolean;
@@ -342,6 +350,8 @@ interface GameUIProps {
     tutorialMapType?: TutorialMapType;
     onTutorialObjectivesCompleted?: () => void;
     matchStatsSource?: MatchSource;
+    rankedMatch?: boolean;
+    currentRankedPoints?: number;
     onMatchResolved?: (summary: MatchStatisticsSummary) => void;
 }
 
@@ -350,13 +360,22 @@ type LoadingCheckItem = {
     ready: boolean;
 };
 
+type RankedOverlaySummary = {
+    placement: number;
+    participantCount: number;
+    pointsBefore: number;
+    pointsDelta: number;
+    pointsAfter: number;
+};
+
 const PERF_SAMPLE_LIMIT = 10;
-const PING_SAMPLE_WINDOW = 3;
-const FPS_SAMPLE_WINDOW = 6;
+const PING_SAMPLE_WINDOW = 5;
+const FPS_SAMPLE_WINDOW = 10;
 const LOBBY_MIN_WARMUP_MS = 1200;
 const LOBBY_MAX_WARMUP_MS = 9000;
-const MATCH_MIN_WARMUP_MS = 1800;
-const MATCH_MAX_WARMUP_MS = 14000;
+const MATCH_MIN_WARMUP_MS = 3200;
+const MATCH_MAX_WARMUP_MS = 18000;
+const MATCH_SERVER_READY_MIN_MS = 2200;
 const ROUND_GUI_BUTTON_SIZE = 56;
 const ROUND_GUI_BUTTON_ROW_TOP = 60;
 const ROUND_GUI_BUTTON_ROW_LEFT = 20;
@@ -438,6 +457,8 @@ const getIconForType = (type: string) => {
         case 'repair_dock': return '🛠️';
         case 'light_plane': return '🛩️';
         case 'heavy_plane': return '✈️';
+        case 'alien_scout': return '👽';
+        case 'heavy_alien': return '🛸';
         case 'aircraft_carrier': return '🛳️';
         case 'mothership': return '🛸';
         default: return '❓';
@@ -448,6 +469,7 @@ export const GameUI: React.FC<GameUIProps> = ({
     onLeave,
     roomId,
     steamLobbyId = null,
+    steamMultiplayerDiagnostics = null,
     initialGameStatus,
     isLocalMode = false,
     isDevBypass = false,
@@ -455,6 +477,8 @@ export const GameUI: React.FC<GameUIProps> = ({
     tutorialMapType,
     onTutorialObjectivesCompleted,
     matchStatsSource = 'lan',
+    rankedMatch = false,
+    currentRankedPoints = 0,
     onMatchResolved,
 }) => {
     const [player, setPlayer] = useState<Player | null>(null);
@@ -526,7 +550,11 @@ export const GameUI: React.FC<GameUIProps> = ({
 
     // Multiplayer Lobby State
     const [gameStatus, setGameStatus] = useState<'waiting' | 'voting' | 'playing'>(initialGameStatus || 'waiting');
-    const [requiredPlayers, setRequiredPlayers] = useState(2);
+    const [requiredPlayers, setRequiredPlayers] = useState(rankedMatch ? RANKED_QUICK_MATCH_PLAYER_COUNT : 2);
+    const [maxHumanPlayers, setMaxHumanPlayers] = useState(rankedMatch ? RANKED_QUICK_MATCH_PLAYER_COUNT : 10);
+    const [queueType, setQueueType] = useState<'standard' | 'ranked_quick_match'>(rankedMatch ? 'ranked_quick_match' : 'standard');
+    const [allowBots, setAllowBots] = useState(!rankedMatch);
+    const [allowForceStart, setAllowForceStart] = useState(!rankedMatch);
     const [votingData, setVotingData] = useState<{ timeLeft: number, votes: [string, string][] }>({ timeLeft: 0, votes: [] });
     const [isLobbyLoading, setIsLobbyLoading] = useState(gameStatus !== 'playing');
     const [isMatchLoading, setIsMatchLoading] = useState(gameStatus === 'playing');
@@ -749,6 +777,7 @@ export const GameUI: React.FC<GameUIProps> = ({
     const [matchEnded, setMatchEnded] = useState(false); // New authoritative state
     const [isSpectateActive, setIsSpectateActive] = useState(false); // Actual spectate mode active (UI hidden)
     const [endGameState, setEndGameState] = useState<{ mode: 'VICTORY' | 'DEFEAT', canSpectate: boolean, reason?: string } | null>(null);
+    const [rankedOverlaySummary, setRankedOverlaySummary] = useState<RankedOverlaySummary | null>(null);
     const [tutorialBotChallengeStarted, setTutorialBotChallengeStarted] = useState(false);
     const [tutorialBotChallengeCompleted, setTutorialBotChallengeCompleted] = useState(false);
 
@@ -762,8 +791,45 @@ export const GameUI: React.FC<GameUIProps> = ({
     const allPlayersSnapshotRef = useRef<Map<string, Player>>(new Map());
     const onMatchResolvedRef = useRef<GameUIProps['onMatchResolved']>(onMatchResolved);
     const matchStatsSourceRef = useRef<MatchSource>(matchStatsSource);
+    const isRankedQuickMatchLobby = rankedMatch || queueType === 'ranked_quick_match';
+    const steamDiagnosticsRouteLabel = steamMultiplayerDiagnostics?.route === 'steam-relay'
+        ? 'Steam Relay'
+        : steamMultiplayerDiagnostics?.route === 'direct-endpoint'
+            ? 'Direct Endpoint'
+            : steamMultiplayerDiagnostics?.route === 'pending'
+                ? 'Pending'
+                : 'Idle';
 
-    const reportMatchResult = (result: MatchResult) => {
+    const buildRankedOverlaySummary = (
+        placement?: number | null,
+        participantCount?: number | null
+    ): RankedOverlaySummary | null => {
+        if (!isRankedQuickMatchLobby || !placement) {
+            return null;
+        }
+
+        const normalizedParticipantCount = participantCount || RANKED_QUICK_MATCH_PLAYER_COUNT;
+        const pointsDelta = getRankedPointsDelta(placement, normalizedParticipantCount);
+        const pointsBefore = currentRankedPoints;
+        const pointsAfter = Math.max(0, pointsBefore + pointsDelta);
+
+        return {
+            placement,
+            participantCount: normalizedParticipantCount,
+            pointsBefore,
+            pointsDelta,
+            pointsAfter,
+        };
+    };
+
+    const isMatchCoreReady =
+        matchLoadChecks.map &&
+        matchLoadChecks.player &&
+        matchLoadChecks.units &&
+        matchLoadChecks.baseVisible &&
+        matchLoadChecks.hqConfirmed;
+
+    const reportMatchResult = (result: MatchResult, rankedSummary?: RankedOverlaySummary | null) => {
         if (matchStatsReportedRef.current || !onMatchResolvedRef.current) {
             return;
         }
@@ -788,7 +854,12 @@ export const GameUI: React.FC<GameUIProps> = ({
             botPlayers,
             maxBotDifficulty: botPlayers > 0 ? maxBotDifficulty : undefined,
             coop: botPlayers > 0,
-            ranked: source === 'steam' && humanPlayers >= 2 && botPlayers === 0,
+            ranked: isRankedQuickMatchLobby,
+            rankedPlacement: rankedSummary?.placement,
+            rankedParticipantCount: rankedSummary?.participantCount,
+            rankedPointsDelta: rankedSummary?.pointsDelta,
+            rankedPointsBefore: rankedSummary?.pointsBefore,
+            rankedPointsAfter: rankedSummary?.pointsAfter,
         });
     };
 
@@ -846,6 +917,7 @@ export const GameUI: React.FC<GameUIProps> = ({
             matchStatsReportedRef.current = false;
             pingSamplesRef.current = [];
             fpsSamplesRef.current = [];
+            setRankedOverlaySummary(null);
             setTutorialBotChallengeCompleted(false);
             setHasUnitsSnapshot(false);
             setLocalBaseVisible(false);
@@ -863,6 +935,13 @@ export const GameUI: React.FC<GameUIProps> = ({
             matchLoadStartedAtRef.current = Date.now();
             setIsMatchLoading(true);
             setIsLobbyLoading(false);
+            setEndGameState(null);
+            setWinnerId(null);
+            setGameOverReason(undefined);
+            setEliminated(false);
+            setSpectating(false);
+            setMatchEnded(false);
+            setIsSpectateActive(false);
         } else if (gameStatus !== 'playing') {
             setIsMatchLoading(false);
             setMatchLoadTimedOut(false);
@@ -871,6 +950,7 @@ export const GameUI: React.FC<GameUIProps> = ({
         if (enteredLobby) {
             pingSamplesRef.current = [];
             fpsSamplesRef.current = [];
+            setRankedOverlaySummary(null);
             const playersReady = allPlayers.size > 0;
             setHasPlayersSnapshot(playersReady);
             setLobbyLoadChecks({
@@ -1017,11 +1097,7 @@ export const GameUI: React.FC<GameUIProps> = ({
         const timer = window.setInterval(() => {
             const elapsed = Date.now() - matchLoadStartedAtRef.current;
             const ready =
-                matchLoadChecks.map &&
-                matchLoadChecks.player &&
-                matchLoadChecks.units &&
-                matchLoadChecks.baseVisible &&
-                matchLoadChecks.hqConfirmed &&
+                isMatchCoreReady &&
                 matchLoadChecks.ping &&
                 matchLoadChecks.fps;
             if (ready && elapsed >= MATCH_MIN_WARMUP_MS) {
@@ -1031,21 +1107,37 @@ export const GameUI: React.FC<GameUIProps> = ({
 
             if (elapsed >= MATCH_MAX_WARMUP_MS) {
                 setMatchLoadTimedOut(true);
-                if (matchLoadChecks.baseVisible && matchLoadChecks.hqConfirmed) {
+                if (isMatchCoreReady) {
                     setIsMatchLoading(false);
                 }
             }
         }, 120);
 
         return () => window.clearInterval(timer);
-    }, [isMatchLoading, matchLoadChecks]);
+    }, [isMatchCoreReady, isMatchLoading, matchLoadChecks]);
 
     useEffect(() => {
-        if (gameStatus !== 'playing' || isMatchLoading || !socket.connected) return;
+        if (gameStatus !== 'playing' || !socket.connected || !isMatchCoreReady) return;
         if (matchReadySignalSentRef.current) return;
-        matchReadySignalSentRef.current = true;
-        socket.emit('player_match_ready');
-    }, [gameStatus, isMatchLoading, socket]);
+
+        const elapsed = Date.now() - matchLoadStartedAtRef.current;
+        const delayMs = Math.max(0, MATCH_SERVER_READY_MIN_MS - elapsed);
+
+        const sendReady = () => {
+            if (matchReadySignalSentRef.current) return;
+            if (gameStatus !== 'playing' || !socket.connected || !isMatchCoreReady) return;
+            matchReadySignalSentRef.current = true;
+            socket.emit('player_match_ready');
+        };
+
+        if (delayMs === 0) {
+            sendReady();
+            return;
+        }
+
+        const timeout = window.setTimeout(sendReady, delayMs);
+        return () => window.clearTimeout(timeout);
+    }, [gameStatus, isMatchCoreReady]);
 
     useEffect(() => {
         const shouldLockMatchInput = gameStatus === 'playing' && isMatchLoading;
@@ -1109,9 +1201,20 @@ export const GameUI: React.FC<GameUIProps> = ({
             });
         };
 
-        const handleLobbySettings = (data: { requiredPlayers: number }) => {
+        const handleLobbySettings = (data: {
+            requiredPlayers: number;
+            maxHumanPlayers?: number;
+            queueType?: 'standard' | 'ranked_quick_match';
+            ranked?: boolean;
+            allowBots?: boolean;
+            allowForceStart?: boolean;
+        }) => {
             console.log('Received lobbySettings:', data);
             setRequiredPlayers(data.requiredPlayers);
+            setMaxHumanPlayers(data.maxHumanPlayers || (data.ranked ? RANKED_QUICK_MATCH_PLAYER_COUNT : 10));
+            setQueueType(data.queueType || (data.ranked ? 'ranked_quick_match' : 'standard'));
+            setAllowBots(data.allowBots ?? !data.ranked);
+            setAllowForceStart(data.allowForceStart ?? !data.ranked);
         };
 
         const handleVotingUpdate = (data: { timeLeft: number, votes: [string, string][] }) => {
@@ -1156,6 +1259,7 @@ export const GameUI: React.FC<GameUIProps> = ({
             setSpectating(false);
             setMatchEnded(false);
             setIsSpectateActive(false);
+            setEndGameState(null);
             // Reset minimap or other UI if needed
         };
 
@@ -1183,10 +1287,19 @@ export const GameUI: React.FC<GameUIProps> = ({
             }
         };
 
-        const handleMatchEnded = (data: { winnerPlayerId: string | null, eliminatedPlayerIds: string[], endReason: string, timestamp: number }) => {
+        const handleMatchEnded = (data: {
+            winnerPlayerId: string | null;
+            eliminatedPlayerIds: string[];
+            endReason: string;
+            timestamp: number;
+            placements?: Record<string, number>;
+            participantCount?: number;
+        }) => {
             const localPlayerId = socket.id || playerSnapshotRef.current?.id || null;
             const isMe = !!localPlayerId && data.winnerPlayerId === localPlayerId;
             const wasEliminated = !!localPlayerId && data.eliminatedPlayerIds.includes(localPlayerId);
+            const placement = localPlayerId ? data.placements?.[localPlayerId] : undefined;
+            const rankedSummary = buildRankedOverlaySummary(placement, data.participantCount);
             const result: MatchResult = isMe
                 ? 'win'
                 : (data.winnerPlayerId && data.winnerPlayerId !== localPlayerId)
@@ -1209,11 +1322,15 @@ export const GameUI: React.FC<GameUIProps> = ({
                 canSpectate: !isMe
             });
 
+            if (rankedSummary) {
+                setRankedOverlaySummary(rankedSummary);
+            }
+
             if (isMe) {
                 steamService.activateAchievement('WIN_GAME');
             }
 
-            reportMatchResult(result);
+            reportMatchResult(result, rankedSummary);
 
             // If we are in eliminated list and not already marked
             if (wasEliminated) {
@@ -1222,8 +1339,14 @@ export const GameUI: React.FC<GameUIProps> = ({
             }
         };
 
-        const handlePlayerEliminated = (data: { playerId: string, reason?: string }) => {
+        const handlePlayerEliminated = (data: {
+            playerId: string;
+            reason?: string;
+            placement?: number | null;
+            participantCount?: number;
+        }) => {
             if (data.playerId === socket.id) {
+                const rankedSummary = buildRankedOverlaySummary(data.placement, data.participantCount);
                 setEliminated(true);
                 setSpectating(true);
                 setEndGameState({
@@ -1231,7 +1354,10 @@ export const GameUI: React.FC<GameUIProps> = ({
                     canSpectate: true,
                     reason: data.reason
                 });
-                reportMatchResult('loss');
+                if (rankedSummary) {
+                    setRankedOverlaySummary(rankedSummary);
+                }
+                reportMatchResult('loss', rankedSummary);
             }
         };
 
@@ -2355,6 +2481,9 @@ export const GameUI: React.FC<GameUIProps> = ({
         );
     }
 
+    const humanPlayerCount = Array.from(allPlayers.values()).filter(p => !p.isBot).length;
+    const botPlayerCount = Array.from(allPlayers.values()).filter(p => p.isBot).length;
+
     if (gameStatus === 'waiting' || gameStatus === 'voting') {
         return (
             <div className="lobby-screen">
@@ -2391,12 +2520,12 @@ export const GameUI: React.FC<GameUIProps> = ({
                     </div>
                 ) : (
                     <div className="lobby-card">
-                        <div className="lobby-title">Lobby</div>
+                        <div className="lobby-title">{isRankedQuickMatchLobby ? 'Ranked Quick Match' : 'Lobby'}</div>
                         <div className="lobby-subtitle">
-                            {Array.from(allPlayers.values()).filter(p => !p.isBot).length} / {requiredPlayers} Humans Ready
+                            {humanPlayerCount} / {requiredPlayers} {isRankedQuickMatchLobby ? 'Commanders Ready' : 'Humans Ready'}
                         </div>
 
-                        {tunnelUrl && (
+                        {tunnelUrl && !isRankedQuickMatchLobby && (
                             <div className="lobby-invite-container">
                                 <label>Join Code:</label>
                                 <div className="lobby-invite-code">
@@ -2411,7 +2540,7 @@ export const GameUI: React.FC<GameUIProps> = ({
                             </div>
                         )}
 
-                        {tunnelPassword && !tunnelUrl && (
+                        {tunnelPassword && !tunnelUrl && !isRankedQuickMatchLobby && (
                             <div className="lobby-invite-container">
                                 <label>Tunnel IP (LAN):</label>
                                 <div className="lobby-invite-code">
@@ -2427,44 +2556,55 @@ export const GameUI: React.FC<GameUIProps> = ({
                         )}
 
                         <div className="lobby-controls">
-                            <div className="lobby-row">
-                                <span>Required Humans</span>
-                                <select
-                                    className="lobby-select"
-                                    value={requiredPlayers}
-                                    onChange={(e) => {
-                                        const val = parseInt(e.target.value);
-                                        setRequiredPlayers(val);
-                                        socket.emit('set_required_players', val);
-                                    }}
-                                >
-                                    {Array.from({ length: 10 }, (_, i) => i + 1).map(n => (
-                                        <option key={n} value={n}>{n} Humans</option>
-                                    ))}
-                                </select>
-                            </div>
-
-                            <div className="lobby-row">
-                                <span>Add AI Bot</span>
-                                <div className="lobby-bot-container">
-                                    <span className="lobby-bot-count">
-                                        ({Array.from(allPlayers.values()).filter(p => p.isBot).length}/10)
-                                    </span>
-                                    <select
-                                        className="lobby-select lobby-select-bot"
-                                        onChange={(e) => socket.emit('addBot', parseInt(e.target.value))}
-                                        value=""
-                                    >
-                                        <option value="" disabled>+ Add Bot</option>
-                                        {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(diff => (
-                                            <option key={diff} value={diff} className="option-level">Lvl {diff}</option>
-                                        ))}
-                                    </select>
+                            {isRankedQuickMatchLobby ? (
+                                <div className="lobby-row">
+                                    <span>Queue Rules</span>
+                                    <span>{maxHumanPlayers} human players, no bots, auto-start only</span>
                                 </div>
-                            </div>
+                            ) : (
+                                <>
+                                    <div className="lobby-row">
+                                        <span>Required Humans</span>
+                                        <select
+                                            className="lobby-select"
+                                            value={requiredPlayers}
+                                            onChange={(e) => {
+                                                const val = parseInt(e.target.value);
+                                                setRequiredPlayers(val);
+                                                socket.emit('set_required_players', val);
+                                            }}
+                                        >
+                                            {Array.from({ length: 10 }, (_, i) => i + 1).map(n => (
+                                                <option key={n} value={n}>{n} Humans</option>
+                                            ))}
+                                        </select>
+                                    </div>
+
+                                    {allowBots && (
+                                        <div className="lobby-row">
+                                            <span>Add AI Bot</span>
+                                            <div className="lobby-bot-container">
+                                                <span className="lobby-bot-count">
+                                                    ({botPlayerCount}/10)
+                                                </span>
+                                                <select
+                                                    className="lobby-select lobby-select-bot"
+                                                    onChange={(e) => socket.emit('addBot', parseInt(e.target.value))}
+                                                    value=""
+                                                >
+                                                    <option value="" disabled>+ Add Bot</option>
+                                                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(diff => (
+                                                        <option key={diff} value={diff} className="option-level">Lvl {diff}</option>
+                                                    ))}
+                                                </select>
+                                            </div>
+                                        </div>
+                                    )}
+                                </>
+                            )}
 
                             {/* Host Start Button */}
-                            {Array.from(allPlayers.keys())[0] === socket.id && (
+                            {Array.from(allPlayers.keys())[0] === socket.id && allowForceStart && (
                                 <button
                                     className="lobby-btn btn-primary lobby-btn-start"
                                     onClick={() => {
@@ -2495,11 +2635,15 @@ export const GameUI: React.FC<GameUIProps> = ({
 
                 {/* Force show Room ID for easy sharing */}
                 <div className="lobby-invite-container">
-                    <p className="lobby-invite-title">Invite friends to join!</p>
+                    <p className="lobby-invite-title">
+                        {isRankedQuickMatchLobby
+                            ? 'Ranked quick match is waiting for 6 Steam players.'
+                            : 'Invite friends to join!'}
+                    </p>
 
                     {roomId && (
                         <div className="lobby-invite-content">
-                            {steamLobbyId && steamService.isInitialized && (
+                            {steamLobbyId && steamService.isInitialized && !isRankedQuickMatchLobby && (
                                 <button
                                     onClick={async () => {
                                         const result = await steamService.openInviteDialog(steamLobbyId);
@@ -2529,7 +2673,7 @@ export const GameUI: React.FC<GameUIProps> = ({
                                     </button>
                                 </div>
 
-                                {tunnelPassword && (
+                                {tunnelPassword && !isRankedQuickMatchLobby && (
                                     <div className="lobby-tunnel-password-display">
                                         <span className="lobby-tunnel-password-label">Tunnel Password (IP):</span>
                                         <span className="lobby-tunnel-password-val">{tunnelPassword}</span>
@@ -2545,7 +2689,7 @@ export const GameUI: React.FC<GameUIProps> = ({
                                     </div>
                                 )}
 
-                                {!tunnelUrl && (
+                                {!tunnelUrl && !isRankedQuickMatchLobby && (
                                     <div className="lobby-room-id-row">
                                         <span className="lobby-room-id-label">Port:</span>
                                         <span className="lobby-room-id-text">3001</span>
@@ -2562,32 +2706,79 @@ export const GameUI: React.FC<GameUIProps> = ({
                                 )}
                             </div>
 
+                            {steamMultiplayerDiagnostics && (
+                                <div className="lobby-steam-diagnostics">
+                                    <div className="lobby-steam-diagnostics__header">
+                                        <span>Steam Multiplayer Diagnostics</span>
+                                        <strong>{steamMultiplayerDiagnostics.status}</strong>
+                                    </div>
+                                    <div className="lobby-steam-diagnostics__grid">
+                                        <div className="lobby-steam-diagnostics__row">
+                                            <span>Route</span>
+                                            <strong>{steamDiagnosticsRouteLabel}</strong>
+                                        </div>
+                                        <div className="lobby-steam-diagnostics__row">
+                                            <span>Socket</span>
+                                            <strong>{steamMultiplayerDiagnostics.connectionPhase}</strong>
+                                        </div>
+                                        <div className="lobby-steam-diagnostics__row">
+                                            <span>Lobby</span>
+                                            <strong>{steamMultiplayerDiagnostics.lobbyId || steamLobbyId || 'None'}</strong>
+                                        </div>
+                                        <div className="lobby-steam-diagnostics__row">
+                                            <span>Relay</span>
+                                            <strong>{steamMultiplayerDiagnostics.relaySessionId || 'None'}</strong>
+                                        </div>
+                                    </div>
+                                    <div className="lobby-steam-diagnostics__field">
+                                        <span>Endpoint</span>
+                                        <code>{steamMultiplayerDiagnostics.endpoint || 'Unavailable'}</code>
+                                    </div>
+                                    <div className={`lobby-steam-diagnostics__field ${steamMultiplayerDiagnostics.lastError ? 'is-error' : ''}`}>
+                                        <span>Last Error</span>
+                                        <code>{steamMultiplayerDiagnostics.lastError || 'None'}</code>
+                                    </div>
+                                    {steamMultiplayerDiagnostics.events.length > 0 && (
+                                        <div className="lobby-steam-diagnostics__events">
+                                            {steamMultiplayerDiagnostics.events.slice(0, 3).map((event) => (
+                                                <div key={event.id} className="lobby-steam-diagnostics__event">
+                                                    <span>{event.at}</span>
+                                                    <span>{event.message}</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
                             {/* Invite Link Button */}
-                            <button
-                                onClick={() => {
-                                    // Determine Base URL for Invite Link
-                                    let baseUrl = '';
+                            {!isRankedQuickMatchLobby && (
+                                <button
+                                    onClick={() => {
+                                        // Determine Base URL for Invite Link
+                                        let baseUrl = '';
 
-                                    if (tunnelUrl) {
-                                        // Remote Tunnel Mode
-                                        baseUrl = tunnelUrl;
-                                    } else if (tunnelPassword && (tunnelPassword.includes('.') || tunnelPassword.includes(':'))) {
-                                        // LAN Mode: Use the Local IP sent as 'tunnelPassword'
-                                        // Default port 3001 is assumed for LAN
-                                        baseUrl = `http://${tunnelPassword}:3001`;
-                                    } else {
-                                        // Fallback: Use current origin (e.g. localhost)
-                                        baseUrl = window.location.origin;
-                                    }
+                                        if (tunnelUrl) {
+                                            // Remote Tunnel Mode
+                                            baseUrl = tunnelUrl;
+                                        } else if (tunnelPassword && (tunnelPassword.includes('.') || tunnelPassword.includes(':'))) {
+                                            // LAN Mode: Use the Local IP sent as 'tunnelPassword'
+                                            // Default port 3001 is assumed for LAN
+                                            baseUrl = `http://${tunnelPassword}:3001`;
+                                        } else {
+                                            // Fallback: Use current origin (e.g. localhost)
+                                            baseUrl = window.location.origin;
+                                        }
 
-                                    const url = `${baseUrl}?room=${roomId}`;
-                                    navigator.clipboard.writeText(url);
-                                    alert(`Invite Link copied! \n\nLink: ${url}`);
-                                }}
-                                className="lobby-invite-btn"
-                            >
-                                Copy Invite Link
-                            </button>
+                                        const url = `${baseUrl}?room=${roomId}`;
+                                        navigator.clipboard.writeText(url);
+                                        alert(`Invite Link copied! \n\nLink: ${url}`);
+                                    }}
+                                    className="lobby-invite-btn"
+                                >
+                                    Copy Invite Link
+                                </button>
+                            )}
                         </div>
                     )}
                 </div>
@@ -2751,6 +2942,7 @@ export const GameUI: React.FC<GameUIProps> = ({
                 canSpectate={endGameState.canSpectate}
                 onSpectate={handleSpectate}
                 reason={endGameState.reason}
+                rankedSummary={rankedOverlaySummary}
                 onMainMenu={() => {
                     console.log('Navigating to Main Menu via Victory/Defeat Overlay');
                     onLeave();

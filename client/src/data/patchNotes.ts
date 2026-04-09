@@ -31,174 +31,117 @@ export interface PatchNoteEntry {
 
 export const PATCH_NOTE_ENTRIES: PatchNoteEntry[] = [
     {
-        id: 'tutorial-economy-and-placement-clarity',
+        id: 'steam-multiplayer-and-ranked-quick-match',
         badge: 'Latest',
-        filters: ['Latest', 'Content'],
-        sortOrder: 142,
-        dateLabel: 'Apr 1, 2026',
-        title: 'Tutorial economy and placement clarity pass',
-        summary: 'Economy onboarding now teaches the exact resource spots and support units players need, so oil and gold placement is much harder to misunderstand.',
+        filters: ['Latest', 'Content', 'Balance'],
+        sortOrder: 162,
+        dateLabel: 'Apr 7, 2026',
+        title: 'Steam multiplayer, ranked quick match, and RP tracking',
+        summary: 'Multiplayer now runs through a proper Steam-hosted flow, with working lobby join/invite support, a dedicated ranked quick-match queue, and ranked progression that feeds directly into post-match results and long-term stats.',
         highlights: [
-            'Economy hover guides now show real placement graphics like the three-dot gold node, grassland patch, black oil spot, and land or water requirement markers.',
-            'Land-map tutorials now explicitly teach recruiting an Oil Seeker before trying to place Oil Wells on maps like Desert.',
-            'Water-map tutorials now push Dock into Construction Ship into Oil Rig flow so players understand offshore oil before they get stuck.',
-            'The Start your economy objective now requires both a gold producer and an oil producer, so players learn the full economy loop instead of half of it.'
+            'Steam multiplayer lobbies can now be created, advertised, discovered, joined, and invited through the integrated Steam lobby flow instead of relying only on manual room coordination.',
+            'Ranked Quick Match is now a dedicated 6-player Steam queue with no bots and auto-start rules, and the matchmaking server now prefers filling active ranked rooms before spinning up new ones.',
+            'Ranked results now feed proper RP gain and loss, ranked placement summaries, and long-term ranked records, with Top 3 placements gaining points and 4th through 6th losing them.',
+            'Steam lobby metadata, rich presence, and multiplayer stat syncing were tightened so hosted matches, ranked queues, and Steam-backed progression all stay in sync much more reliably.'
         ],
-        tags: ['Tutorial', 'Economy', 'Oil', 'Placement'],
-        iconKey: 'buildings',
-        changeIcons: ['buildings', 'campaign', 'logistics', 'units'],
-        accent: '#f7cb70'
+        tags: ['Steam', 'Multiplayer', 'Ranked', 'Stats'],
+        iconKey: 'steam',
+        changeIcons: ['steam', 'lobby', 'stats'],
+        accent: '#7bc7ff'
     },
     {
-        id: 'tutorial-map-playbooks-and-oil-guidance',
+        id: 'skin-aura-and-unit-scale-polish',
+        badge: 'Latest',
+        filters: ['Latest', 'Content'],
+        sortOrder: 156,
+        dateLabel: 'Apr 7, 2026',
+        title: 'Skin aura attachment, themed effects, and unit scale cleanup',
+        summary: 'The latest visual pass locked skin effects onto the actual unit and building silhouettes, replaced the old generic skin badges with themed elemental effects, and tightened the size hierarchy across the roster.',
+        highlights: [
+            'Skin auras and outer outlines now attach to the visible model shapes of units and buildings instead of floating around loose helper geometry, so premium skins read as part of the actual model.',
+            'The old square-and-circle skin effect layer was replaced with skin-themed visuals like flame tongues, crystal shards, halo arcs, smoke wisps, and spectral accents, all driven by the active skin colors.',
+            'Diamond, Obsidian, Godly, Ruby, and Developer motion trails were recolored to use their real skin palettes more strongly, with the Developer skin now reading as a clear green-fire effect instead of pale white plasma.',
+            'Non-humanoid units were normalized into a cleaner shared size band so they stay clearly larger than infantry while still reading smaller than the aircraft carrier and mothership.'
+        ],
+        tags: ['Skins', 'Auras', 'Units', 'Buildings'],
+        iconKey: 'units',
+        changeIcons: ['units', 'buildings', 'lobby'],
+        accent: '#6dffb0'
+    },
+    {
+        id: 'skins-showroom-and-battlefield-clarity',
+        badge: 'Latest',
+        filters: ['Latest', 'Content'],
+        sortOrder: 150,
+        dateLabel: 'Apr 6, 2026',
+        title: 'Skins showroom, premium effects, and battlefield clarity',
+        summary: 'The skins system grew into a proper showroom with stronger premium effects, creator-only prestige access, and cleaner battlefield readability around key resource structures and status bars.',
+        highlights: [
+            'Built a dedicated Skins armory in the lobby with equipping, full-roster preview, zoom, fit, and scroll controls so players can inspect the actual in-game renders for every unit and building.',
+            'Refined the public skin ladder into cleaner rank finishes, added Ruby mastery as the demo-completion reward, and introduced a hidden emerald Developer skin that only appears for the creator account.',
+            'Neon skin treatment now behaves like a real colored outer glow, and premium motion escalates by tier with Diamond and above gaining stronger trails, pulses, and showroom animation.',
+            'Improved battlefield readability by adding dark backplates and black outlines to health and recruitment bars, and made placed oil rigs render above their oil spots so the structure reads cleanly on the map.'
+        ],
+        tags: ['Skins', 'Developer', 'Readability', 'Showroom'],
+        iconKey: 'units',
+        changeIcons: ['lobby', 'units', 'buildings', 'rules'],
+        accent: '#7dffb2'
+    },
+    {
+        id: 'tutorial-mastery-and-hud-qol',
+        badge: 'Latest',
+        filters: ['Latest', 'Content', 'Balance'],
+        sortOrder: 144,
+        dateLabel: 'Apr 1, 2026',
+        title: 'Tutorial mastery, HUD polish, and archive cleanup',
+        summary: 'The April onboarding pass rolled together clearer map-specific teaching, a proper tutorial graduation flow, cleaner HUD controls, and a faster-scanning patch archive.',
+        highlights: [
+            'Tutorial flow is now map-aware, with a picker for Desert, Grasslands, and Islands, plus exact lessons for Oil Seeker scouting, Dock logistics, Construction Ships, Oil Wells, and Oil Rigs depending on the terrain.',
+            'Economy teaching now uses real placement graphics for gold, grassland, black oil spots, land, and water, and the Start your economy quest only clears once both gold and oil production are online.',
+            'Tutorial graduation now ends with a real final test: spawn a bot, defeat it, reach the victory screen, and unlock the new Tutorial Graduate plus higher bot-difficulty achievement milestones.',
+            'HUD and front-end quality-of-life updates from the same pass made the floating chat/settings/build controls draggable, fixed Tab focus issues, improved click-away chat behavior, and converted patch notes into a faster icon-first archive.'
+        ],
+        tags: ['Tutorial', 'HUD', 'Patch Notes', 'Achievements'],
+        iconKey: 'campaign',
+        changeIcons: ['campaign', 'buildings', 'ai', 'lobby'],
+        accent: '#9fdcb7'
+    },
+    {
+        id: 'tutorial-sandbox-and-local-practice',
         badge: 'Latest',
         filters: ['Latest', 'Content'],
         sortOrder: 138,
-        dateLabel: 'Apr 1, 2026',
-        title: 'Map-specific tutorial playbooks and oil guidance',
-        summary: 'The tutorial now teaches the right economy and logistics plan for the actual map you picked instead of forcing one generic lesson path.',
-        highlights: [
-            'Added a tutorial map picker so players can start on Desert, Grasslands, or Islands before launching the sandbox.',
-            'Desert now explicitly teaches Barracks into Oil Seeker scanner use, then land Oil Wells and heavy land tech.',
-            'Grasslands now teaches earlier Dock and ferry usage for shoreline shortcuts and faster side-lane expansion.',
-            'Islands now teaches the full Dock -> Construction Ship -> Oil Rig flow for offshore oil and naval control.'
-        ],
-        tags: ['Tutorial', 'Maps', 'Oil Scanner', 'Onboarding'],
-        iconKey: 'campaign',
-        changeIcons: ['campaign', 'logistics', 'buildings', 'units'],
-        accent: '#96e0c2'
-    },
-    {
-        id: 'tutorial-graduation-and-bot-achievements',
-        badge: 'Latest',
-        filters: ['Latest', 'Content'],
-        sortOrder: 136,
-        dateLabel: 'Apr 1, 2026',
-        title: 'Tutorial graduation quest and new achievement milestones',
-        summary: 'The tutorial now has a real final test: add a bot, beat it, reach the victory screen, and graduate properly with progression rewards.',
-        highlights: [
-            'Added a final tutorial quest that stays incomplete until the player spawns a bot, defeats every bot in the tutorial match, and reaches the victory screen.',
-            'Added the Tutorial Graduate achievement that unlocks from either finishing every tutorial objective or winning the final bot challenge.',
-            'Added new bot milestone achievements for beating bot difficulties 7, 8, 9, and 10.',
-            'Higher bot difficulty wins now cascade the lower-tier bot achievements too, so a level 10 win awards the whole 7-10 set.'
-        ],
-        tags: ['Tutorial', 'Achievements', 'Bots', 'Progression'],
-        iconKey: 'stats',
-        changeIcons: ['stats', 'campaign', 'ai'],
-        accent: '#9fb0ff'
-    },
-    {
-        id: 'patch-notes-quick-scan-pass',
-        badge: 'Latest',
-        filters: ['Latest', 'Content'],
-        sortOrder: 134,
-        dateLabel: 'Apr 1, 2026',
-        title: 'Patch notes quick-scan icon pass',
-        summary: 'The changelog is now much faster to read because the side screenshots were replaced with icon-based change callouts and system chips.',
-        highlights: [
-            'Removed the slower side artwork treatment from patch note cards so the left rail is pure icon information now.',
-            'Each patch note now uses a clean icon column that highlights the systems touched by that update.',
-            'The result is a faster scan path for players who just want to know what changed at a glance.',
-            'Patch entries were also updated with the newest tutorial, onboarding, and achievement work.'
-        ],
-        tags: ['Patch Notes', 'UI', 'Readability', 'Archive'],
-        iconKey: 'lobby',
-        changeIcons: ['lobby', 'stats', 'campaign'],
-        accent: '#ffd37a'
-    },
-    {
-        id: 'hud-usability-and-chat-polish',
-        badge: 'Latest',
-        filters: ['Latest'],
-        sortOrder: 132,
-        dateLabel: 'Apr 1, 2026',
-        title: 'HUD usability and chat control polish',
-        summary: 'The floating in-match controls are easier to place, easier to read, and no longer fight basic camera control while you play.',
-        highlights: [
-            'Made the round construction, chat, and settings opener buttons draggable and persist their positions between launches.',
-            'Aligned the default in-match opener row across the top and cleaned up the chat button with a proper round shape plus chat-bubble icon.',
-            'Stopped Tab from cycling focus through the HUD so WASD and arrow-key camera movement keep working.',
-            'Chat input now drops out of typing mode when you click away from the chat window.'
-        ],
-        tags: ['HUD', 'Chat', 'Controls', 'Quality of Life'],
-        iconKey: 'lobby',
-        changeIcons: ['lobby', 'logistics'],
-        accent: '#ffcf7d'
-    },
-    {
-        id: 'tutorial-and-guided-learning-pass',
-        badge: 'Latest',
-        filters: ['Latest', 'Content'],
-        sortOrder: 130,
         dateLabel: 'Mar 31, 2026',
-        title: 'Tutorial mode and guided learning pass',
-        summary: 'Campaign now opens with a real tutorial sandbox that teaches economy, production, unit roles, and how to actually win matches.',
+        title: 'Tutorial sandbox and local practice improvements',
+        summary: 'Campaign onboarding became a real playable sandbox, while local match flow and bot practice tools were tightened so players can learn without friction.',
         highlights: [
-            'Added a new Tutorial mission at the top of the campaign with safe starting resources and guided lessons.',
-            'Added build and recruit hover previews that explain placement, usage, and matchups before players commit.',
-            'Economy previews now show the correct placement graphics for gold, grassland, land oil, and water oil.',
-            'Tutorial and construction panels were darkened and simplified so the text is easier to read in live matches.'
+            'Added a new Tutorial mission at the top of the campaign with guided lessons, safer starting resources, and build/recruit hover previews that explain placement, role, and usage before the player commits.',
+            'Darkened tutorial, construction, selected-item, and build-preview panels so the live battlefield stays readable while players learn the game.',
+            'Match-start fairness was improved by freezing the opening until every human player is ready, so bots do not get a hidden head start in local practice matches.',
+            'Custom and tutorial games now support adding bots reliably mid-session, and ownership labels were cleaned up so humans show Steam names while bots show clear Bot 1, Bot 2, Bot 3 naming.'
         ],
-        tags: ['Tutorial', 'Campaign', 'Onboarding', 'Build Preview'],
-        iconKey: 'campaign',
-        changeIcons: ['campaign', 'buildings', 'units'],
-        accent: '#8fe3bf'
-    },
-    {
-        id: 'local-match-fairness-and-bot-tools',
-        badge: 'Latest',
-        filters: ['Latest', 'Balance'],
-        sortOrder: 128,
-        dateLabel: 'Mar 31, 2026',
-        title: 'Local match fairness and bot management',
-        summary: 'Single-player and local matches now start more fairly and give you better control over when bots enter the sandbox.',
-        highlights: [
-            'Bots now wait for every human player to finish the start load gate before the match simulation really begins.',
-            'Tutorial and custom matches support adding bots after the match is already running, instead of leaving the Add Bot button dead.',
-            'Match startup and local-engine flow were tuned so onboarding and practice sessions are much smoother.',
-            'Selected-item ownership labels now read as Steam usernames for humans and clean Bot 1, Bot 2, Bot 3 labels for AI players.'
-        ],
-        tags: ['Bots', 'Tutorial', 'Custom Match', 'Fair Start'],
+        tags: ['Tutorial', 'Custom Match', 'Bots', 'Readability'],
         iconKey: 'ai',
-        changeIcons: ['ai', 'campaign', 'rules'],
+        changeIcons: ['campaign', 'ai', 'buildings', 'rules'],
         accent: '#9de58d'
     },
     {
-        id: 'patch-notes-and-store-cta-refresh',
+        id: 'menu-archive-and-presentation-refresh',
         badge: 'Latest',
         filters: ['Latest', 'Content'],
-        sortOrder: 126,
+        sortOrder: 132,
         dateLabel: 'Mar 30, 2026',
-        title: 'Patch notes archive and Steam wishlist CTA',
-        summary: 'The front end now calls out updates properly and gives demo players a clearer route to follow the full game on Steam.',
+        title: 'Menu archive, wishlist CTA, and presentation refresh',
+        summary: 'The late-March front-end pass unified the menu style, introduced an in-game patch archive, and pushed the lobby presentation much closer to the Conquerors: Domination identity.',
         highlights: [
-            'Added an in-game Patch Notes button with a real archive instead of hiding changelog details outside the game.',
-            'Added dated entries, filters for Latest, Balance, Content, Archive, and sort order controls.',
-            'Added the animated Wishlist on Steam button that links directly to the main game store page.',
-            'Added the Demo Release announcement entry with a thank-you note and full-game roadmap messaging.'
+            'Added the in-game Patch Notes archive with date labels, category filters, sorting controls, and a dedicated Demo Release announcement for new players.',
+            'Added the Wishlist on Steam call-to-action so demo players can jump straight to the full game store page from the lobby.',
+            'Unified the top-level lobby button styling, refreshed the animated logo presentation, and cleaned up multiplayer host/join panels so they match the rest of the UI language.',
+            'Rounded and re-themed menus, settings, stats, tutorial panels, and construction interfaces around the gold-and-ember logo palette for a more cohesive presentation.'
         ],
-        tags: ['Patch Notes', 'Steam', 'Wishlist', 'Presentation'],
-        iconKey: 'steam',
-        changeIcons: ['steam', 'lobby', 'campaign'],
-        accent: '#8ecbff'
-    },
-    {
-        id: 'ui-theme-and-panel-polish',
-        badge: 'Latest',
-        filters: ['Latest', 'Content'],
-        sortOrder: 124,
-        dateLabel: 'Mar 30, 2026',
-        title: 'UI theme and panel polish pass',
-        summary: 'Menus and in-match panels were pushed closer to the Conquerors: Domination logo style so the whole game feels more cohesive.',
-        highlights: [
-            'Rounded and re-themed UI panels and buttons across the lobby, settings, stats, tutorial, and in-match HUD.',
-            'Rebuilt the construction panel into a cleaner command deck with richer category cards and better readability.',
-            'Cleaned up multiplayer menu presentation so host and join flows match the rest of the game design.',
-            'Darkened build previews and selected-item panels to make important information easier to read in combat.'
-        ],
-        tags: ['UI', 'HUD', 'Construction', 'Multiplayer'],
+        tags: ['Patch Notes', 'Wishlist', 'UI', 'Lobby'],
         iconKey: 'lobby',
-        changeIcons: ['lobby', 'buildings', 'campaign'],
+        changeIcons: ['lobby', 'steam', 'campaign', 'buildings'],
         accent: '#ffd772'
     },
     {

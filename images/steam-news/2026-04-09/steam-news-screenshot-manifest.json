@@ -1,0 +1,49 @@
+{
+  "generatedAt": "2026-04-09T02:58:51.853Z",
+  "captureDate": "2026-04-09",
+  "outputRoot": "/Users/codyharker/Desktop/cody/OG/images/steam-news/2026-04-09",
+  "screenshots": [
+    {
+      "slug": "01-multiplayer-ranked-quick-match",
+      "title": "Steam multiplayer, ranked quick match, and host flows",
+      "summary": "Shows the updated multiplayer screen with ranked quick match, LAN hosting, Steam lobbies, and public hosting flow.",
+      "hoverText": "Steam multiplayer now has a cleaner command hub, ranked quick match, and friend-ready lobby tools.",
+      "image": "/Users/codyharker/Desktop/cody/OG/images/steam-news/2026-04-09/01-multiplayer-ranked-quick-match.png"
+    },
+    {
+      "slug": "02-skins-showroom-and-premium-effects",
+      "title": "Skins showroom, premium effects, and prestige loadouts",
+      "summary": "Shows the new skins armory with loadout cards, prestige progression, and the polished showroom presentation.",
+      "hoverText": "The armory now behaves like a real showroom, with richer effects and clearer prestige progression.",
+      "image": "/Users/codyharker/Desktop/cody/OG/images/steam-news/2026-04-09/02-skins-showroom-and-premium-effects.png"
+    },
+    {
+      "slug": "03-stats-achievements-and-ranked-rp",
+      "title": "Stats, achievements, and ranked RP tracking",
+      "summary": "Shows the long-term stats and achievements screen with ranked progress and career buckets.",
+      "hoverText": "Progress is easier to read now, with lifetime stats, ranked RP, and achievement tracking all in one place.",
+      "image": "/Users/codyharker/Desktop/cody/OG/images/steam-news/2026-04-09/03-stats-achievements-and-ranked-rp.png"
+    },
+    {
+      "slug": "04-patch-notes-archive-and-lobby-refresh",
+      "title": "Patch notes archive and lobby presentation refresh",
+      "summary": "Shows the icon-first patch notes archive inside the live menu instead of a mockup layout.",
+      "hoverText": "The menu now carries a quick-scan patch archive so players can see what changed without leaving the game.",
+      "image": "/Users/codyharker/Desktop/cody/OG/images/steam-news/2026-04-09/04-patch-notes-archive-and-lobby-refresh.png"
+    },
+    {
+      "slug": "05-tutorial-map-playbooks",
+      "title": "Map-specific tutorial playbooks and onboarding flow",
+      "summary": "Shows the tutorial map picker that branches the onboarding flow into Desert, Grasslands, and Islands.",
+      "hoverText": "Tutorial onboarding now changes with the map, teaching different economy and logistics paths instead of one generic lesson.",
+      "image": "/Users/codyharker/Desktop/cody/OG/images/steam-news/2026-04-09/05-tutorial-map-playbooks.png"
+    },
+    {
+      "slug": "06-tutorial-build-hover-and-placement-help",
+      "title": "Tutorial sandbox, build previews, and placement guidance",
+      "summary": "Shows the tutorial sandbox with the build menu and hover-preview guidance for map-specific placement decisions.",
+      "hoverText": "Build cards now explain what to place, where to place it, and why it matters while you learn.",
+      "image": "/Users/codyharker/Desktop/cody/OG/images/steam-news/2026-04-09/06-tutorial-build-hover-and-placement-help.png"
+    }
+  ]
+}

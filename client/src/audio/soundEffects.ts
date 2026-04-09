@@ -181,6 +181,24 @@ const COMBAT_RECIPES: Record<CombatSoundSource, SoundRecipe> = {
             { kind: 'tone', wave: 'square', startHz: 720, endHz: 300, gain: 0.03, startMs: 3, attackMs: 1, decayMs: 52, bandpassHz: 980, q: 0.85 }
         ]
     },
+    alien_scout: {
+        cooldownMs: 66,
+        baseVolume: 0.58,
+        layers: [
+            { kind: 'tone', wave: 'sawtooth', startHz: 620, endHz: 280, gain: 0.05, attackMs: 2, decayMs: 52, bandpassHz: 1100, q: 1.2 },
+            { kind: 'tone', wave: 'sine', startHz: 1280, endHz: 760, gain: 0.026, attackMs: 1, decayMs: 44, highpassHz: 780 },
+            { kind: 'noise', gain: 0.028, attackMs: 1, decayMs: 24, highpassHz: 2200, lowpassHz: 6400 }
+        ]
+    },
+    heavy_alien: {
+        cooldownMs: 96,
+        baseVolume: 0.72,
+        layers: [
+            { kind: 'tone', wave: 'sawtooth', startHz: 240, endHz: 120, gain: 0.07, attackMs: 3, decayMs: 88, bandpassHz: 640, q: 1.1 },
+            { kind: 'tone', wave: 'sine', startHz: 980, endHz: 360, gain: 0.05, attackMs: 2, decayMs: 92, bandpassHz: 1240, q: 0.9 },
+            { kind: 'noise', gain: 0.035, attackMs: 2, decayMs: 48, highpassHz: 1700, lowpassHz: 5200 }
+        ]
+    },
     aircraft_carrier: {
         cooldownMs: 220,
         baseVolume: 0.9,
@@ -405,6 +423,8 @@ const COMBAT_SOURCE_TO_EFFECT_ID: Record<CombatSoundSource, SfxEffectId> = {
     oil_seeker: 'attackUnknown',
     light_plane: 'attackLightPlane',
     heavy_plane: 'attackHeavyPlane',
+    alien_scout: 'attackLightPlane',
+    heavy_alien: 'attackMothership',
     aircraft_carrier: 'attackAircraftCarrier',
     mothership: 'attackMothership',
     tower: 'attackTower',

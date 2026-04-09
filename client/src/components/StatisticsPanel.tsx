@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import './StatisticsPanel.css';
 import type { PlayerStatistics, StatsBucket } from '../utils/playerStatistics';
-import { bucketMatches } from '../utils/playerStatistics';
+import { bucketMatches, getRankedProgressBarState } from '../utils/playerStatistics';
 import type { EvaluatedAchievement } from '../utils/playerAchievements';
 import { getAchievementIcon } from '../utils/achievementIcons';
 
@@ -117,6 +117,7 @@ export function StatisticsPanel({
     const summary = useMemo(() => {
         const lifetime = statistics.lifetime;
         const unlockedAchievements = achievements.filter(achievement => achievement.unlocked).length;
+        const rankedProgress = getRankedProgressBarState(statistics.rankedProgress.points);
         return {
             matches: bucketMatches(lifetime),
             wins: lifetime.wins,
@@ -124,6 +125,7 @@ export function StatisticsPanel({
             winRate: formatRate(lifetime.wins, lifetime.losses),
             ratio: formatRatio(lifetime.wins, lifetime.losses),
             unlockedAchievements,
+            rankedProgress,
         };
     }, [achievements, statistics]);
 
@@ -160,6 +162,23 @@ export function StatisticsPanel({
                 <div><span>W/L Ratio</span><strong>{summary.ratio}</strong></div>
                 <div><span>Last Result</span><strong>{statistics.lastResult ? statistics.lastResult.toUpperCase() : 'NONE'}</strong></div>
                 <div><span>Last Match</span><strong>{formatTimestamp(statistics.lastPlayedAt)}</strong></div>
+            </div>
+
+            <div className="achievement-progress-card">
+                <div className="achievement-progress-head">
+                    <span>Ranked Points</span>
+                    <strong>{statistics.rankedProgress.points} RP</strong>
+                </div>
+                <div className="achievement-progress-track">
+                    <div
+                        className="achievement-progress-fill"
+                        style={{ width: `${summary.rankedProgress.progressPercent}%` }}
+                    />
+                </div>
+                <div className="statistics-note-card">
+                    <span>Current Division</span>
+                    <strong>{summary.rankedProgress.floor} - {summary.rankedProgress.ceiling} RP</strong>
+                </div>
             </div>
 
             <div className="statistics-section">
@@ -240,8 +259,13 @@ export function StatisticsPanel({
                 {openSections.ranked && (
                     <div className="statistics-section-body">
                         <BucketMetrics bucket={statistics.ranked} />
+                        <div className="statistics-summary-strip">
+                            <div><span>Current RP</span><strong>{statistics.rankedProgress.points}</strong></div>
+                            <div><span>Best RP</span><strong>{statistics.rankedProgress.bestPoints}</strong></div>
+                            <div><span>Last Change</span><strong>{statistics.rankedProgress.lastDelta >= 0 ? '+' : ''}{statistics.rankedProgress.lastDelta}</strong></div>
+                        </div>
                         <p className="statistics-note">
-                            Ranked currently counts Steam-backed PvP matches with 2+ human players and no bots. LAN and bot matches stay out of this bucket.
+                            Ranked now tracks 6-player Steam quick matches only. Top 3 placements gain RP, while 4th through 6th lose RP.
                         </p>
                     </div>
                 )}

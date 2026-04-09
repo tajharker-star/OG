@@ -39,7 +39,61 @@ const parseEndpointHost = (rawValue?: string | null): string | null => {
     }
 };
 
+const normalizeSocketUrl = (rawValue?: string | null): string | null => {
+    if (!rawValue) return null;
+
+    const value = rawValue.trim();
+    if (!value) return null;
+
+    try {
+        return new URL(value).toString();
+    } catch {
+        const normalized = value.startsWith('ws://')
+            ? `http://${value.slice('ws://'.length)}`
+            : value.startsWith('wss://')
+                ? `https://${value.slice('wss://'.length)}`
+                : value;
+
+        try {
+            return new URL(normalized).toString();
+        } catch {
+            return null;
+        }
+    }
+};
+
+const hasForcedSteamRelayTransport = (rawValue?: string | null): boolean => {
+    const normalized = normalizeSocketUrl(rawValue);
+    if (!normalized) return false;
+
+    try {
+        const parsed = new URL(normalized);
+        return parsed.searchParams.get('ag_transport') === 'steamrelay';
+    } catch {
+        return false;
+    }
+};
+
+const isLoopbackSocketEndpoint = (rawValue?: string | null): boolean => {
+    const host = parseEndpointHost(rawValue);
+    if (!host) return false;
+
+    if (host === 'localhost' || host === '0.0.0.0' || host === '::1') {
+        return true;
+    }
+
+    if (host.endsWith('.local')) {
+        return true;
+    }
+
+    return isPrivateIpv4Host(host);
+};
+
 export const isLocalSocketEndpoint = (rawValue?: string | null): boolean => {
+    if (hasForcedSteamRelayTransport(rawValue)) {
+        return false;
+    }
+
     const host = parseEndpointHost(rawValue);
     if (!host) return false;
 
@@ -59,7 +113,7 @@ const getCurrentSocketTarget = () => {
 };
 
 const getPreferredTransports = (rawValue?: string | null) => {
-    if (isLocalSocketEndpoint(rawValue)) {
+    if (isLoopbackSocketEndpoint(rawValue)) {
         return ['websocket'];
     }
 
@@ -139,6 +193,20 @@ class ConnectionManager {
     }
 
     private setupSocketListeners() {
+        socket.on('ag:relay_socket_id', (remoteSocketId: string) => {
+            const normalizedId = typeof remoteSocketId === 'string' ? remoteSocketId.trim() : '';
+            if (!normalizedId) {
+                return;
+            }
+
+            (socket as any).relaySocketId = normalizedId;
+            // The game uses socket.id as the authoritative player id in many places.
+            // When connected through the local Steam relay bridge, we overwrite it
+            // with the upstream server's socket id so ownership checks still work.
+            (socket as any).id = normalizedId;
+            console.log('[ConnectionManager] Bound relay socket id:', normalizedId);
+        });
+
         socket.on('connect', () => {
             console.log('[ConnectionManager] Socket Open', {
                 id: socket.id,
@@ -170,6 +238,7 @@ class ConnectionManager {
 
         socket.on('disconnect', (reason) => {
             console.log('[ConnectionManager] Disconnected:', reason);
+            (socket as any).relaySocketId = null;
 
             // If we were explicitly cancelled or failed, stay failed.
             if (this.state.phase === 'FAILED') return;

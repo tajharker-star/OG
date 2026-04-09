@@ -9,6 +9,15 @@ const SIMULATION_TICKS_PER_SECOND = 30;
 const CONSTRUCTION_SPEED_MULTIPLIER = 3;
 const PLAYER_SNAPSHOT_INTERVAL_MS = 250;
 const BRIDGE_NODE_LAND_ACCESS_EDGE_PADDING = 18;
+const MISSILE_LAUNCHER_SALVO_SHOTS = 6;
+const MISSILE_LAUNCHER_BURST_INTERVAL_MS = 170;
+const MISSILE_LAUNCHER_ABORT_RELOAD_RATIO = 0.35;
+const MOTHERSHIP_BEAM_DURATION_MS = 1000;
+const MOTHERSHIP_BEAM_TICK_MS = 100;
+const MOTHERSHIP_BEAM_DIRECT_DAMAGE = 25;
+const MOTHERSHIP_RADIATION_RADIUS = 115;
+const MOTHERSHIP_RADIATION_STACK_DURATION_MS = 5000;
+const MOTHERSHIP_RADIATION_STACK_DAMAGE_PER_SECOND = 4;
 
 export interface Player {
     id: string;
@@ -54,6 +63,9 @@ export interface Unit {
     intentId?: string;
     path?: { x: number, y: number }[];
     facingAngle?: number;
+    salvoShotsRemaining?: number;
+    salvoNextShotTime?: number;
+    reloadEndsAt?: number;
 }
 
 type EconomyBurst = {
@@ -62,6 +74,23 @@ type EconomyBurst = {
     y: number;
     gold: number;
     oil: number;
+};
+
+type QueueType = 'standard' | 'ranked_quick_match';
+
+type MatchEndedPayload = {
+    winnerPlayerId: string | null;
+    eliminatedPlayerIds: string[];
+    endReason: string | null;
+    timestamp: number;
+    placements: Record<string, number>;
+    participantCount: number;
+};
+
+type DamageOverTimeEffect = {
+    type: string;
+    endsAt: number;
+    damagePerSecond: number;
 };
 
 export class GameState {
@@ -89,6 +118,10 @@ export class GameState {
     voteEndTime: number = 0;
     mapVotes = new Map<string, string>();
     requiredPlayers = 2;
+    maxHumanPlayers = 10;
+    queueType: QueueType = 'standard';
+    allowBots = true;
+    allowForceStart = true;
     tunnelUrl?: string;
     password?: string;
     mapType: string = 'random';
@@ -100,6 +133,7 @@ export class GameState {
     private botsReleasedForMatch: boolean = true;
     private traversalPathCache: Map<string, string[]> = new Map();
     private economySecondAccumulator: number = 0;
+    private placementByPlayerId: Map<string, number> = new Map();
 
     // Spatial Grid for O(N) optimization
     private grid: Map<string, Unit[]> = new Map();
@@ -122,6 +156,84 @@ export class GameState {
         this.startTime = Date.now();
     }
 
+    public configureQueueType(queueType: QueueType) {
+        this.queueType = queueType;
+
+        if (queueType === 'ranked_quick_match') {
+            this.requiredPlayers = 6;
+            this.maxHumanPlayers = 6;
+            this.allowBots = false;
+            this.allowForceStart = false;
+            return;
+        }
+
+        this.maxHumanPlayers = 10;
+        this.allowBots = true;
+        this.allowForceStart = true;
+    }
+
+    public isRankedQuickMatch(): boolean {
+        return this.queueType === 'ranked_quick_match';
+    }
+
+    public canAcceptHumanPlayer(playerId: string): boolean {
+        if (this.players.has(playerId)) return true;
+
+        const humanCount = Array.from(this.players.values()).filter(player => !player.isBot).length;
+        return humanCount < this.maxHumanPlayers;
+    }
+
+    public getLobbySettings() {
+        return {
+            requiredPlayers: this.requiredPlayers,
+            maxHumanPlayers: this.maxHumanPlayers,
+            queueType: this.queueType,
+            ranked: this.isRankedQuickMatch(),
+            allowBots: this.allowBots,
+            allowForceStart: this.allowForceStart,
+        };
+    }
+
+    public getMatchEndedPayload() {
+        return this.buildMatchEndedPayload();
+    }
+
+    public handleLobbyPopulationChange(io: any, roomId: string) {
+        const humanCount = Array.from(this.players.values()).filter(player => !player.isBot).length;
+
+        if (this.status === 'voting' && humanCount < this.requiredPlayers) {
+            console.log(`[LOBBY_STATE_CHANGE] from=voting to=waiting reason=population_dropped humans=${humanCount}`);
+            this.status = 'waiting';
+            this.voteEndTime = 0;
+            this.mapVotes.clear();
+            io.to(roomId).emit('gameStatus', 'waiting');
+        }
+
+        if (this.status === 'waiting') {
+            this.checkVotingStart(io, roomId);
+        }
+    }
+
+    private resetMatchResolutionState() {
+        this.matchState = 'LOBBY';
+        this.winnerId = null;
+        this.endReason = null;
+        this.eliminatedPlayerIds.clear();
+        this.placementByPlayerId.clear();
+        this.playerCollapseStates.clear();
+    }
+
+    private buildMatchEndedPayload(): MatchEndedPayload {
+        return {
+            winnerPlayerId: this.winnerId,
+            eliminatedPlayerIds: Array.from(this.eliminatedPlayerIds),
+            endReason: this.endReason,
+            timestamp: Date.now(),
+            placements: Object.fromEntries(this.placementByPlayerId.entries()),
+            participantCount: this.players.size,
+        };
+    }
+
     public getSimplifiedUnitsSnapshot() {
         return this.units.map(u => ({
             id: u.id,
@@ -137,6 +249,8 @@ export class GameState {
             range: u.range,
             fireRate: u.fireRate,
             facingAngle: u.facingAngle ?? 0,
+            radiationStacks: Math.max(0, Math.round((u as any).radiationStacks || 0)),
+            radiationUntil: Math.round((u as any).radiationUntil || 0),
             cargo: u.cargo ? u.cargo.map(c => ({ type: c.type })) : [],
             recruitmentQueue: u.recruitmentQueue
         }));
@@ -977,51 +1091,74 @@ export class GameState {
         );
     }
 
-    private applyDamageOverTimeEffect(unit: Unit, type: string, durationMs: number, damagePerSecond: number, now: number) {
-        const effects = ((unit as any).damageOverTimeEffects || []) as Array<{
-            type: string;
-            endsAt: number;
-            damagePerSecond: number;
-        }>;
-        const existing = effects.find(effect => effect.type === type);
-        if (existing) {
-            existing.endsAt = Math.max(existing.endsAt, now + durationMs);
-            existing.damagePerSecond = Math.max(existing.damagePerSecond, damagePerSecond);
+    private syncDamageOverTimeStatus(entity: any, effects: DamageOverTimeEffect[], now: number) {
+        const activeEffects = effects.filter(effect => effect.endsAt > now);
+        const burningEffects = activeEffects.filter(effect => effect.type !== 'radiation');
+        const radiationEffects = activeEffects.filter(effect => effect.type === 'radiation');
+
+        if (radiationEffects.length > 0) {
+            entity.radiationStacks = radiationEffects.length;
+            entity.radiationUntil = Math.max(...radiationEffects.map(effect => effect.endsAt));
         } else {
+            delete entity.radiationStacks;
+            delete entity.radiationUntil;
+        }
+
+        if (burningEffects.length > 0) {
+            entity.burning = true;
+            entity.burningUntil = Math.max(...burningEffects.map(effect => effect.endsAt));
+        } else if ((entity.burningUntil || 0) <= now) {
+            delete entity.burning;
+            delete entity.burningUntil;
+        }
+    }
+
+    private applyDamageOverTimeEffect(
+        entity: Unit | Building,
+        type: string,
+        durationMs: number,
+        damagePerSecond: number,
+        now: number,
+        options?: { stackable?: boolean }
+    ) {
+        const effects = ((entity as any).damageOverTimeEffects || []) as DamageOverTimeEffect[];
+        if (options?.stackable) {
             effects.push({
                 type,
                 endsAt: now + durationMs,
                 damagePerSecond
             });
+        } else {
+            const existing = effects.find(effect => effect.type === type);
+            if (existing) {
+                existing.endsAt = Math.max(existing.endsAt, now + durationMs);
+                existing.damagePerSecond = Math.max(existing.damagePerSecond, damagePerSecond);
+            } else {
+                effects.push({
+                    type,
+                    endsAt: now + durationMs,
+                    damagePerSecond
+                });
+            }
         }
 
-        (unit as any).damageOverTimeEffects = effects;
-        (unit as any).burning = true;
-        (unit as any).burningUntil = Math.max((unit as any).burningUntil || 0, now + durationMs);
+        (entity as any).damageOverTimeEffects = effects;
+        this.syncDamageOverTimeStatus(entity, effects, now);
     }
 
     private processDamageOverTime(deltaTimeSeconds: number, now: number) {
-        this.units.forEach(unit => {
-            const owner = this.players.get(unit.ownerId);
-            const effects = (((unit as any).damageOverTimeEffects || []) as Array<{
-                type: string;
-                endsAt: number;
-                damagePerSecond: number;
-            }>).filter(effect => effect.endsAt > now);
+        const processEntityEffects = (entity: any, ownerId: string | undefined, protectedByRepairDock: boolean = false) => {
+            const owner = ownerId ? this.players.get(ownerId) : undefined;
+            const effects = (((entity as any).damageOverTimeEffects || []) as DamageOverTimeEffect[])
+                .filter(effect => effect.endsAt > now);
 
-            if (effects.length === 0) {
-                (unit as any).damageOverTimeEffects = [];
-                if (((unit as any).burningUntil || 0) <= now) {
-                    delete (unit as any).burning;
-                    delete (unit as any).burningUntil;
-                }
+            (entity as any).damageOverTimeEffects = effects;
+            this.syncDamageOverTimeStatus(entity, effects, now);
+
+            if (effects.length === 0 || owner?.godMode) {
                 return;
             }
 
-            (unit as any).damageOverTimeEffects = effects;
-            if (owner?.godMode) return;
-
-            const protectedByRepairDock = this.isUnitWithinFriendlyRepairDock(unit);
             const totalDamagePerSecond = effects.reduce((sum, effect) => {
                 let effectDamage = effect.damagePerSecond;
                 if (protectedByRepairDock && effect.type === 'naval_mine_burn') {
@@ -1029,9 +1166,66 @@ export class GameState {
                 }
                 return sum + effectDamage;
             }, 0);
-            unit.health -= totalDamagePerSecond * deltaTimeSeconds;
-            (unit as any).burning = true;
-            (unit as any).burningUntil = Math.max(...effects.map(effect => effect.endsAt));
+
+            entity.health -= totalDamagePerSecond * deltaTimeSeconds;
+        };
+
+        this.units.forEach(unit => {
+            processEntityEffects(unit, unit.ownerId, this.isUnitWithinFriendlyRepairDock(unit));
+        });
+
+        this.map.islands.forEach(island => {
+            island.buildings.forEach(building => {
+                processEntityEffects(building, building.ownerId);
+            });
+        });
+
+        (this.map.waterBuildings || []).forEach(building => {
+            processEntityEffects(building, building.ownerId);
+        });
+
+        this.map.oilSpots.forEach(spot => {
+            const building = (spot as any).building;
+            if (!building || this.isOilStructureBackedByIslandBuilding(building)) return;
+            processEntityEffects(building, (spot as any).ownerId || building.ownerId);
+        });
+    }
+
+    private applyMothershipRadiation(ownerId: string, centerX: number, centerY: number, now: number) {
+        const applyRadiation = (entity: any, entityOwnerId: string | undefined, x: number, y: number) => {
+            if (!entityOwnerId || entityOwnerId === ownerId || entity.health <= 0) return;
+            if (Math.hypot(x - centerX, y - centerY) > MOTHERSHIP_RADIATION_RADIUS) return;
+            this.applyDamageOverTimeEffect(
+                entity,
+                'radiation',
+                MOTHERSHIP_RADIATION_STACK_DURATION_MS,
+                MOTHERSHIP_RADIATION_STACK_DAMAGE_PER_SECOND,
+                now,
+                { stackable: true }
+            );
+        };
+
+        this.units.forEach(unit => {
+            applyRadiation(unit, unit.ownerId, unit.x, unit.y);
+        });
+
+        this.map.islands.forEach(island => {
+            if (Math.hypot(island.x - centerX, island.y - centerY) > island.radius + MOTHERSHIP_RADIATION_RADIUS + 60) return;
+            island.buildings.forEach(building => {
+                const bx = island.x + (building.x || 0);
+                const by = island.y + (building.y || 0);
+                applyRadiation(building, building.ownerId, bx, by);
+            });
+        });
+
+        (this.map.waterBuildings || []).forEach(building => {
+            applyRadiation(building, building.ownerId, building.x || 0, building.y || 0);
+        });
+
+        this.map.oilSpots.forEach(spot => {
+            const building = (spot as any).building;
+            if (!building || this.isOilStructureBackedByIslandBuilding(building)) return;
+            applyRadiation(building, (spot as any).ownerId || building.ownerId, spot.x, spot.y);
         });
     }
 
@@ -1634,6 +1828,10 @@ export class GameState {
     }
 
     setRequiredPlayers(count: number) {
+        if (this.isRankedQuickMatch()) {
+            this.requiredPlayers = 6;
+            return;
+        }
         this.requiredPlayers = Math.max(1, Math.min(10, count));
         // If we now have enough players, trigger check
         // However, checkVotingStart needs 'io' which we don't have here easily without passing it.
@@ -1642,6 +1840,11 @@ export class GameState {
     }
 
     forceStart(io: any, roomId: string) {
+        if (!this.allowForceStart) {
+            console.warn(`[GameState] forceStart ignored for queueType=${this.queueType} roomId=${roomId}`);
+            return;
+        }
+
         if (this.status === 'waiting') {
             // Update required players to match current count to ensure logic holds
             // FIX: Ensure host is included in human count
@@ -1663,6 +1866,8 @@ export class GameState {
         console.log(`Starting Custom Game in room ${roomId} with map ${mapType}`);
         this.mapType = mapType;
         this.requiredPlayers = 1;
+        this.configureQueueType('standard');
+        this.resetMatchResolutionState();
 
         // Skip voting, start immediately
         this.status = 'voting'; // Temporarily set to voting so finalize accepts it
@@ -1736,6 +1941,7 @@ export class GameState {
 
     finalizeMapAndStart(io: any, roomId: string) {
         if (this.status !== 'voting' && this.status !== 'starting') return;
+        this.resetMatchResolutionState();
 
         // Lock transition to prevent bounce back to lobby during generation
         if (this.status === 'voting') {
@@ -1755,6 +1961,13 @@ export class GameState {
         // Double check player count (unless testing/campaign)
         // FIX: One-way transition. Only fail if critically impossible (e.g. 0 humans)
         const humanCount = Array.from(this.players.values()).filter(p => !p.isBot).length;
+        if (this.isRankedQuickMatch() && humanCount < this.requiredPlayers) {
+            console.log(`[LOBBY_STATE_CHANGE] from=${this.status} to=waiting reason=ranked_queue_missing_players humans=${humanCount}`);
+            this.status = 'waiting';
+            io.to(roomId).emit('gameStatus', 'waiting');
+            io.to(roomId).emit('MATCH_START_FAILED', { reason: 'Ranked quick match needs 6 human players before it can start.' });
+            return;
+        }
         if (humanCount < 1) {
             console.log(`[LOBBY_STATE_CHANGE] from=${this.status} to=waiting reason=no_humans humans=${humanCount}`);
             this.status = 'waiting';
@@ -1941,8 +2154,8 @@ export class GameState {
         // If game is playing, mark as eliminated instead of removing
         // This ensures Game Over logic (player count) works correctly
         if (this.status === 'playing' && player) {
-            player.status = 'eliminated';
-            console.log(`Player ${id} disconnected during game. Marked as eliminated.`);
+            console.log(`Player ${id} disconnected during game. Marking as eliminated.`);
+            this.eliminatePlayer(id, 'PLAYER_DISCONNECTED');
         } else {
             this.players.delete(id);
         }
@@ -4379,8 +4592,8 @@ export class GameState {
             const stats = UnitData[type];
             if (stats?.height === 2) return 'AIR_2';
             if (stats?.height === 1) return 'AIR_1';
-            if (type === 'mothership') return 'AIR_2';
-            if (['light_plane', 'heavy_plane', 'alien_scout', 'heavy_alien'].includes(type)) return 'AIR_1';
+            if (type === 'mothership' || type === 'heavy_plane') return 'AIR_2';
+            if (['light_plane', 'alien_scout', 'heavy_alien'].includes(type)) return 'AIR_1';
             return 'GROUND';
         };
 
@@ -4415,12 +4628,15 @@ export class GameState {
         this.units.forEach(attacker => {
             const attackerOwner = this.players.get(attacker.ownerId);
             if (attackerOwner?.status === 'eliminated') return;
+            const isMissileLauncher = attacker.type === 'missile_launcher';
 
             if (attacker.type === 'mothership' && (attacker as any).laserTargetId) {
                 const targetId = (attacker as any).laserTargetId;
                 let targetUnit = this.units.find(u => u.id === targetId);
                 let targetBuilding: any = null;
                 let targetIsland: any = null;
+                let targetWorldX = attacker.x;
+                let targetWorldY = attacker.y;
 
                 if (!targetUnit) {
                     for (const island of this.map.islands) {
@@ -4434,6 +4650,8 @@ export class GameState {
                 }
 
                 if (targetUnit) {
+                    targetWorldX = targetUnit.x;
+                    targetWorldY = targetUnit.y;
                     this.setUnitFacingFromVector(attacker, targetUnit.x - attacker.x, targetUnit.y - attacker.y);
                 } else if (targetBuilding) {
                     let buildingX = 0;
@@ -4448,39 +4666,32 @@ export class GameState {
                             buildingY = oilSpot.y;
                         }
                     }
+                    targetWorldX = buildingX;
+                    targetWorldY = buildingY;
                     this.setUnitFacingFromVector(attacker, buildingX - attacker.x, buildingY - attacker.y);
                 }
 
                 if (now > ((attacker as any).laserEndTime || 0) || (!targetUnit && !targetBuilding)) {
                     (attacker as any).laserTargetId = null;
                     attacker.lastAttackTime = now;
-                } else if (now - ((attacker as any).lastLaserTick || 0) >= 100) {
+                } else if (now - ((attacker as any).lastLaserTick || 0) >= MOTHERSHIP_BEAM_TICK_MS) {
                     (attacker as any).lastLaserTick = now;
-                    const damage = 25;
+                    const damage = MOTHERSHIP_BEAM_DIRECT_DAMAGE;
                     if (targetUnit) {
                         if (!this.players.get(targetUnit.ownerId)?.godMode) targetUnit.health -= damage;
                     } else if (targetBuilding) {
                         this.damageBuilding(targetBuilding, damage);
-                        if (targetBuilding.health <= 0) {
-                            if (targetIsland) {
-                                targetIsland.buildings = targetIsland.buildings.filter((b: any) => b.id !== targetBuilding.id);
-                                if (targetBuilding.type === 'base' && targetBuilding.ownerId && this.shouldEliminateOnBaseLoss(targetBuilding.ownerId)) {
-                                    this.eliminatePlayer(targetBuilding.ownerId, 'HQ_DESTROYED');
-                                }
-                                if (targetBuilding.type === 'mine') {
-                                    const spot = targetIsland.goldSpots.find((s: any) => s.occupiedBy === targetBuilding.id);
-                                    if (spot) spot.occupiedBy = undefined;
-                                }
-                            }
-                            this.destroyOilStructureById(targetBuilding.id);
-                        }
                     }
+
+                    this.applyMothershipRadiation(attacker.ownerId, targetWorldX, targetWorldY, now);
                 }
                 return;
             }
 
             if (attacker.damage <= 0) return;
-            const onCooldown = !!(attacker.lastAttackTime && now - attacker.lastAttackTime < attacker.fireRate);
+            const onCooldown = isMissileLauncher
+                ? !!(attacker.reloadEndsAt && now < attacker.reloadEndsAt)
+                : !!(attacker.lastAttackTime && now - attacker.lastAttackTime < attacker.fireRate);
 
             // Spatial Lookup for units
             const nearbyEnemies = this.getNearbyUnits(attacker.x, attacker.y, attacker.range)
@@ -4501,6 +4712,14 @@ export class GameState {
                         }
                     });
                 });
+                (this.map.waterBuildings || []).forEach(b => {
+                    if (!b.ownerId || b.ownerId === attacker.ownerId) return;
+                    const bx = b.x || 0;
+                    const by = b.y || 0;
+                    if (Math.hypot(bx - attacker.x, by - attacker.y) <= attacker.range) {
+                        buildingsInRange.push({ ...b, realX: bx, realY: by, isWaterBuilding: true });
+                    }
+                });
                 this.map.oilSpots.forEach(spot => {
                     const b = (spot as any).building;
                     if (b && (spot as any).ownerId && (spot as any).ownerId !== attacker.ownerId) {
@@ -4515,10 +4734,14 @@ export class GameState {
                 buildingsInRange = (attacker as any).cachedBuildingsInRange || [];
             }
 
-            if (attacker.type === 'missile_launcher') { /* nearbyEnemies = [] */ }
             let targets: any[] = [];
             if (attacker.type === 'missile_launcher') {
                 targets = buildingsInRange;
+            } else if (attacker.type === 'heavy_plane') {
+                targets = [
+                    ...buildingsInRange,
+                    ...nearbyEnemies.filter(candidate => getLayer(candidate.type) === 'GROUND')
+                ];
             } else if (attacker.type === 'destroyer' || attacker.type === 'pirate_ship' || attacker.type === 'aircraft_carrier') {
                 const baseTargets = buildingsInRange.filter(candidate => candidate.type === 'base');
                 if (baseTargets.length > 0) {
@@ -4530,6 +4753,12 @@ export class GameState {
                 }
             } else {
                 targets = [...nearbyEnemies, ...buildingsInRange];
+            }
+
+            if (isMissileLauncher && targets.length === 0 && (attacker.salvoShotsRemaining ?? 0) > 0) {
+                attacker.salvoShotsRemaining = 0;
+                attacker.salvoNextShotTime = undefined;
+                attacker.reloadEndsAt = now + Math.round(attacker.fireRate * MISSILE_LAUNCHER_ABORT_RELOAD_RATIO);
             }
 
             if (targets.length > 0) {
@@ -4556,10 +4785,74 @@ export class GameState {
 
                 if (attacker.type === 'mothership') {
                     (attacker as any).laserTargetId = target.id;
-                    (attacker as any).laserEndTime = now + 1000;
+                    (attacker as any).laserEndTime = now + MOTHERSHIP_BEAM_DURATION_MS;
                     (attacker as any).lastLaserTick = now;
                     attacker.lastAttackTime = now;
-                    io.to(roomId).emit('laserBeam', { attackerId: attacker.id, targetId: target.id, x1: attacker.x, y1: attacker.y, x2: tx, y2: ty, duration: 1000, color: 0x0088FF });
+                    io.to(roomId).emit('laserBeam', {
+                        attackerId: attacker.id,
+                        targetId: target.id,
+                        x1: attacker.x,
+                        y1: attacker.y,
+                        x2: tx,
+                        y2: ty,
+                        duration: MOTHERSHIP_BEAM_DURATION_MS,
+                        color: 0x0088FF
+                    });
+                } else if (attacker.type === 'heavy_plane') {
+                    const blastRadius = 90;
+                    this.pendingProjectiles.push({
+                        attackerId: attacker.id,
+                        x1: attacker.x,
+                        y1: attacker.y,
+                        x2: tx,
+                        y2: ty,
+                        type: 'heavy_plane_bomb',
+                        speed: 760,
+                        radius: blastRadius
+                    });
+
+                    this.units.forEach(u => {
+                        if (
+                            u.ownerId !== attacker.ownerId &&
+                            u.health > 0 &&
+                            getLayer(u.type) === 'GROUND' &&
+                            Math.hypot(u.x - tx, u.y - ty) <= blastRadius
+                        ) {
+                            if (!this.players.get(u.ownerId)?.godMode) u.health -= attacker.damage;
+                        }
+                    });
+
+                    this.map.islands.forEach(island => {
+                        if (Math.hypot(island.x - tx, island.y - ty) > island.radius + blastRadius + 50) return;
+                        island.buildings.forEach(b => {
+                            if (!b.ownerId || b.ownerId === attacker.ownerId || b.health <= 0) return;
+                            const bx = island.x + (b.x || 0);
+                            const by = island.y + (b.y || 0);
+                            if (Math.hypot(bx - tx, by - ty) <= blastRadius) {
+                                this.damageBuilding(b, attacker.damage);
+                            }
+                        });
+                    });
+
+                    (this.map.waterBuildings || []).forEach(b => {
+                        if (!b.ownerId || b.ownerId === attacker.ownerId || b.health <= 0) return;
+                        const bx = b.x || 0;
+                        const by = b.y || 0;
+                        if (Math.hypot(bx - tx, by - ty) <= blastRadius) {
+                            this.damageBuilding(b, attacker.damage);
+                        }
+                    });
+
+                    this.map.oilSpots.forEach(spot => {
+                        const b = (spot as any).building;
+                        if (!b || !(spot as any).ownerId || (spot as any).ownerId === attacker.ownerId || b.health <= 0) return;
+                        if (this.isOilStructureBackedByIslandBuilding(b)) return;
+                        if (Math.hypot(spot.x - tx, spot.y - ty) <= blastRadius) {
+                            this.damageBuilding(b, attacker.damage);
+                        }
+                    });
+
+                    attacker.lastAttackTime = now;
                 } else if (attacker.type === 'aircraft_carrier') {
                     this.pendingProjectiles.push({ attackerId: attacker.id, x1: attacker.x, y1: attacker.y, x2: tx, y2: ty, type: 'rocket_missile', speed: 600 });
                     const aoe = 150;
@@ -4591,6 +4884,49 @@ export class GameState {
                         });
                     });
                     attacker.lastAttackTime = now;
+                } else if (attacker.type === 'missile_launcher') {
+                    if ((attacker.salvoShotsRemaining ?? 0) <= 0) {
+                        attacker.salvoShotsRemaining = MISSILE_LAUNCHER_SALVO_SHOTS;
+                        attacker.salvoNextShotTime = now;
+                    }
+
+                    if ((attacker.salvoNextShotTime ?? now) > now) {
+                        return;
+                    }
+
+                    this.pendingProjectiles.push({
+                        attackerId: attacker.id,
+                        x1: attacker.x,
+                        y1: attacker.y,
+                        x2: tx,
+                        y2: ty,
+                        type: 'rocket_missile',
+                        speed: 640,
+                        radius: 46
+                    });
+
+                    if ('realX' in target) {
+                        const building = target.isOilBuilding
+                            ? (this.map.oilSpots.find(s => s.occupiedBy === target.id) as any)?.building
+                            : target.isWaterBuilding
+                                ? (this.map.waterBuildings || []).find(b => b.id === target.id)
+                                : this.map.islands.find(i => i.id === target.islandId)?.buildings.find(b => b.id === target.id);
+                        if (building) {
+                            this.damageBuilding(building, attacker.damage);
+                        }
+                    } else {
+                        if (!this.players.get(target.ownerId)?.godMode) target.health -= attacker.damage;
+                    }
+
+                    attacker.lastAttackTime = now;
+                    attacker.salvoShotsRemaining = Math.max(0, (attacker.salvoShotsRemaining ?? 1) - 1);
+
+                    if ((attacker.salvoShotsRemaining ?? 0) > 0) {
+                        attacker.salvoNextShotTime = now + MISSILE_LAUNCHER_BURST_INTERVAL_MS;
+                    } else {
+                        attacker.salvoNextShotTime = undefined;
+                        attacker.reloadEndsAt = now + attacker.fireRate;
+                    }
                 } else if (attacker.type === 'rocketeer') {
                     this.pendingProjectiles.push({ attackerId: attacker.id, x1: attacker.x, y1: attacker.y, x2: tx, y2: ty, type: 'rocketeer_rocket', speed: 720 });
                     if ('realX' in target) {
@@ -4923,16 +5259,14 @@ export class GameState {
             this.matchState = 'ENDED';
             this.winnerId = winner ? winner.id : null;
             this.endReason = 'ALL_ENEMIES_DEFEATED';
+            if (winner) {
+                this.placementByPlayerId.set(winner.id, 1);
+            }
 
             console.log(`Match Ended! Winner: ${this.winnerId}`);
 
             if (this.io && this.roomId) {
-                const payload = {
-                    winnerPlayerId: this.winnerId,
-                    eliminatedPlayerIds: Array.from(this.eliminatedPlayerIds),
-                    endReason: this.endReason,
-                    timestamp: Date.now()
-                };
+                const payload = this.buildMatchEndedPayload();
 
                 // Emit legacy event for compatibility if needed
                 this.io.to(this.roomId).emit('gameOver', {
@@ -4953,12 +5287,7 @@ export class GameState {
             this.endReason = 'ALL_ENEMIES_DEFEATED'; // or DRAW?
             console.log(`Match Ended! Draw.`);
             if (this.io && this.roomId) {
-                const payload = {
-                    winnerPlayerId: null,
-                    eliminatedPlayerIds: Array.from(this.eliminatedPlayerIds),
-                    endReason: this.endReason,
-                    timestamp: Date.now()
-                };
+                const payload = this.buildMatchEndedPayload();
 
                 this.io.to(this.roomId).emit('gameOver', {
                     winnerId: null,
@@ -4977,9 +5306,11 @@ export class GameState {
     eliminatePlayer(playerId: string, reason: string = 'HQ_DESTROYED') {
         const player = this.players.get(playerId);
         if (player && player.status !== 'eliminated') {
+            const activePlayersBeforeElimination = Array.from(this.players.values()).filter(candidate => candidate.status !== 'eliminated').length;
             player.status = 'eliminated';
             player.canBuildHQ = false;
             this.eliminatedPlayerIds.add(playerId);
+            this.placementByPlayerId.set(playerId, Math.max(1, activePlayersBeforeElimination));
             console.log(`Player ${playerId} eliminated! Reason: ${reason}`);
 
             // Clear island control immediately, but keep owned entities for collapse burn-down.
@@ -4996,7 +5327,12 @@ export class GameState {
             if (this.matchState !== 'ENDED') {
                 // If match is still running, emit just the elimination event
                 if (this.io && this.roomId) {
-                    this.io.to(this.roomId).emit('playerEliminated', { playerId, reason });
+                    this.io.to(this.roomId).emit('playerEliminated', {
+                        playerId,
+                        reason,
+                        placement: this.placementByPlayerId.get(playerId) || null,
+                        participantCount: this.players.size,
+                    });
                 }
             }
 
