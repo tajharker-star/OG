@@ -24,6 +24,7 @@ on:
         options:
           - public
           - beta
+          - continue
       steam_promote_live:
         description: "Promote uploaded build live after upload"
         type: boolean
