@@ -263,6 +263,15 @@ export class MainScene extends Phaser.Scene {
     }
   }
 
+  private useLightweightCombatFx() {
+    const graphics = this.cachedSettings.graphics;
+    const measuredFps = this.game?.loop?.actualFps ?? graphics.targetFps ?? 60;
+
+    if (!graphics.showParticles) return true;
+    if (!graphics.highQuality) return true;
+    return measuredFps > 0 && measuredFps < 48;
+  }
+
   private rebuildBuildingRangeIndex() {
     this.buildingRangeIndex.clear();
     if (!this.currentMap) return;
@@ -1559,6 +1568,7 @@ export class MainScene extends Phaser.Scene {
         this.getSpatialSoundLocation(originX, originY)
       );
     }
+    const lightweightFx = this.useLightweightCombatFx();
 
     if (data.type === 'tesla') {
       const graphics = this.add.graphics();
@@ -1665,10 +1675,11 @@ export class MainScene extends Phaser.Scene {
           });
 
           if (isRocketeerRocket) {
-            for (let i = 0; i < 4; i++) {
+            const sparkCount = lightweightFx ? 2 : 4;
+            for (let i = 0; i < sparkCount; i++) {
               const spark = this.add.circle(data.x2, data.y2, 2, i % 2 === 0 ? impactColors.sparkA ?? impactColors.core : impactColors.sparkB ?? impactColors.ring);
               spark.setDepth(101);
-              const sparkAngle = (Math.PI * 2 * i) / 4 + Math.random() * 0.4;
+              const sparkAngle = (Math.PI * 2 * i) / sparkCount + Math.random() * 0.4;
               this.tweens.add({
                 targets: spark,
                 x: data.x2 + Math.cos(sparkAngle) * Phaser.Math.Between(12, 24),
@@ -1766,10 +1777,11 @@ export class MainScene extends Phaser.Scene {
             onComplete: () => ring.destroy()
           });
 
-          for (let i = 0; i < 6; i++) {
+          const emberCount = lightweightFx ? 3 : 6;
+          for (let i = 0; i < emberCount; i++) {
             const ember = this.add.circle(data.x2, data.y2, 2.2, i % 2 === 0 ? impactColors.sparkA ?? impactColors.core : impactColors.sparkB ?? impactColors.ring);
             ember.setDepth(101);
-            const emberAngle = (Math.PI * 2 * i) / 6 + Math.random() * 0.35;
+            const emberAngle = (Math.PI * 2 * i) / emberCount + Math.random() * 0.35;
             this.tweens.add({
               targets: ember,
               x: data.x2 + Math.cos(emberAngle) * Phaser.Math.Between(18, 34),
@@ -1940,10 +1952,11 @@ export class MainScene extends Phaser.Scene {
           });
 
           if (isHeavyAlien) {
-            for (let i = 0; i < 4; i += 1) {
+            const sparkCount = lightweightFx ? 2 : 4;
+            for (let i = 0; i < sparkCount; i += 1) {
               const spark = this.add.circle(data.x2, data.y2, 2.1, i % 2 === 0 ? (impactColors.sparkA ?? impactColors.core) : (impactColors.sparkB ?? impactColors.ring), 0.92);
               spark.setDepth(101);
-              const sparkAngle = (Math.PI * 2 * i) / 4 + Math.random() * 0.25;
+              const sparkAngle = (Math.PI * 2 * i) / sparkCount + Math.random() * 0.25;
               this.tweens.add({
                 targets: spark,
                 x: data.x2 + Math.cos(sparkAngle) * Phaser.Math.Between(10, 20),
@@ -2493,7 +2506,17 @@ export class MainScene extends Phaser.Scene {
     });
 
     socket.on('projectilesBatch', (projectiles: { attackerId?: string, x1: number, y1: number, x2: number, y2: number, type: string, speed: number, radius?: number }[]) => {
-        projectiles.forEach(projectile => this.handleProjectileEvent(projectile));
+        const lightweightFx = this.useLightweightCombatFx();
+        const maxVisualProjectiles = lightweightFx ? 28 : 80;
+        if (projectiles.length <= maxVisualProjectiles) {
+            projectiles.forEach((projectile) => this.handleProjectileEvent(projectile));
+            return;
+        }
+
+        const stride = Math.max(1, Math.ceil(projectiles.length / maxVisualProjectiles));
+        for (let index = 0; index < projectiles.length; index += stride) {
+            this.handleProjectileEvent(projectiles[index]);
+        }
     });
 
     socket.on('laserBeam', (data: { attackerId: string, targetId: string, x1: number, y1: number, x2: number, y2: number, duration: number, color: number }) => {
@@ -2502,6 +2525,7 @@ export class MainScene extends Phaser.Scene {
         this.registerAttackFacing(data.attackerId, initialOrigin.x, initialOrigin.y, data.x2, data.y2, data.duration);
         soundEffectsManager.playUnitFire('mothership', this.getSpatialSoundLocation(initialOrigin.x, initialOrigin.y));
         const beamColors = this.getMothershipBeamColors(data.attackerId, data.color);
+        const lightweightFx = this.useLightweightCombatFx();
         const beam = this.add.graphics();
         beam.setDepth(WORLD_LASER_BEAM_DEPTH);
 
@@ -2514,55 +2538,78 @@ export class MainScene extends Phaser.Scene {
         const impactCore = this.add.circle(0, 0, 16, beamColors.coreColor, 0.94);
         const impactRing = this.add.circle(0, 0, 40, beamColors.beamColor, 0);
         impactRing.setStrokeStyle(4.2, beamColors.beamColor, 0.96);
-
-        const impactSparkHorizontal = this.add.rectangle(0, 0, 48, 3.4, beamColors.flareColor, 0.74);
-        const impactSparkVertical = this.add.rectangle(0, 0, 3.4, 48, beamColors.flareColor, 0.74);
-        const impactSparkDiagA = this.add.rectangle(0, 0, 42, 2.8, beamColors.flareColor, 0.56);
-        impactSparkDiagA.setRotation(Math.PI / 4);
-        const impactSparkDiagB = this.add.rectangle(0, 0, 42, 2.8, beamColors.flareColor, 0.56);
-        impactSparkDiagB.setRotation(-Math.PI / 4);
+        const impactSparks: Phaser.GameObjects.Rectangle[] = [];
+        if (!lightweightFx) {
+            const impactSparkHorizontal = this.add.rectangle(0, 0, 48, 3.4, beamColors.flareColor, 0.74);
+            const impactSparkVertical = this.add.rectangle(0, 0, 3.4, 48, beamColors.flareColor, 0.74);
+            const impactSparkDiagA = this.add.rectangle(0, 0, 42, 2.8, beamColors.flareColor, 0.56);
+            impactSparkDiagA.setRotation(Math.PI / 4);
+            const impactSparkDiagB = this.add.rectangle(0, 0, 42, 2.8, beamColors.flareColor, 0.56);
+            impactSparkDiagB.setRotation(-Math.PI / 4);
+            impactSparks.push(impactSparkHorizontal, impactSparkVertical, impactSparkDiagA, impactSparkDiagB);
+        }
 
         impact.add([
             impactGlow,
             impactBurst,
             impactRing,
-            impactSparkHorizontal,
-            impactSparkVertical,
-            impactSparkDiagA,
-            impactSparkDiagB,
+            ...impactSparks,
             impactCore,
         ]);
 
-        const impactTweens = [
-            this.tweens.add({
-                targets: impactGlow,
-                scale: { from: 0.72, to: 1.28 },
-                alpha: { from: 0.28, to: 0.08 },
-                duration: 260,
-                yoyo: true,
-                repeat: -1,
-                ease: 'Sine.easeInOut'
-            }),
-            this.tweens.add({
-                targets: impactBurst,
-                scale: { from: 0.7, to: 1.42 },
-                alpha: { from: 0.48, to: 0.14 },
-                duration: 220,
-                yoyo: true,
-                repeat: -1,
-                ease: 'Sine.easeInOut'
-            }),
-            this.tweens.add({
-                targets: impactRing,
-                scale: { from: 0.62, to: 1.34 },
-                alpha: { from: 0.98, to: 0.2 },
-                duration: 260,
-                yoyo: true,
-                repeat: -1,
-                ease: 'Sine.easeInOut'
-            }),
-            this.tweens.add({
-                targets: [impactSparkHorizontal, impactSparkVertical, impactSparkDiagA, impactSparkDiagB],
+        const impactTweens = lightweightFx
+            ? [
+                this.tweens.add({
+                    targets: [impactGlow, impactBurst, impactCore],
+                    alpha: { from: 0.44, to: 0.16 },
+                    duration: 320,
+                    yoyo: true,
+                    repeat: -1,
+                    ease: 'Sine.easeInOut'
+                }),
+            ]
+            : [
+                this.tweens.add({
+                    targets: impactGlow,
+                    scale: { from: 0.72, to: 1.28 },
+                    alpha: { from: 0.28, to: 0.08 },
+                    duration: 260,
+                    yoyo: true,
+                    repeat: -1,
+                    ease: 'Sine.easeInOut'
+                }),
+                this.tweens.add({
+                    targets: impactBurst,
+                    scale: { from: 0.7, to: 1.42 },
+                    alpha: { from: 0.48, to: 0.14 },
+                    duration: 220,
+                    yoyo: true,
+                    repeat: -1,
+                    ease: 'Sine.easeInOut'
+                }),
+                this.tweens.add({
+                    targets: impactRing,
+                    scale: { from: 0.62, to: 1.34 },
+                    alpha: { from: 0.98, to: 0.2 },
+                    duration: 260,
+                    yoyo: true,
+                    repeat: -1,
+                    ease: 'Sine.easeInOut'
+                }),
+                this.tweens.add({
+                    targets: impactCore,
+                    scale: { from: 0.92, to: 1.16 },
+                    alpha: { from: 0.82, to: 1 },
+                    duration: 180,
+                    yoyo: true,
+                    repeat: -1,
+                    ease: 'Sine.easeInOut'
+                }),
+            ];
+
+        if (!lightweightFx && impactSparks.length > 0) {
+            impactTweens.push(this.tweens.add({
+                targets: impactSparks,
                 alpha: { from: 0.32, to: 0.88 },
                 scaleX: { from: 0.84, to: 1.16 },
                 scaleY: { from: 0.84, to: 1.16 },
@@ -2570,20 +2617,12 @@ export class MainScene extends Phaser.Scene {
                 yoyo: true,
                 repeat: -1,
                 ease: 'Sine.easeInOut'
-            }),
-            this.tweens.add({
-                targets: impactCore,
-                scale: { from: 0.92, to: 1.16 },
-                alpha: { from: 0.82, to: 1 },
-                duration: 180,
-                yoyo: true,
-                repeat: -1,
-                ease: 'Sine.easeInOut'
-            }),
-        ];
+            }));
+        }
         
-        const beamState = { width: 7.8, auraPulse: 1, alpha: 1 };
+        const beamState = { width: lightweightFx ? 5.8 : 7.8, auraPulse: 1, alpha: 1 };
         const impactCoverRadius = 52;
+        let lastBeamDrawAt = 0;
 
         const drawBeam = () => {
             beam.clear();
@@ -2634,11 +2673,13 @@ export class MainScene extends Phaser.Scene {
             beam.lineTo(beamEndX, beamEndY);
             beam.strokePath();
 
-            beam.lineStyle(midWidth, beamColors.glowColor, beamState.alpha * 0.34);
-            beam.beginPath();
-            beam.moveTo(beamStartX, beamStartY);
-            beam.lineTo(beamEndX, beamEndY);
-            beam.strokePath();
+            if (!lightweightFx) {
+                beam.lineStyle(midWidth, beamColors.glowColor, beamState.alpha * 0.34);
+                beam.beginPath();
+                beam.moveTo(beamStartX, beamStartY);
+                beam.lineTo(beamEndX, beamEndY);
+                beam.strokePath();
+            }
 
             beam.lineStyle(beamState.width, beamColors.beamColor, beamState.alpha * 0.96);
             beam.beginPath();
@@ -2657,9 +2698,9 @@ export class MainScene extends Phaser.Scene {
 
         const tween = this.tweens.add({
             targets: beamState,
-            width: { from: 7.1, to: 12.2 },
-            auraPulse: { from: 0.72, to: 1.24 },
-            duration: 180,
+            width: { from: lightweightFx ? 5.6 : 7.1, to: lightweightFx ? 8.8 : 12.2 },
+            auraPulse: { from: 0.74, to: 1.24 },
+            duration: lightweightFx ? 320 : 180,
             yoyo: true,
             repeat: -1,
             ease: 'Sine.easeInOut',
@@ -2667,6 +2708,13 @@ export class MainScene extends Phaser.Scene {
                 if (!beam.scene) {
                     tween.stop();
                     return;
+                }
+                if (lightweightFx) {
+                    const now = this.time.now;
+                    if (now - lastBeamDrawAt < 42) {
+                        return;
+                    }
+                    lastBeamDrawAt = now;
                 }
                 drawBeam();
             }

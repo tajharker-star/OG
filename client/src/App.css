@@ -66,6 +66,16 @@ h3 {
   width: min(92vw, 1000px);
 }
 
+.menu--multiplayer {
+  max-width: 1120px;
+  width: min(95vw, 1120px);
+}
+
+.menu--leaderboards {
+  max-width: 1080px;
+  width: min(94vw, 1080px);
+}
+
 .menu-title-accessible {
   position: absolute;
   width: 1px;
@@ -93,6 +103,10 @@ h3 {
 
 .menu-column--skins {
     gap: 20px;
+}
+
+.menu-column--leaderboards {
+    gap: 16px;
 }
 
 .menu-main-actions {

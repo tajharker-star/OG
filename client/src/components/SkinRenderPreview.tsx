@@ -287,11 +287,11 @@ const resolveBuildingVariant = (type: BuildingType, variantId?: string): Buildin
 };
 
 const ECONOMY_YIELDS: Partial<Record<BuildingType, { gold: number; oil: number; cycleMs: number }>> = {
-    base: { gold: 10, oil: 0, cycleMs: 1000 },
-    mine: { gold: 50, oil: 0, cycleMs: 1000 },
-    farm: { gold: 25, oil: 0, cycleMs: 1000 },
-    oil_rig: { gold: 200, oil: 5, cycleMs: 1000 },
-    oil_well: { gold: 200, oil: 5, cycleMs: 1000 },
+    base: { gold: 20, oil: 0, cycleMs: 2000 },
+    mine: { gold: 100, oil: 0, cycleMs: 2000 },
+    farm: { gold: 50, oil: 0, cycleMs: 2000 },
+    oil_rig: { gold: 400, oil: 10, cycleMs: 2000 },
+    oil_well: { gold: 400, oil: 10, cycleMs: 2000 },
 };
 
 const BUILDING_RECRUIT_ROSTERS: Partial<Record<BuildingType, RecruitRosterEntry[]>> = {
@@ -993,8 +993,10 @@ export const SkinRenderPreview: React.FC<SkinRenderPreviewProps> = ({ skinId }) 
     const hostRef = useRef<HTMLDivElement | null>(null);
     const stageViewportRef = useRef<HTMLDivElement | null>(null);
     const selectorPaneRef = useRef<HTMLDivElement | null>(null);
+    const previewRenderTokenRef = useRef(0);
     const [fitZoom, setFitZoom] = useState(0.5);
     const [manualZoom, setManualZoom] = useState<number | null>(null);
+    const [isPreviewLoading, setIsPreviewLoading] = useState(true);
     const [selectedPreview, setSelectedPreview] = useState<PreviewSelection>({ kind: 'unit', type: DEFAULT_ATTACK_PREVIEW_UNIT });
     const [buildingVariantByType, setBuildingVariantByType] = useState<Partial<Record<BuildingType, string>>>({
         base: 'base_tier_1',
@@ -1033,6 +1035,21 @@ export const SkinRenderPreview: React.FC<SkinRenderPreviewProps> = ({ skinId }) 
     useEffect(() => {
         const host = hostRef.current;
         if (!host) return;
+        const renderToken = previewRenderTokenRef.current + 1;
+        previewRenderTokenRef.current = renderToken;
+        setIsPreviewLoading(true);
+        let disposed = false;
+
+        const markPreviewReady = () => {
+            if (disposed || previewRenderTokenRef.current !== renderToken) {
+                return;
+            }
+            window.requestAnimationFrame(() => {
+                if (!disposed && previewRenderTokenRef.current === renderToken) {
+                    setIsPreviewLoading(false);
+                }
+            });
+        };
 
         class SkinPreviewScene extends Phaser.Scene {
             constructor() {
@@ -1053,6 +1070,14 @@ export const SkinRenderPreview: React.FC<SkinRenderPreviewProps> = ({ skinId }) 
                 const rowLeft = 24;
                 const rowRight = rowLeft + usableWidth;
                 const stageHeight = descriptor.stageHeight;
+                const lowPerfPreview = descriptor.kind === 'unit'
+                    && (
+                        descriptor.unitType === 'mothership'
+                        || descriptor.unitType === 'aircraft_carrier'
+                        || descriptor.unitType === 'heavy_plane'
+                        || descriptor.unitType === 'missile_launcher'
+                        || descriptor.unitType === 'heavy_alien'
+                    );
 
                 this.cameras.main.setBackgroundColor('#081019');
                 const background = this.add.graphics();
@@ -1320,9 +1345,10 @@ export const SkinRenderPreview: React.FC<SkinRenderPreviewProps> = ({ skinId }) 
                         const smoke = this.add.circle(x, yPos, scaledRadius * 0.45, smokeColor, 0.55).setDepth(2.9);
                         this.tweens.add({ targets: smoke, y: yPos - scaledRadius * 0.42, scale: 2.15, alpha: 0, duration: 420, onComplete: () => smoke.destroy() });
                     }
-                    sparkColors.forEach((sparkColor, index) => {
+                    const sparkCount = lowPerfPreview ? Math.min(2, sparkColors.length) : sparkColors.length;
+                    sparkColors.slice(0, sparkCount).forEach((sparkColor, index) => {
                         const spark = this.add.circle(x, yPos, Math.max(2.2, scaledRadius * 0.1), sparkColor, 0.92).setDepth(3.3);
-                        const sparkAngle = (-Math.PI / 2) + ((Math.PI * 2 * index) / Math.max(1, sparkColors.length));
+                        const sparkAngle = (-Math.PI / 2) + ((Math.PI * 2 * index) / Math.max(1, sparkCount));
                         this.tweens.add({
                             targets: spark,
                             x: x + Math.cos(sparkAngle + Math.random() * 0.4) * Phaser.Math.Between(Math.round(scaledRadius * 0.8), Math.round(scaledRadius * 1.7)),
@@ -1366,8 +1392,25 @@ export const SkinRenderPreview: React.FC<SkinRenderPreviewProps> = ({ skinId }) 
                         beam.beginPath(); beam.moveTo(originX, originY); beam.lineTo(endX, endY); beam.strokePath();
                     };
                     draw();
-                    const widthTween = this.tweens.add({ targets: state, width: { from: 6.8, to: 10.8 }, auraPulse: { from: 0.78, to: 1.18 }, duration: 150, yoyo: true, repeat: 4, ease: 'Sine.easeInOut', onUpdate: draw });
-                    const impactTween = this.tweens.add({ targets: [impactGlow, impactBurst, impactRing, impactCore], alpha: { from: 0.4, to: 1 }, scale: { from: 0.86, to: 1.18 }, duration: 150, yoyo: true, repeat: 3, ease: 'Sine.easeInOut' });
+                    const widthTween = this.tweens.add({
+                        targets: state,
+                        width: { from: 6.8, to: 10.8 },
+                        auraPulse: { from: 0.78, to: 1.18 },
+                        duration: lowPerfPreview ? 180 : 150,
+                        yoyo: true,
+                        repeat: lowPerfPreview ? 2 : 4,
+                        ease: 'Sine.easeInOut',
+                        onUpdate: draw
+                    });
+                    const impactTween = this.tweens.add({
+                        targets: [impactGlow, impactBurst, impactRing, impactCore],
+                        alpha: { from: 0.4, to: 1 },
+                        scale: { from: 0.86, to: 1.18 },
+                        duration: lowPerfPreview ? 180 : 150,
+                        yoyo: true,
+                        repeat: lowPerfPreview ? 1 : 3,
+                        ease: 'Sine.easeInOut'
+                    });
                     this.time.delayedCall(420, () => {
                         widthTween.stop();
                         impactTween.stop();
@@ -1610,15 +1653,16 @@ export const SkinRenderPreview: React.FC<SkinRenderPreviewProps> = ({ skinId }) 
                         });
                     };
 
+                    const radiationTickDelayMs = lowPerfPreview ? 180 : 100;
                     this.time.addEvent({
-                        delay: 100,
+                        delay: radiationTickDelayMs,
                         loop: true,
                         callback: () => {
                             dummies.forEach((dummy) => {
                                 refreshRadiationLabel(dummy);
                                 const stacks = dummy.radiationExpiries.length;
                                 if (stacks > 0) {
-                                    applyDamageToDummy(dummy, stacks * 0.4);
+                                    applyDamageToDummy(dummy, stacks * 4 * (radiationTickDelayMs / 1000));
                                 }
                             });
                         },
@@ -1639,7 +1683,7 @@ export const SkinRenderPreview: React.FC<SkinRenderPreviewProps> = ({ skinId }) 
                                 const beamRadius = Math.max(36, (config.explosionRadius ?? 56) * 0.92);
                                 playPreviewBeam(muzzleX, muzzleY, liveTargetX, impactY, beamRadius);
                                 if (unitType === 'mothership') {
-                                    const tickCount = 10;
+                                    const tickCount = lowPerfPreview ? 6 : 10;
                                     for (let tick = 0; tick < tickCount; tick += 1) {
                                         this.time.delayedCall(tick * 100, () => {
                                             applyImpactDamage(liveTargetX, impactY, 25, 0);
@@ -2231,6 +2275,7 @@ export const SkinRenderPreview: React.FC<SkinRenderPreviewProps> = ({ skinId }) 
 
                 const stageAtmosphere = renderStage(STAGE_TOP_PADDING);
                 stageAtmosphere.setDepth(-1);
+                markPreviewReady();
             }
         }
 
@@ -2248,6 +2293,7 @@ export const SkinRenderPreview: React.FC<SkinRenderPreviewProps> = ({ skinId }) 
         });
 
         return () => {
+            disposed = true;
             game.destroy(true);
             host.innerHTML = '';
         };
@@ -2319,6 +2365,12 @@ export const SkinRenderPreview: React.FC<SkinRenderPreviewProps> = ({ skinId }) 
                             >
                                 <div ref={hostRef} className="skins-render-preview__canvas-host" />
                             </div>
+                            {isPreviewLoading && (
+                                <div className="skins-render-preview__loading-overlay">
+                                    <div className="skins-render-preview__loading-spinner" />
+                                    <div className="skins-render-preview__loading-copy">Loading unit theater...</div>
+                                </div>
+                            )}
                         </div>
                     </div>
 

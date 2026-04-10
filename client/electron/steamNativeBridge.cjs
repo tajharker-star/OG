@@ -332,6 +332,14 @@ class SteamNativeBridge extends EventEmitter {
     return this.invoke('activate_achievement', { achievementId });
   }
 
+  getLeaderboardSnapshot(payload) {
+    return this.invoke('get_leaderboard_snapshot', payload || {});
+  }
+
+  setLeaderboardScore(payload) {
+    return this.invoke('set_leaderboard_score', payload || {});
+  }
+
   acceptP2PSession(steamId) {
     return this.sendNotification('accept_p2p_session', { steamId });
   }

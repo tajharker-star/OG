@@ -886,6 +886,7 @@
 }
 
 .skins-render-preview__viewport {
+    position: relative;
     width: 100%;
     height: clamp(360px, 50vh, 720px);
     min-height: 360px;
@@ -897,6 +898,41 @@
     display: flex;
     align-items: flex-start;
     justify-content: center;
+}
+
+.skins-render-preview__loading-overlay {
+    position: absolute;
+    inset: 8px;
+    border-radius: 16px;
+    background: rgba(4, 8, 14, 0.72);
+    backdrop-filter: blur(2px);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    z-index: 4;
+    animation: skinsPreviewLoadingFade 0.2s ease-out;
+}
+
+.skins-render-preview__loading-spinner {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    border: 3px solid rgba(255, 255, 255, 0.2);
+    border-top-color: #ffe29f;
+    animation: spin 0.9s linear infinite;
+}
+
+.skins-render-preview__loading-copy {
+    font-size: 0.92rem;
+    color: #ffeec9;
+    letter-spacing: 0.04em;
+}
+
+@keyframes skinsPreviewLoadingFade {
+    from { opacity: 0; }
+    to { opacity: 1; }
 }
 
 .skins-render-preview__canvas-shell {

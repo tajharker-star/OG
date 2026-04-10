@@ -1445,6 +1445,37 @@ async function createWindow() {
         return { success: false, stored: false, rejected: Object.keys(statMap || {}), error: err.message };
       }
     });
+
+    ipcMain.removeHandler('steam:get-leaderboard-snapshot');
+    ipcMain.handle('steam:get-leaderboard-snapshot', async (_, options) => {
+      try {
+        return await steamBridge.getLeaderboardSnapshot(options || {});
+      } catch (err) {
+        console.error('[Steam] Failed to read leaderboard snapshot:', err);
+        return {
+          success: false,
+          name: String(options?.name || ''),
+          totalEntries: 0,
+          entries: [],
+          playerEntry: null,
+          error: err.message,
+        };
+      }
+    });
+
+    ipcMain.removeHandler('steam:set-leaderboard-score');
+    ipcMain.handle('steam:set-leaderboard-score', async (_, options) => {
+      try {
+        return await steamBridge.setLeaderboardScore(options || {});
+      } catch (err) {
+        console.error('[Steam] Failed to update leaderboard score:', err);
+        return {
+          success: false,
+          name: String(options?.name || ''),
+          error: err.message,
+        };
+      }
+    });
   } else {
     console.log('[Steam] Initialization failed or not running.');
     win.webContents.on('did-finish-load', () => {

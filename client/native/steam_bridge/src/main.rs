@@ -4,9 +4,10 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use steamworks::{
     AppId, Client, Friend, FriendFlags, FriendState, GameLobbyJoinRequested,
-    GameOverlayActivated, GameRichPresenceJoinRequested, LobbyDataUpdate, LobbyId, LobbyType,
-    P2PSessionConnectFail, P2PSessionRequest, PersonaStateChange, SendType, SteamId,
-    UserStatsReceived,
+    GameOverlayActivated, GameRichPresenceJoinRequested, Leaderboard, LeaderboardDataRequest,
+    LeaderboardDisplayType, LeaderboardEntry, LeaderboardSortMethod, LobbyDataUpdate, LobbyId,
+    LobbyType, P2PSessionConnectFail, P2PSessionRequest, PersonaStateChange, SendType, SteamId,
+    UploadScoreMethod, UserStatsReceived,
 };
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
@@ -423,6 +424,8 @@ fn handle_request(state: &Arc<BridgeState>, request: BridgeRequest) -> Result<Va
         "update_active_lobby_data" => handle_update_active_lobby_data(state, &request.params),
         "get_stats" => handle_get_stats(state, &request.params),
         "set_stats" => handle_set_stats(state, &request.params),
+        "get_leaderboard_snapshot" => handle_get_leaderboard_snapshot(state, &request.params),
+        "set_leaderboard_score" => handle_set_leaderboard_score(state, &request.params),
         "activate_achievement" => handle_activate_achievement(state, &request.params),
         "accept_p2p_session" => {
             let steam_id = require_steam_id(&request.params, "steamId")?;
@@ -805,6 +808,239 @@ fn handle_activate_achievement(state: &Arc<BridgeState>, params: &Value) -> Resu
         .store_stats()
         .map_err(|_| format!("Failed to store Steam achievement {achievement_id}."))?;
     Ok(json!({ "success": true }))
+}
+
+fn parse_leaderboard_sort_method(value: Option<&str>) -> LeaderboardSortMethod {
+    match value.map(|raw| raw.trim().to_ascii_lowercase()) {
+        Some(normalized) if normalized == "ascending" => LeaderboardSortMethod::Ascending,
+        _ => LeaderboardSortMethod::Descending,
+    }
+}
+
+fn parse_leaderboard_display_type(value: Option<&str>) -> LeaderboardDisplayType {
+    match value.map(|raw| raw.trim().to_ascii_lowercase()) {
+        Some(normalized) if normalized == "time_seconds" => LeaderboardDisplayType::TimeSeconds,
+        Some(normalized) if normalized == "time_milliseconds" => LeaderboardDisplayType::TimeMilliSeconds,
+        _ => LeaderboardDisplayType::Numeric,
+    }
+}
+
+fn parse_leaderboard_upload_method(value: Option<&str>) -> UploadScoreMethod {
+    match value.map(|raw| raw.trim().to_ascii_lowercase()) {
+        Some(normalized) if normalized == "force_update" => UploadScoreMethod::ForceUpdate,
+        _ => UploadScoreMethod::KeepBest,
+    }
+}
+
+fn find_or_create_leaderboard_sync(
+    state: &Arc<BridgeState>,
+    name: &str,
+    sort_method: LeaderboardSortMethod,
+    display_type: LeaderboardDisplayType,
+    timeout: Duration,
+) -> Result<Leaderboard, String> {
+    let (tx, rx) = mpsc::channel();
+    state
+        .client
+        .user_stats()
+        .find_or_create_leaderboard(name, sort_method, display_type, move |result| {
+            let _ = tx.send(result.map_err(|err| format!("{err:?}")));
+        });
+
+    let maybe = rx
+        .recv_timeout(timeout)
+        .map_err(|_| format!("Timed out while resolving Steam leaderboard {name}."))?
+        .map_err(|err| err)?;
+
+    maybe.ok_or_else(|| format!("Steam did not return leaderboard {name}."))
+}
+
+fn download_leaderboard_entries_sync(
+    state: &Arc<BridgeState>,
+    leaderboard: &Leaderboard,
+    request: LeaderboardDataRequest,
+    start: usize,
+    end: usize,
+    max_details_len: usize,
+    timeout: Duration,
+) -> Result<Vec<LeaderboardEntry>, String> {
+    let (tx, rx) = mpsc::channel();
+    state.client.user_stats().download_leaderboard_entries(
+        leaderboard,
+        request,
+        start,
+        end,
+        max_details_len,
+        move |result| {
+            let _ = tx.send(result.map_err(|err| format!("{err:?}")));
+        },
+    );
+
+    rx.recv_timeout(timeout)
+        .map_err(|_| "Timed out while downloading Steam leaderboard entries.".to_string())?
+        .map_err(|err| err)
+}
+
+fn resolve_persona_name(state: &Arc<BridgeState>, steam_id: SteamId) -> String {
+    let friends = state.client.friends();
+    let _ = friends.request_user_information(steam_id, true);
+    let friend = friends.get_friend(steam_id);
+    let name = friend.name();
+    if name.trim().is_empty() {
+        steam_id.raw().to_string()
+    } else {
+        name
+    }
+}
+
+fn leaderboard_entry_to_json(state: &Arc<BridgeState>, entry: &LeaderboardEntry) -> Value {
+    json!({
+        "rank": entry.global_rank,
+        "score": entry.score,
+        "steamId": entry.user.raw().to_string(),
+        "name": resolve_persona_name(state, entry.user),
+    })
+}
+
+fn handle_get_leaderboard_snapshot(state: &Arc<BridgeState>, params: &Value) -> Result<Value, String> {
+    ensure_current_stats(state, Duration::from_secs(5))?;
+    let name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Leaderboard name is required.".to_string())?;
+    let top_count = params
+        .get("topCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(10)
+        .clamp(1, 50) as usize;
+    let sort_method = parse_leaderboard_sort_method(params.get("sortMethod").and_then(Value::as_str));
+    let display_type = parse_leaderboard_display_type(params.get("displayType").and_then(Value::as_str));
+
+    let leaderboard = find_or_create_leaderboard_sync(
+        state,
+        name,
+        sort_method,
+        display_type,
+        Duration::from_secs(10),
+    )?;
+
+    let total_entries = state
+        .client
+        .user_stats()
+        .get_leaderboard_entry_count(&leaderboard)
+        .max(0) as usize;
+
+    let visible_count = total_entries.min(top_count);
+    let top_entries = if visible_count > 0 {
+        download_leaderboard_entries_sync(
+            state,
+            &leaderboard,
+            LeaderboardDataRequest::Global,
+            0,
+            visible_count - 1,
+            0,
+            Duration::from_secs(10),
+        )?
+    } else {
+        Vec::new()
+    };
+
+    let current_user = state.client.user().steam_id();
+    let mut player_entry = top_entries
+        .iter()
+        .find(|entry| entry.user == current_user)
+        .cloned();
+
+    if player_entry.is_none() && total_entries > visible_count {
+        let scan_limit = total_entries.min(2000);
+        if scan_limit > 0 {
+            let scanned = download_leaderboard_entries_sync(
+                state,
+                &leaderboard,
+                LeaderboardDataRequest::Global,
+                0,
+                scan_limit - 1,
+                0,
+                Duration::from_secs(12),
+            )?;
+            player_entry = scanned.into_iter().find(|entry| entry.user == current_user);
+        }
+    }
+
+    Ok(json!({
+        "success": true,
+        "name": name,
+        "totalEntries": total_entries as u64,
+        "entries": top_entries
+            .iter()
+            .map(|entry| leaderboard_entry_to_json(state, entry))
+            .collect::<Vec<_>>(),
+        "playerEntry": player_entry
+            .as_ref()
+            .map(|entry| leaderboard_entry_to_json(state, entry))
+            .unwrap_or(Value::Null),
+    }))
+}
+
+fn handle_set_leaderboard_score(state: &Arc<BridgeState>, params: &Value) -> Result<Value, String> {
+    ensure_current_stats(state, Duration::from_secs(5))?;
+    let name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Leaderboard name is required.".to_string())?;
+    let score = params
+        .get("score")
+        .and_then(Value::as_i64)
+        .or_else(|| params.get("score").and_then(Value::as_u64).map(|value| value as i64))
+        .ok_or_else(|| "Leaderboard score must be numeric.".to_string())?;
+    let normalized_score = score.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+    let sort_method = parse_leaderboard_sort_method(params.get("sortMethod").and_then(Value::as_str));
+    let display_type = parse_leaderboard_display_type(params.get("displayType").and_then(Value::as_str));
+    let upload_method = parse_leaderboard_upload_method(params.get("uploadMethod").and_then(Value::as_str));
+
+    let leaderboard = find_or_create_leaderboard_sync(
+        state,
+        name,
+        sort_method,
+        display_type,
+        Duration::from_secs(10),
+    )?;
+
+    let (tx, rx) = mpsc::channel();
+    state.client.user_stats().upload_leaderboard_score(
+        &leaderboard,
+        upload_method,
+        normalized_score,
+        &[],
+        move |result| {
+            let _ = tx.send(result.map_err(|err| format!("{err:?}")));
+        },
+    );
+
+    let upload_result = rx
+        .recv_timeout(Duration::from_secs(10))
+        .map_err(|_| "Timed out while uploading Steam leaderboard score.".to_string())?
+        .map_err(|err| err)?;
+
+    match upload_result {
+        Some(value) => Ok(json!({
+            "success": true,
+            "name": name,
+            "score": value.score,
+            "rank": value.global_rank_new,
+            "previousRank": value.global_rank_previous,
+            "changed": value.was_changed,
+        })),
+        None => Ok(json!({
+            "success": false,
+            "name": name,
+            "error": "Steam did not accept the leaderboard score update.",
+        })),
+    }
 }
 
 fn handle_send_p2p_packet(state: &Arc<BridgeState>, params: &Value) -> Result<Value, String> {

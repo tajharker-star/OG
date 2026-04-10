@@ -8,6 +8,7 @@ import { LobbyLogo } from './components/LobbyLogo';
 import { PatchNotesModal } from './components/PatchNotesModal';
 import { StatisticsPanel } from './components/StatisticsPanel';
 import { SkinsPanel } from './components/SkinsPanel';
+import { LeaderboardsPanel } from './components/LeaderboardsPanel';
 import { socket, connectToServer, connectionManager } from './services/socket';
 import { steamService } from './services/steam';
 import { soundEffectsManager } from './audio/soundEffects';
@@ -45,6 +46,7 @@ import {
     type SkinId,
     type SkinTarget,
 } from './utils/playerSkins';
+import { buildLeaderboardUploadCandidates } from './utils/steamLeaderboards';
 import {
     createDefaultSteamMultiplayerDiagnostics,
     type SteamMultiplayerDiagnostics,
@@ -450,7 +452,7 @@ function App() {
     const [isRankedMatch, setIsRankedMatch] = useState(false);
 
     // New Menu States
-    const [menuView, setMenuView] = useState<'main' | 'campaign' | 'multiplayer' | 'host_public' | 'statistics' | 'skins'>('main');
+    const [menuView, setMenuView] = useState<'main' | 'campaign' | 'multiplayer' | 'host_public' | 'statistics' | 'skins' | 'leaderboards'>('main');
     const [showPatchNotes, setShowPatchNotes] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
     const [settingsButtonPos, setSettingsButtonPos] = useState(readSavedSettingsButtonPosition);
@@ -466,6 +468,7 @@ function App() {
     const suppressSettingsButtonClickRef = useRef(false);
 
     const clientMatchState = useRef<'LOBBY' | 'STARTING' | 'IN_MATCH'>('LOBBY');
+    const matchStartedAtRef = useRef<number | null>(null);
 
     // Host Public State
     const [localPort, setLocalPort] = useState("3001");
@@ -778,6 +781,35 @@ function App() {
 
         await commitStatistics(syncedSnapshot);
         return syncedSnapshot;
+    };
+
+    const pushLeaderboardsToSteam = async (
+        statisticsSnapshot: PlayerStatistics,
+        summary: MatchStatisticsSummary,
+        matchDurationMs: number | null
+    ) => {
+        if (!steamService.isInitialized) {
+            return;
+        }
+
+        const uploads = buildLeaderboardUploadCandidates(statisticsSnapshot, summary, matchDurationMs);
+        if (uploads.length === 0) {
+            return;
+        }
+
+        await Promise.all(uploads.map(async ({ definition, score }) => {
+            const result = await steamService.setLeaderboardScore({
+                name: definition.steamName,
+                score,
+                sortMethod: definition.sortMethod,
+                displayType: definition.displayType,
+                uploadMethod: 'keep_best',
+            });
+
+            if (!result.success) {
+                console.warn(`[Steam] Failed to update leaderboard ${definition.steamName}:`, result.error);
+            }
+        }));
     };
 
     const evaluatedAchievements = evaluateAchievements(
@@ -1095,9 +1127,13 @@ function App() {
                 console.log('[CLIENT] entering in-game');
                 clientMatchState.current = 'IN_MATCH';
                 setIsPlaying(true);
+                if (!matchStartedAtRef.current) {
+                    matchStartedAtRef.current = Date.now();
+                }
             } else if (status === 'waiting') {
                 console.log('[CLIENT] returning to lobby reason=server_status_waiting');
                 clientMatchState.current = 'LOBBY';
+                matchStartedAtRef.current = null;
             }
             setGameStatus(status);
         }
@@ -1112,6 +1148,9 @@ function App() {
             clientMatchState.current = 'IN_MATCH';
             setGameStatus('playing');
             setIsPlaying(true);
+            if (!matchStartedAtRef.current) {
+                matchStartedAtRef.current = Date.now();
+            }
             pushSteamDiagnosticsEvent('Match started.', {
                 status: 'Match in progress',
             });
@@ -1132,6 +1171,7 @@ function App() {
             setGameStatus('waiting');
             setIsPlaying(false);
             setIsRankedQueueing(false);
+            matchStartedAtRef.current = null;
             pushSteamDiagnosticsEvent('Room join failed after transport connection.', {
                 status: 'Room join failed',
                 lastError: data.reason || 'Failed to join room.',
@@ -1321,6 +1361,7 @@ function App() {
 
     const handleLeaveToMenu = async () => {
         await leaveActiveSteamLobby();
+        matchStartedAtRef.current = null;
         window.location.reload();
     };
 
@@ -1695,7 +1736,13 @@ function App() {
             pushSteamDiagnosticsEvent(`Steam lobby search returned ${lobbyResult.lobbies.length} ranked candidates.`, {
                 status: 'Ranked lobby search complete',
             });
-            for (const candidate of lobbyResult.lobbies) {
+            const rankedCandidates = [...lobbyResult.lobbies];
+            for (let index = rankedCandidates.length - 1; index > 0; index -= 1) {
+                const randomIndex = Math.floor(Math.random() * (index + 1));
+                [rankedCandidates[index], rankedCandidates[randomIndex]] = [rankedCandidates[randomIndex], rankedCandidates[index]];
+            }
+
+            for (const candidate of rankedCandidates) {
                 if (!candidate.lobbyId) continue;
                 const joined = await joinSteamLobbyById(candidate.lobbyId, { suppressAlert: true });
                 if (joined) {
@@ -2214,6 +2261,7 @@ function App() {
             startingResources: level.startingResources
         });
         setIsPlaying(true);
+        matchStartedAtRef.current = Date.now();
     };
 
     const nextLevel = () => {
@@ -2245,15 +2293,22 @@ function App() {
 
         socket.emit('createCustomGame', customConfig);
         setIsPlaying(true);
+        matchStartedAtRef.current = Date.now();
     };
 
     const handleMatchResolved = async (summary: MatchStatisticsSummary) => {
         const playedAt = new Date().toISOString();
+        const nowMs = Date.now();
+        const matchDurationMs = matchStartedAtRef.current && matchStartedAtRef.current <= nowMs
+            ? nowMs - matchStartedAtRef.current
+            : null;
+        matchStartedAtRef.current = null;
         const nextStatistics = recordMatchResult(statisticsRef.current, summary, playedAt);
         const committed = await commitStatistics(nextStatistics);
 
         if (steamService.isInitialized) {
-            await pushStatisticsToSteam(committed);
+            const syncedStatistics = await pushStatisticsToSteam(committed);
+            await pushLeaderboardsToSteam(syncedStatistics, summary, matchDurationMs);
         }
 
         if (isTutorialMode && summary.result === 'win' && summary.botPlayers > 0) {
@@ -2381,7 +2436,7 @@ function App() {
                         </span>
                     </button>
 
-                    <div className={`menu ${menuView === 'statistics' ? 'menu--statistics' : ''} ${menuView === 'skins' ? 'menu--skins' : ''}`}>
+                    <div className={`menu ${menuView === 'statistics' ? 'menu--statistics' : ''} ${menuView === 'skins' ? 'menu--skins' : ''} ${(menuView === 'multiplayer' || menuView === 'host_public') ? 'menu--multiplayer' : ''} ${menuView === 'leaderboards' ? 'menu--leaderboards' : ''}`}>
                         <h1 className="menu-title-accessible">Conquerors: Dominion</h1>
                         <LobbyLogo />
 
@@ -2405,6 +2460,7 @@ function App() {
                             <button onClick={() => setMenuView('campaign')} className="menu-btn menu-btn-main" disabled={!isLocalEngineReady}>Campaign & Custom</button>
                             <button onClick={() => setMenuView('skins')} className="menu-btn menu-btn-main">Skins</button>
                             <button onClick={() => setMenuView('statistics')} className="menu-btn menu-btn-main">Stats & Achievements</button>
+                            <button onClick={() => setMenuView('leaderboards')} className="menu-btn menu-btn-main">Leaderboards</button>
                         </div>
                     )}
 
@@ -2862,6 +2918,20 @@ function App() {
                                 totalAchievementCount={totalAchievementCount}
                                 showDeveloperSkin={hasDeveloperSkinAccess}
                                 onEquip={handleEquipSkin}
+                            />
+                            <button onClick={() => setMenuView('main')} className="menu-btn secondary">Back</button>
+                        </div>
+                    )}
+
+                    {menuView === 'leaderboards' && (
+                        <div className="menu-column menu-column--leaderboards">
+                            <h3 className="menu-section-title">Leaderboards</h3>
+                            <p className="menu-section-copy">
+                                Live Steam-backed top 10 rankings plus your personal placement for each tracked mode.
+                            </p>
+                            <LeaderboardsPanel
+                                steamConnected={Boolean(steamUser && steamService.isInitialized)}
+                                steamPersonaName={steamUser?.name}
                             />
                             <button onClick={() => setMenuView('main')} className="menu-btn secondary">Back</button>
                         </div>

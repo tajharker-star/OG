@@ -56,6 +56,36 @@ export interface SteamStatsUpdateResult {
     error?: string;
 }
 
+export type SteamLeaderboardSortMethod = 'ascending' | 'descending';
+export type SteamLeaderboardDisplayType = 'numeric' | 'time_seconds' | 'time_milliseconds';
+export type SteamLeaderboardUploadMethod = 'keep_best' | 'force_update';
+
+export interface SteamLeaderboardEntry {
+    rank: number;
+    score: number;
+    steamId: string;
+    name: string;
+}
+
+export interface SteamLeaderboardSnapshotResult {
+    success: boolean;
+    name: string;
+    totalEntries: number;
+    entries: SteamLeaderboardEntry[];
+    playerEntry?: SteamLeaderboardEntry | null;
+    error?: string;
+}
+
+export interface SteamLeaderboardUpdateResult {
+    success: boolean;
+    name: string;
+    score?: number;
+    rank?: number | null;
+    previousRank?: number | null;
+    changed?: boolean;
+    error?: string;
+}
+
 export interface SteamLobbyActionResult {
     success: boolean;
     error?: string;
@@ -259,6 +289,44 @@ class SteamService {
             return { success: false, stored: false, rejected: Object.keys(stats), error: 'Not initialized' };
         }
         return await ipcRenderer.invoke('steam:set-stats', stats);
+    }
+
+    public async getLeaderboardSnapshot(options: {
+        name: string;
+        topCount?: number;
+        sortMethod?: SteamLeaderboardSortMethod;
+        displayType?: SteamLeaderboardDisplayType;
+    }): Promise<SteamLeaderboardSnapshotResult> {
+        if (!this.isInitialized || !ipcRenderer) {
+            return {
+                success: false,
+                name: options.name,
+                totalEntries: 0,
+                entries: [],
+                playerEntry: null,
+                error: 'Not initialized',
+            };
+        }
+
+        return await ipcRenderer.invoke('steam:get-leaderboard-snapshot', options);
+    }
+
+    public async setLeaderboardScore(options: {
+        name: string;
+        score: number;
+        sortMethod?: SteamLeaderboardSortMethod;
+        displayType?: SteamLeaderboardDisplayType;
+        uploadMethod?: SteamLeaderboardUploadMethod;
+    }): Promise<SteamLeaderboardUpdateResult> {
+        if (!this.isInitialized || !ipcRenderer) {
+            return {
+                success: false,
+                name: options.name,
+                error: 'Not initialized',
+            };
+        }
+
+        return await ipcRenderer.invoke('steam:set-leaderboard-score', options);
     }
 }
 

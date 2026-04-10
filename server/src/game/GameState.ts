@@ -18,6 +18,8 @@ const MOTHERSHIP_BEAM_DIRECT_DAMAGE = 25;
 const MOTHERSHIP_RADIATION_RADIUS = 115;
 const MOTHERSHIP_RADIATION_STACK_DURATION_MS = 5000;
 const MOTHERSHIP_RADIATION_STACK_DAMAGE_PER_SECOND = 4;
+const ECONOMY_PRODUCTION_INTERVAL_SECONDS = 2;
+const ECONOMY_PRODUCTION_MULTIPLIER = 2;
 
 export interface Player {
     id: string;
@@ -133,6 +135,7 @@ export class GameState {
     private botsReleasedForMatch: boolean = true;
     private traversalPathCache: Map<string, string[]> = new Map();
     private economySecondAccumulator: number = 0;
+    private economyProductionAccumulatorSeconds: number = 0;
     private placementByPlayerId: Map<string, number> = new Map();
 
     // Spatial Grid for O(N) optimization
@@ -857,6 +860,16 @@ export class GameState {
     }
 
     private processEconomySecondTick(io?: any) {
+        this.economyProductionAccumulatorSeconds += 1;
+        const shouldEmitEconomyTick = this.economyProductionAccumulatorSeconds >= ECONOMY_PRODUCTION_INTERVAL_SECONDS;
+
+        if (!shouldEmitEconomyTick) {
+            this.processSupportBuildingHealingTick();
+            return;
+        }
+
+        this.economyProductionAccumulatorSeconds = 0;
+
         this.players.forEach(player => {
             let goldIncome = 1;
             let oilIncome = 0;
@@ -878,24 +891,24 @@ export class GameState {
             this.map.oilSpots.forEach(spot => {
                 if ((spot as any).ownerId === player.id && (spot as any).building && !(spot as any).building.isConstructing) {
                     if ((spot as any).building.type === 'oil_rig') {
-                        goldIncome += 200;
-                        oilIncome += 5;
-                        queueBurst((spot as any).building.id, spot.x, spot.y, 200, 5);
+                        goldIncome += 200 * ECONOMY_PRODUCTION_MULTIPLIER;
+                        oilIncome += 5 * ECONOMY_PRODUCTION_MULTIPLIER;
+                        queueBurst((spot as any).building.id, spot.x, spot.y, 200 * ECONOMY_PRODUCTION_MULTIPLIER, 5 * ECONOMY_PRODUCTION_MULTIPLIER);
                     } else if ((spot as any).building.type === 'oil_well') {
-                        goldIncome += 200;
-                        oilIncome += 5;
-                        queueBurst((spot as any).building.id, spot.x, spot.y, 200, 5);
+                        goldIncome += 200 * ECONOMY_PRODUCTION_MULTIPLIER;
+                        oilIncome += 5 * ECONOMY_PRODUCTION_MULTIPLIER;
+                        queueBurst((spot as any).building.id, spot.x, spot.y, 200 * ECONOMY_PRODUCTION_MULTIPLIER, 5 * ECONOMY_PRODUCTION_MULTIPLIER);
                     } else {
-                        oilIncome += 5;
-                        queueBurst((spot as any).building.id, spot.x, spot.y, 0, 5);
+                        oilIncome += 5 * ECONOMY_PRODUCTION_MULTIPLIER;
+                        queueBurst((spot as any).building.id, spot.x, spot.y, 0, 5 * ECONOMY_PRODUCTION_MULTIPLIER);
                     }
                 }
             });
 
             this.map.islands.forEach(island => {
                 if (island.ownerId === player.id) {
-                    goldIncome += 1;
-                    headquartersGoldIncome += 1;
+                    goldIncome += 1 * ECONOMY_PRODUCTION_MULTIPLIER;
+                    headquartersGoldIncome += 1 * ECONOMY_PRODUCTION_MULTIPLIER;
                 }
 
                 island.buildings.forEach(b => {
@@ -905,16 +918,16 @@ export class GameState {
                     const worldY = island.y + (b.y || 0);
 
                     if (b.type === 'mine') {
-                        goldIncome += 50;
-                        queueBurst(b.id, worldX, worldY, 50, 0);
+                        goldIncome += 50 * ECONOMY_PRODUCTION_MULTIPLIER;
+                        queueBurst(b.id, worldX, worldY, 50 * ECONOMY_PRODUCTION_MULTIPLIER, 0);
                     }
                     if (b.type === 'base') {
-                        goldIncome += 10;
-                        headquartersGoldIncome += 10;
+                        goldIncome += 10 * ECONOMY_PRODUCTION_MULTIPLIER;
+                        headquartersGoldIncome += 10 * ECONOMY_PRODUCTION_MULTIPLIER;
                     }
                     if (b.type === 'farm') {
-                        goldIncome += 25;
-                        queueBurst(b.id, worldX, worldY, 25, 0);
+                        goldIncome += 25 * ECONOMY_PRODUCTION_MULTIPLIER;
+                        queueBurst(b.id, worldX, worldY, 25 * ECONOMY_PRODUCTION_MULTIPLIER, 0);
                     }
                 });
             });
@@ -5526,6 +5539,7 @@ export class GameState {
         this.roomId = roomId;
         this.lastTickTime = Date.now();
         this.economySecondAccumulator = 0;
+        this.economyProductionAccumulatorSeconds = 0;
         // Run loop at 20 Hz (50ms)
         this.gameLoopInterval = setInterval(() => {
             if (this.gameEnded) return;

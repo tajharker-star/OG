@@ -314,6 +314,22 @@
   to { opacity: 1; transform: scale(1); }
 }
 
+@keyframes lobbyScreenFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes lobbyLoadCardIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
 /* Lobby Screens */
 .lobby-screen {
   position: absolute;
@@ -326,13 +342,33 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  padding: 24px 18px;
+  overflow: auto;
+  box-sizing: border-box;
   pointer-events: auto;
   color: var(--text-primary);
   z-index: 2000;
 }
 
+.lobby-screen--loading {
+  animation: lobbyScreenFadeIn 0.24s ease-out;
+}
+
+.lobby-load-card--transition {
+  animation: lobbyLoadCardIn 0.28s ease-out;
+}
+
+.lobby-layout {
+  width: min(1220px, 96vw);
+  display: grid;
+  grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
 .lobby-card {
-  width: min(560px, 92vw);
+  width: 100%;
+  min-width: 0;
   background: rgba(18, 24, 32, 0.92);
   border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: 14px;
@@ -427,7 +463,7 @@
 .lobby-load-progress-fill {
   height: 100%;
   background: linear-gradient(90deg, #4caf50 0%, #7fe887 100%);
-  transition: width 0.2s ease;
+  transition: width 0.34s cubic-bezier(0.25, 0.8, 0.3, 1);
 }
 
 .lobby-load-progress-text {
@@ -499,13 +535,76 @@
   text-align: center;
 }
 
+.lobby-invite-container--wide {
+  width: 100%;
+  min-width: 0;
+  margin-bottom: 0;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03)),
+    rgba(11, 16, 25, 0.9);
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.35);
+}
+
 .lobby-invite-content {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  max-height: min(62vh, 560px);
+  gap: 14px;
+  max-height: min(74vh, 760px);
   overflow-y: auto;
-  padding-right: 4px;
+  padding-right: 6px;
+}
+
+.lobby-invite-tabs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.lobby-invite-tab-btn {
+  min-height: 66px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.05);
+  color: #f4f8ff;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 4px;
+  text-align: left;
+  padding: 10px 12px;
+}
+
+.lobby-invite-tab-btn strong {
+  font-size: 0.92rem;
+}
+
+.lobby-invite-tab-btn span {
+  font-size: 0.78rem;
+  color: rgba(255, 255, 255, 0.74);
+  line-height: 1.4;
+}
+
+.lobby-invite-tab-btn.is-active {
+  border-color: rgba(102, 192, 244, 0.55);
+  background: rgba(102, 192, 244, 0.16);
+}
+
+.lobby-invite-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.lobby-invite-panel__empty {
+  padding: 14px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.78);
+  text-align: left;
+  line-height: 1.5;
 }
 
 .lobby-tunnel-password {
@@ -720,7 +819,7 @@
   gap: 10px;
   margin-bottom: 12px;
   padding: 14px;
-  max-height: min(46vh, 380px);
+  max-height: min(56vh, 520px);
   overflow: hidden;
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.04);
@@ -741,7 +840,7 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-height: min(34vh, 280px);
+  max-height: min(50vh, 460px);
   overflow-y: auto;
   padding-right: 4px;
 }
@@ -844,6 +943,9 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
+  max-height: 190px;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .lobby-steam-diagnostics__note {
@@ -867,6 +969,40 @@
 .lobby-steam-diagnostics__event span:first-child {
   color: #d8f0ff;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@media (max-width: 1080px) {
+  .lobby-layout {
+    grid-template-columns: minmax(0, 1fr);
+    width: min(940px, 96vw);
+  }
+
+  .lobby-invite-content {
+    max-height: min(68vh, 600px);
+  }
+}
+
+@media (max-width: 640px) {
+  .lobby-screen {
+    padding: 14px 10px;
+  }
+
+  .lobby-card {
+    padding: 16px;
+  }
+
+  .lobby-invite-tabs {
+    grid-template-columns: 1fr;
+  }
+
+  .lobby-steam-friends__row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .lobby-invite-btn-small {
+    width: 100%;
+  }
 }
 /* HUD Bottom Bar Layout */
 .hud-bottom-bar {

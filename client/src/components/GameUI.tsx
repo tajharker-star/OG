@@ -50,6 +50,8 @@ type PerfProfileSample = {
     connectionState: ConnectionState;
 };
 
+type LobbyInvitePanelKey = 'steam' | 'access' | 'diagnostics';
+
 interface ChatMessage {
     sender: string;
     content: string;
@@ -630,6 +632,7 @@ export const GameUI: React.FC<GameUIProps> = ({
     const [steamFriendsLoading, setSteamFriendsLoading] = useState(false);
     const [steamFriendsError, setSteamFriendsError] = useState<string | null>(null);
     const [invitingSteamFriendId, setInvitingSteamFriendId] = useState<string | null>(null);
+    const [activeLobbyInvitePanel, setActiveLobbyInvitePanel] = useState<LobbyInvitePanelKey | null>('steam');
     const [votingData, setVotingData] = useState<{ timeLeft: number, votes: [string, string][] }>({ timeLeft: 0, votes: [] });
     const [isLobbyLoading, setIsLobbyLoading] = useState(gameStatus !== 'playing');
     const [isMatchLoading, setIsMatchLoading] = useState(gameStatus === 'playing');
@@ -892,8 +895,43 @@ export const GameUI: React.FC<GameUIProps> = ({
         : steamMultiplayerDiagnostics?.route === 'steam-relay' && steamMultiplayerDiagnostics?.relaySessionId
             ? 'This session is using Steam relay.'
             : steamMultiplayerDiagnostics?.route === 'direct-endpoint'
-                ? 'This session is using the direct host endpoint.'
+            ? 'This session is using the direct host endpoint.'
                 : null;
+
+    const lobbyInvitePanels = ([
+        {
+            key: 'steam',
+            label: 'Steam Multiplayer',
+            copy: isRankedQuickMatchLobby
+                ? 'Steam quick match state and invite controls.'
+                : 'Steam friends, invites, and lobby controls.',
+        },
+        {
+            key: 'access',
+            label: 'Room + Tunnel',
+            copy: 'Room ID, tunnel password, and endpoint sharing.',
+        },
+        {
+            key: 'diagnostics',
+            label: 'Diagnostics',
+            copy: 'Live Steam route, socket phase, and recent events.',
+        },
+    ] as const).filter((panel) => !(isRankedQuickMatchLobby && panel.key === 'access'));
+
+    useEffect(() => {
+        if (isRankedQuickMatchLobby && activeLobbyInvitePanel === 'access') {
+            setActiveLobbyInvitePanel('diagnostics');
+            return;
+        }
+
+        if (activeLobbyInvitePanel === null) {
+            return;
+        }
+
+        if (!lobbyInvitePanels.some((panel) => panel.key === activeLobbyInvitePanel)) {
+            setActiveLobbyInvitePanel(lobbyInvitePanels[0]?.key ?? null);
+        }
+    }, [activeLobbyInvitePanel, isRankedQuickMatchLobby, lobbyInvitePanels]);
 
     useEffect(() => {
         const phase: 'lobby' | 'match' = gameStatus === 'playing' ? 'match' : 'lobby';
@@ -2586,8 +2624,8 @@ export const GameUI: React.FC<GameUIProps> = ({
         const progress = Math.round((readyCount / checks.length) * 100);
 
         return (
-            <div className="lobby-screen">
-                <div className="lobby-card lobby-card-connecting lobby-load-card">
+            <div className="lobby-screen lobby-screen--loading">
+                <div className="lobby-card lobby-card-connecting lobby-load-card lobby-load-card--transition">
                     <div className="lobby-title">{title}</div>
                     <div className="lobby-subtitle">{subtitle}</div>
                     <div className="lobby-connecting-spinner"></div>
@@ -2639,9 +2677,6 @@ export const GameUI: React.FC<GameUIProps> = ({
     // NOTE: React requires all hooks to be called in the same order.
     // We have ensured all hooks are at the top level (lines 67-615).
     // The code below contains early returns, which is valid AS LONG AS no hooks are called after them.
-    // Let's verify line by line.
-
-    // Lines 617-719: Waiting/Voting Screen
     if (connectionState.phase !== 'READY' && !isLocalMode && !isDevBypass) {
         return (
             <div className="lobby-screen">
@@ -2735,339 +2770,368 @@ export const GameUI: React.FC<GameUIProps> = ({
                         </button>
                     </div>
                 ) : (
-                    <div className="lobby-card">
-                        <div className="lobby-title">{isRankedQuickMatchLobby ? 'Ranked Quick Match' : 'Lobby'}</div>
-                        <div className="lobby-subtitle">
-                            {humanPlayerCount} / {requiredPlayers} {isRankedQuickMatchLobby ? 'Commanders Ready' : 'Humans Ready'}
-                        </div>
-
-                        {tunnelUrl && !isRankedQuickMatchLobby && (
-                            <div className="lobby-invite-container">
-                                <label>Join Code:</label>
-                                <div className="lobby-invite-code">
-                                    {tunnelUrl}
-                                    <button
-                                        onClick={() => navigator.clipboard.writeText(tunnelUrl)}
-                                        className="copy-btn-small"
-                                    >
-                                        Copy
-                                    </button>
-                                </div>
+                    <div className="lobby-layout">
+                        <div className="lobby-card">
+                            <div className="lobby-title">{isRankedQuickMatchLobby ? 'Ranked Quick Match' : 'Lobby'}</div>
+                            <div className="lobby-subtitle">
+                                {humanPlayerCount} / {requiredPlayers} {isRankedQuickMatchLobby ? 'Commanders Ready' : 'Humans Ready'}
                             </div>
-                        )}
 
-                        {tunnelPassword && !tunnelUrl && !isRankedQuickMatchLobby && (
-                            <div className="lobby-invite-container">
-                                <label>Tunnel IP (LAN):</label>
-                                <div className="lobby-invite-code">
-                                    {tunnelPassword}
-                                    <button
-                                        onClick={() => navigator.clipboard.writeText(tunnelPassword)}
-                                        className="copy-btn-small"
-                                    >
-                                        Copy
-                                    </button>
-                                </div>
-                            </div>
-                        )}
-
-                        <div className="lobby-controls">
-                            {isRankedQuickMatchLobby ? (
-                                <div className="lobby-row">
-                                    <span>Queue Rules</span>
-                                    <span>{maxHumanPlayers} human players, no bots, auto-start only</span>
-                                </div>
-                            ) : (
-                                <>
-                                    <div className="lobby-row">
-                                        <span>Required Humans</span>
-                                        <select
-                                            className="lobby-select"
-                                            value={requiredPlayers}
-                                            onChange={(e) => {
-                                                const val = parseInt(e.target.value);
-                                                setRequiredPlayers(val);
-                                                socket.emit('set_required_players', val);
-                                            }}
+                            {tunnelUrl && !isRankedQuickMatchLobby && (
+                                <div className="lobby-invite-container">
+                                    <label>Join Code:</label>
+                                    <div className="lobby-invite-code">
+                                        {tunnelUrl}
+                                        <button
+                                            onClick={() => navigator.clipboard.writeText(tunnelUrl)}
+                                            className="copy-btn-small"
                                         >
-                                            {Array.from({ length: 10 }, (_, i) => i + 1).map(n => (
-                                                <option key={n} value={n}>{n} Humans</option>
-                                            ))}
-                                        </select>
+                                            Copy
+                                        </button>
                                     </div>
-
-                                    {allowBots && (
-                                        <div className="lobby-row">
-                                            <span>Add AI Bot</span>
-                                            <div className="lobby-bot-container">
-                                                <span className="lobby-bot-count">
-                                                    ({botPlayerCount}/10)
-                                                </span>
-                                                <select
-                                                    className="lobby-select lobby-select-bot"
-                                                    onChange={(e) => socket.emit('addBot', parseInt(e.target.value))}
-                                                    value=""
-                                                >
-                                                    <option value="" disabled>+ Add Bot</option>
-                                                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(diff => (
-                                                        <option key={diff} value={diff} className="option-level">Lvl {diff}</option>
-                                                    ))}
-                                                </select>
-                                            </div>
-                                        </div>
-                                    )}
-                                </>
+                                </div>
                             )}
 
-                            {/* Host Start Button */}
-                            {Array.from(allPlayers.keys())[0] === socket.id && allowForceStart && (
+                            {tunnelPassword && !tunnelUrl && !isRankedQuickMatchLobby && (
+                                <div className="lobby-invite-container">
+                                    <label>Tunnel IP (LAN):</label>
+                                    <div className="lobby-invite-code">
+                                        {tunnelPassword}
+                                        <button
+                                            onClick={() => navigator.clipboard.writeText(tunnelPassword)}
+                                            className="copy-btn-small"
+                                        >
+                                            Copy
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+
+                            <div className="lobby-controls">
+                                {isRankedQuickMatchLobby ? (
+                                    <div className="lobby-row">
+                                        <span>Queue Rules</span>
+                                        <span>{maxHumanPlayers} human players, no bots, auto-start only</span>
+                                    </div>
+                                ) : (
+                                    <>
+                                        <div className="lobby-row">
+                                            <span>Required Humans</span>
+                                            <select
+                                                className="lobby-select"
+                                                value={requiredPlayers}
+                                                onChange={(e) => {
+                                                    const val = parseInt(e.target.value);
+                                                    setRequiredPlayers(val);
+                                                    socket.emit('set_required_players', val);
+                                                }}
+                                            >
+                                                {Array.from({ length: 10 }, (_, i) => i + 1).map(n => (
+                                                    <option key={n} value={n}>{n} Humans</option>
+                                                ))}
+                                            </select>
+                                        </div>
+
+                                        {allowBots && (
+                                            <div className="lobby-row">
+                                                <span>Add AI Bot</span>
+                                                <div className="lobby-bot-container">
+                                                    <span className="lobby-bot-count">
+                                                        ({botPlayerCount}/10)
+                                                    </span>
+                                                    <select
+                                                        className="lobby-select lobby-select-bot"
+                                                        onChange={(e) => socket.emit('addBot', parseInt(e.target.value))}
+                                                        value=""
+                                                    >
+                                                        <option value="" disabled>+ Add Bot</option>
+                                                        {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(diff => (
+                                                            <option key={diff} value={diff} className="option-level">Lvl {diff}</option>
+                                                        ))}
+                                                    </select>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </>
+                                )}
+
+                                {Array.from(allPlayers.keys())[0] === socket.id && allowForceStart && (
+                                    <button
+                                        className="lobby-btn btn-primary lobby-btn-start"
+                                        onClick={() => {
+                                            clientMatchState.current = 'STARTING';
+                                            console.log('[NAV_TO_GAME] (Starting) initiated by user');
+                                            socket.emit('force_start_match');
+                                        }}
+                                    >
+                                        Start Match Now
+                                    </button>
+                                )}
+
                                 <button
-                                    className="lobby-btn btn-primary lobby-btn-start"
+                                    className="lobby-btn lobby-btn-secondary"
+                                    style={{ marginTop: '10px', backgroundColor: '#555' }}
                                     onClick={() => {
-                                        clientMatchState.current = 'STARTING';
-                                        console.log('[NAV_TO_GAME] (Starting) initiated by user');
-                                        socket.emit('force_start_match');
+                                        console.log('[NAV_TO_LOBBY] reason=user_left source=BackButton');
+                                        clientMatchState.current = 'LOBBY';
+                                        onLeave();
                                     }}
                                 >
-                                    Start Match Now
+                                    Back / Leave
                                 </button>
-                            )}
+                            </div>
+                        </div>
 
-                            {/* Back Button */}
-                            <button
-                                className="lobby-btn lobby-btn-secondary"
-                                style={{ marginTop: '10px', backgroundColor: '#555' }}
-                                onClick={() => {
-                                    console.log('[NAV_TO_LOBBY] reason=user_left source=BackButton');
-                                    clientMatchState.current = 'LOBBY';
-                                    onLeave();
-                                }}
-                            >
-                                Back / Leave
-                            </button>
+                        <div className="lobby-invite-container lobby-invite-container--wide">
+                            <p className="lobby-invite-title">
+                                {isRankedQuickMatchLobby
+                                    ? 'Ranked quick match uses random Steam matchmaking and hides manual room sharing.'
+                                    : 'Invite friends to join!'}
+                            </p>
+
+                            {roomId && (
+                                <div className="lobby-invite-content">
+                                    <div className="lobby-invite-tabs">
+                                        {lobbyInvitePanels.map((panel) => (
+                                            <button
+                                                key={panel.key}
+                                                type="button"
+                                                className={`lobby-invite-tab-btn ${activeLobbyInvitePanel === panel.key ? 'is-active' : ''}`}
+                                                onClick={() => {
+                                                    setActiveLobbyInvitePanel((current) => (
+                                                        current === panel.key ? null : panel.key
+                                                    ));
+                                                }}
+                                            >
+                                                <strong>{panel.label}</strong>
+                                                <span>{panel.copy}</span>
+                                            </button>
+                                        ))}
+                                    </div>
+
+                                    {activeLobbyInvitePanel === 'steam' && (
+                                        <section className="lobby-invite-panel">
+                                            {steamLobbyId && steamService.isInitialized && !isRankedQuickMatchLobby ? (
+                                                <>
+                                                    <div className="lobby-steam-actions">
+                                                        <button
+                                                            onClick={async () => {
+                                                                const result = await steamService.openInviteDialog(steamLobbyId);
+                                                                if (!result.success) {
+                                                                    alert(`Failed to open Steam invite dialog: ${result.error || 'Unknown error'}`);
+                                                                }
+                                                            }}
+                                                            className="lobby-invite-btn"
+                                                        >
+                                                            Open Steam Invite Dialog
+                                                        </button>
+                                                        <button
+                                                            onClick={() => {
+                                                                void loadSteamFriends();
+                                                            }}
+                                                            className="lobby-invite-btn lobby-invite-btn-secondary"
+                                                            disabled={steamFriendsLoading}
+                                                        >
+                                                            {steamFriendsLoading ? 'Refreshing Steam Friends...' : 'Refresh Steam Friends'}
+                                                        </button>
+                                                    </div>
+
+                                                    <div className="lobby-steam-friends">
+                                                        <div className="lobby-steam-friends__header">
+                                                            <span>Steam Friends</span>
+                                                            <strong>{steamFriends.length}</strong>
+                                                        </div>
+                                                        {steamFriendsError && (
+                                                            <div className="lobby-steam-friends__empty">{steamFriendsError}</div>
+                                                        )}
+                                                        {!steamFriendsError && steamFriends.length === 0 && (
+                                                            <div className="lobby-steam-friends__empty">
+                                                                {steamFriendsLoading ? 'Loading Steam friends...' : 'No Steam friends were returned yet.'}
+                                                            </div>
+                                                        )}
+                                                        {steamFriends.length > 0 && (
+                                                            <div className="lobby-steam-friends__list">
+                                                                {steamFriends.map((friend) => (
+                                                                    <div
+                                                                        key={friend.steamId}
+                                                                        className={`lobby-steam-friends__row ${isSteamFriendOnline(friend) ? 'is-online' : 'is-offline'}`}
+                                                                    >
+                                                                        <div className="lobby-steam-friends__identity">
+                                                                            <strong>{friend.name}</strong>
+                                                                            <span>
+                                                                                {friend.state || 'unknown'}
+                                                                                {friend.lobbyId ? ' • In a Steam lobby' : ''}
+                                                                            </span>
+                                                                        </div>
+                                                                        <button
+                                                                            onClick={async () => {
+                                                                                setInvitingSteamFriendId(friend.steamId);
+                                                                                try {
+                                                                                    const result = await steamService.inviteFriend(friend.steamId, steamLobbyId);
+                                                                                    if (!result.success) {
+                                                                                        alert(`Failed to invite ${friend.name}: ${result.error || 'Unknown error'}`);
+                                                                                    }
+                                                                                } finally {
+                                                                                    setInvitingSteamFriendId(null);
+                                                                                }
+                                                                            }}
+                                                                            className="lobby-invite-btn lobby-invite-btn-small"
+                                                                            disabled={invitingSteamFriendId === friend.steamId}
+                                                                        >
+                                                                            {invitingSteamFriendId === friend.steamId ? 'Inviting...' : 'Invite'}
+                                                                        </button>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </>
+                                            ) : (
+                                                <div className="lobby-invite-panel__empty">
+                                                    {isRankedQuickMatchLobby
+                                                        ? 'Ranked quick match uses random Steam lobby assignment. Friend invites are disabled while queueing.'
+                                                        : 'Steam lobby controls appear once a Steam lobby is active.'}
+                                                </div>
+                                            )}
+                                        </section>
+                                    )}
+
+                                    {activeLobbyInvitePanel === 'access' && !isRankedQuickMatchLobby && (
+                                        <section className="lobby-invite-panel">
+                                            <div className="lobby-room-info-display">
+                                                <div className="lobby-room-id-row">
+                                                    <span className="lobby-room-id-label">Room ID:</span>
+                                                    <span className="lobby-room-id-text">{roomId}</span>
+                                                    <button
+                                                        onClick={() => {
+                                                            navigator.clipboard.writeText(roomId);
+                                                            alert(`Game ID copied: ${roomId}`);
+                                                        }}
+                                                        className="lobby-copy-btn"
+                                                    >
+                                                        Copy
+                                                    </button>
+                                                </div>
+
+                                                {tunnelPassword && (
+                                                    <div className="lobby-tunnel-password-display">
+                                                        <span className="lobby-tunnel-password-label">Tunnel Password (IP):</span>
+                                                        <span className="lobby-tunnel-password-val">{tunnelPassword}</span>
+                                                        <button
+                                                            onClick={() => {
+                                                                navigator.clipboard.writeText(tunnelPassword);
+                                                                alert('IP copied!');
+                                                            }}
+                                                            className="lobby-copy-btn"
+                                                        >
+                                                            Copy
+                                                        </button>
+                                                    </div>
+                                                )}
+
+                                                {!tunnelUrl && (
+                                                    <div className="lobby-room-id-row">
+                                                        <span className="lobby-room-id-label">Port:</span>
+                                                        <span className="lobby-room-id-text">3001</span>
+                                                        <button
+                                                            onClick={() => {
+                                                                navigator.clipboard.writeText('3001');
+                                                                alert('Port copied!');
+                                                            }}
+                                                            className="lobby-copy-btn"
+                                                        >
+                                                            Copy
+                                                        </button>
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            <button
+                                                onClick={() => {
+                                                    let baseUrl = '';
+                                                    if (tunnelUrl) {
+                                                        baseUrl = tunnelUrl;
+                                                    } else if (tunnelPassword && (tunnelPassword.includes('.') || tunnelPassword.includes(':'))) {
+                                                        baseUrl = `http://${tunnelPassword}:3001`;
+                                                    } else {
+                                                        baseUrl = window.location.origin;
+                                                    }
+
+                                                    const url = `${baseUrl}?room=${roomId}`;
+                                                    navigator.clipboard.writeText(url);
+                                                    alert(`Invite Link copied! \n\nLink: ${url}`);
+                                                }}
+                                                className="lobby-invite-btn"
+                                            >
+                                                Copy Invite Link
+                                            </button>
+                                        </section>
+                                    )}
+
+                                    {activeLobbyInvitePanel === 'diagnostics' && steamMultiplayerDiagnostics && (
+                                        <section className="lobby-invite-panel">
+                                            <div className="lobby-steam-diagnostics">
+                                                <div className="lobby-steam-diagnostics__header">
+                                                    <span>Steam Multiplayer Diagnostics</span>
+                                                    <strong>{steamMultiplayerDiagnostics.status}</strong>
+                                                </div>
+                                                <div className="lobby-steam-diagnostics__grid">
+                                                    <div className="lobby-steam-diagnostics__row">
+                                                        <span>Route</span>
+                                                        <strong>{steamDiagnosticsRouteLabel}</strong>
+                                                    </div>
+                                                    <div className="lobby-steam-diagnostics__row">
+                                                        <span>Socket</span>
+                                                        <strong>{steamMultiplayerDiagnostics.connectionPhase}</strong>
+                                                    </div>
+                                                    <div className="lobby-steam-diagnostics__row">
+                                                        <span>Invite Surface</span>
+                                                        <strong>{steamMultiplayerDiagnostics.inviteSurface || 'None'}</strong>
+                                                    </div>
+                                                    <div className="lobby-steam-diagnostics__row">
+                                                        <span>Lobby</span>
+                                                        <strong>{steamMultiplayerDiagnostics.lobbyId || steamLobbyId || 'None'}</strong>
+                                                    </div>
+                                                    <div className="lobby-steam-diagnostics__row">
+                                                        <span>Relay</span>
+                                                        <strong>{steamMultiplayerDiagnostics.relaySessionId || 'None'}</strong>
+                                                    </div>
+                                                </div>
+                                                <div className="lobby-steam-diagnostics__field">
+                                                    <span>{steamLobbyRole === 'host' ? 'Fallback Endpoint' : 'Join Endpoint'}</span>
+                                                    <code>{steamMultiplayerDiagnostics.endpoint || 'Unavailable'}</code>
+                                                </div>
+                                                <div className={`lobby-steam-diagnostics__field ${steamMultiplayerDiagnostics.lastError ? 'is-error' : ''}`}>
+                                                    <span>Last Error</span>
+                                                    <code>{steamMultiplayerDiagnostics.lastError || 'None'}</code>
+                                                </div>
+                                                {steamDiagnosticsNote && (
+                                                    <div className="lobby-steam-diagnostics__note">{steamDiagnosticsNote}</div>
+                                                )}
+                                                {steamMultiplayerDiagnostics.events.length > 0 && (
+                                                    <div className="lobby-steam-diagnostics__events">
+                                                        {steamMultiplayerDiagnostics.events.slice(0, 6).map((event) => (
+                                                            <div key={event.id} className="lobby-steam-diagnostics__event">
+                                                                <span>{event.at}</span>
+                                                                <span>{event.message}</span>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </section>
+                                    )}
+
+                                    {activeLobbyInvitePanel === null && (
+                                        <div className="lobby-invite-panel__empty">
+                                            Select a tab to open Steam tools, access info, or live diagnostics.
+                                        </div>
+                                    )}
+                                </div>
+                            )}
                         </div>
                     </div>
                 )}
-
-                {/* Force show Room ID for easy sharing */}
-                <div className="lobby-invite-container">
-                    <p className="lobby-invite-title">
-                        {isRankedQuickMatchLobby
-                            ? 'Ranked quick match is waiting for 6 Steam players.'
-                            : 'Invite friends to join!'}
-                    </p>
-
-                    {roomId && (
-                        <div className="lobby-invite-content">
-                            {steamLobbyId && steamService.isInitialized && !isRankedQuickMatchLobby && (
-                                <>
-                                    <div className="lobby-steam-actions">
-                                        <button
-                                            onClick={async () => {
-                                                const result = await steamService.openInviteDialog(steamLobbyId);
-                                                if (!result.success) {
-                                                    alert(`Failed to open Steam invite dialog: ${result.error || 'Unknown error'}`);
-                                                }
-                                            }}
-                                            className="lobby-invite-btn"
-                                        >
-                                            Open Steam Invite Dialog
-                                        </button>
-                                        <button
-                                            onClick={() => {
-                                                void loadSteamFriends();
-                                            }}
-                                            className="lobby-invite-btn lobby-invite-btn-secondary"
-                                            disabled={steamFriendsLoading}
-                                        >
-                                            {steamFriendsLoading ? 'Refreshing Steam Friends...' : 'Refresh Steam Friends'}
-                                        </button>
-                                    </div>
-
-                                    <div className="lobby-steam-friends">
-                                        <div className="lobby-steam-friends__header">
-                                            <span>Steam Friends</span>
-                                            <strong>{steamFriends.length}</strong>
-                                        </div>
-                                        {steamFriendsError && (
-                                            <div className="lobby-steam-friends__empty">{steamFriendsError}</div>
-                                        )}
-                                        {!steamFriendsError && steamFriends.length === 0 && (
-                                            <div className="lobby-steam-friends__empty">
-                                                {steamFriendsLoading ? 'Loading Steam friends...' : 'No Steam friends were returned yet.'}
-                                            </div>
-                                        )}
-                                        {steamFriends.length > 0 && (
-                                            <div className="lobby-steam-friends__list">
-                                                {steamFriends.map((friend) => (
-                                                    <div
-                                                        key={friend.steamId}
-                                                        className={`lobby-steam-friends__row ${isSteamFriendOnline(friend) ? 'is-online' : 'is-offline'}`}
-                                                    >
-                                                        <div className="lobby-steam-friends__identity">
-                                                            <strong>{friend.name}</strong>
-                                                            <span>
-                                                                {friend.state || 'unknown'}
-                                                                {friend.lobbyId ? ' • In a Steam lobby' : ''}
-                                                            </span>
-                                                        </div>
-                                                        <button
-                                                            onClick={async () => {
-                                                                setInvitingSteamFriendId(friend.steamId);
-                                                                try {
-                                                                    const result = await steamService.inviteFriend(friend.steamId, steamLobbyId);
-                                                                    if (!result.success) {
-                                                                        alert(`Failed to invite ${friend.name}: ${result.error || 'Unknown error'}`);
-                                                                    }
-                                                                } finally {
-                                                                    setInvitingSteamFriendId(null);
-                                                                }
-                                                            }}
-                                                            className="lobby-invite-btn lobby-invite-btn-small"
-                                                            disabled={invitingSteamFriendId === friend.steamId}
-                                                        >
-                                                            {invitingSteamFriendId === friend.steamId ? 'Inviting...' : 'Invite'}
-                                                        </button>
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        )}
-                                    </div>
-                                </>
-                            )}
-
-                            {/* Game ID & Password Display */}
-                            <div className="lobby-room-info-display">
-                                <div className="lobby-room-id-row">
-                                    <span className="lobby-room-id-label">Room ID:</span>
-                                    <span className="lobby-room-id-text">{roomId}</span>
-                                    <button
-                                        onClick={() => {
-                                            navigator.clipboard.writeText(roomId);
-                                            alert(`Game ID copied: ${roomId}`);
-                                        }}
-                                        className="lobby-copy-btn"
-                                    >
-                                        Copy
-                                    </button>
-                                </div>
-
-                                {tunnelPassword && !isRankedQuickMatchLobby && (
-                                    <div className="lobby-tunnel-password-display">
-                                        <span className="lobby-tunnel-password-label">Tunnel Password (IP):</span>
-                                        <span className="lobby-tunnel-password-val">{tunnelPassword}</span>
-                                        <button
-                                            onClick={() => {
-                                                navigator.clipboard.writeText(tunnelPassword);
-                                                alert('IP copied!');
-                                            }}
-                                            className="lobby-copy-btn"
-                                        >
-                                            Copy
-                                        </button>
-                                    </div>
-                                )}
-
-                                {!tunnelUrl && !isRankedQuickMatchLobby && (
-                                    <div className="lobby-room-id-row">
-                                        <span className="lobby-room-id-label">Port:</span>
-                                        <span className="lobby-room-id-text">3001</span>
-                                        <button
-                                            onClick={() => {
-                                                navigator.clipboard.writeText("3001");
-                                                alert('Port copied!');
-                                            }}
-                                            className="lobby-copy-btn"
-                                        >
-                                            Copy
-                                        </button>
-                                    </div>
-                                )}
-                            </div>
-
-                            {steamMultiplayerDiagnostics && (
-                                <div className="lobby-steam-diagnostics">
-                                    <div className="lobby-steam-diagnostics__header">
-                                        <span>Steam Multiplayer Diagnostics</span>
-                                        <strong>{steamMultiplayerDiagnostics.status}</strong>
-                                    </div>
-                                    <div className="lobby-steam-diagnostics__grid">
-                                        <div className="lobby-steam-diagnostics__row">
-                                            <span>Route</span>
-                                            <strong>{steamDiagnosticsRouteLabel}</strong>
-                                        </div>
-                                        <div className="lobby-steam-diagnostics__row">
-                                            <span>Socket</span>
-                                            <strong>{steamMultiplayerDiagnostics.connectionPhase}</strong>
-                                        </div>
-                                        <div className="lobby-steam-diagnostics__row">
-                                            <span>Invite Surface</span>
-                                            <strong>{steamMultiplayerDiagnostics.inviteSurface || 'None'}</strong>
-                                        </div>
-                                        <div className="lobby-steam-diagnostics__row">
-                                            <span>Lobby</span>
-                                            <strong>{steamMultiplayerDiagnostics.lobbyId || steamLobbyId || 'None'}</strong>
-                                        </div>
-                                        <div className="lobby-steam-diagnostics__row">
-                                            <span>Relay</span>
-                                            <strong>{steamMultiplayerDiagnostics.relaySessionId || 'None'}</strong>
-                                        </div>
-                                    </div>
-                                    <div className="lobby-steam-diagnostics__field">
-                                        <span>{steamLobbyRole === 'host' ? 'Fallback Endpoint' : 'Join Endpoint'}</span>
-                                        <code>{steamMultiplayerDiagnostics.endpoint || 'Unavailable'}</code>
-                                    </div>
-                                    <div className={`lobby-steam-diagnostics__field ${steamMultiplayerDiagnostics.lastError ? 'is-error' : ''}`}>
-                                        <span>Last Error</span>
-                                        <code>{steamMultiplayerDiagnostics.lastError || 'None'}</code>
-                                    </div>
-                                    {steamDiagnosticsNote && (
-                                        <div className="lobby-steam-diagnostics__note">{steamDiagnosticsNote}</div>
-                                    )}
-                                    {steamMultiplayerDiagnostics.events.length > 0 && (
-                                        <div className="lobby-steam-diagnostics__events">
-                                            {steamMultiplayerDiagnostics.events.slice(0, 3).map((event) => (
-                                                <div key={event.id} className="lobby-steam-diagnostics__event">
-                                                    <span>{event.at}</span>
-                                                    <span>{event.message}</span>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    )}
-                                </div>
-                            )}
-
-                            {/* Invite Link Button */}
-                            {!isRankedQuickMatchLobby && (
-                                <button
-                                    onClick={() => {
-                                        // Determine Base URL for Invite Link
-                                        let baseUrl = '';
-
-                                        if (tunnelUrl) {
-                                            // Remote Tunnel Mode
-                                            baseUrl = tunnelUrl;
-                                        } else if (tunnelPassword && (tunnelPassword.includes('.') || tunnelPassword.includes(':'))) {
-                                            // LAN Mode: Use the Local IP sent as 'tunnelPassword'
-                                            // Default port 3001 is assumed for LAN
-                                            baseUrl = `http://${tunnelPassword}:3001`;
-                                        } else {
-                                            // Fallback: Use current origin (e.g. localhost)
-                                            baseUrl = window.location.origin;
-                                        }
-
-                                        const url = `${baseUrl}?room=${roomId}`;
-                                        navigator.clipboard.writeText(url);
-                                        alert(`Invite Link copied! \n\nLink: ${url}`);
-                                    }}
-                                    className="lobby-invite-btn"
-                                >
-                                    Copy Invite Link
-                                </button>
-                            )}
-                        </div>
-                    )}
-                </div>
 
                 {/* Chat Toggle Button (Consistent with Game) */}
                 <button

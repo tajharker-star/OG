@@ -614,6 +614,7 @@ io.on('connection', (socket) => {
         // Find least-populated public room or create a new one
         let targetId: string | null = null;
         let bestScore = queueType === 'ranked_quick_match' ? -Infinity : Infinity;
+        const rankedCandidates: string[] = [];
 
         // If tunnelUrl is provided OR forceNew is true, force a new room to host it
         if (!data?.tunnelUrl && !data?.forceNew) {
@@ -631,10 +632,7 @@ io.on('connection', (socket) => {
                         }
 
                         if (queueType === 'ranked_quick_match') {
-                            if (humanCount > bestScore) {
-                                bestScore = humanCount;
-                                targetId = id;
-                            }
+                            rankedCandidates.push(id);
                         } else if (humanCount < bestScore) {
                             bestScore = humanCount;
                             targetId = id;
@@ -642,6 +640,10 @@ io.on('connection', (socket) => {
                     }
                 }
             });
+        }
+
+        if (queueType === 'ranked_quick_match' && rankedCandidates.length > 0) {
+            targetId = rankedCandidates[Math.floor(Math.random() * rankedCandidates.length)];
         }
 
         if (!targetId || data?.tunnelUrl) {
