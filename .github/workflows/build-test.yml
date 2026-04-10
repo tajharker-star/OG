@@ -243,6 +243,11 @@ jobs:
         with:
           node-version: 22
 
+      - name: Install Client Dependencies
+        run: |
+          cd client
+          npm install
+
       - name: Download Windows Build
         uses: actions/download-artifact@v4
         with:
