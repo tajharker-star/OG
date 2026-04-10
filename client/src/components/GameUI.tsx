@@ -56,6 +56,36 @@ interface ChatMessage {
     timestamp: number;
 }
 
+const normalizeSteamFriendState = (state?: string): string => (state || '').trim().toLowerCase();
+
+const isSteamFriendOnline = (friend: SteamFriend): boolean => {
+    if (typeof friend.isOnline === 'boolean') {
+        return friend.isOnline;
+    }
+    const normalizedState = normalizeSteamFriendState(friend.state);
+    return normalizedState.length > 0 && normalizedState !== 'offline';
+};
+
+const sortSteamFriendsForInvite = (friends: SteamFriend[]): SteamFriend[] => {
+    return [...friends].sort((left, right) => {
+        const leftOnline = isSteamFriendOnline(left);
+        const rightOnline = isSteamFriendOnline(right);
+        if (leftOnline !== rightOnline) {
+            return leftOnline ? -1 : 1;
+        }
+
+        const leftInLobby = Boolean(left.lobbyId);
+        const rightInLobby = Boolean(right.lobbyId);
+        if (leftInLobby !== rightInLobby) {
+            return rightInLobby ? 1 : -1;
+        }
+
+        const leftName = (left.name || left.nickname || left.steamId || '').toLowerCase();
+        const rightName = (right.name || right.nickname || right.steamId || '').toLowerCase();
+        return leftName.localeCompare(rightName);
+    });
+};
+
 const ChatOverlay: React.FC<{
     messages: ChatMessage[];
     onSend: (msg: string) => void;
@@ -953,7 +983,7 @@ export const GameUI: React.FC<GameUIProps> = ({
                 return;
             }
 
-            setSteamFriends(result.friends);
+            setSteamFriends(sortSteamFriendsForInvite(result.friends));
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Failed to load Steam friends.';
             setSteamFriends([]);
@@ -2870,7 +2900,10 @@ export const GameUI: React.FC<GameUIProps> = ({
                                         {steamFriends.length > 0 && (
                                             <div className="lobby-steam-friends__list">
                                                 {steamFriends.map((friend) => (
-                                                    <div key={friend.steamId} className="lobby-steam-friends__row">
+                                                    <div
+                                                        key={friend.steamId}
+                                                        className={`lobby-steam-friends__row ${isSteamFriendOnline(friend) ? 'is-online' : 'is-offline'}`}
+                                                    >
                                                         <div className="lobby-steam-friends__identity">
                                                             <strong>{friend.name}</strong>
                                                             <span>

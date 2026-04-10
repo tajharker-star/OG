@@ -499,6 +499,15 @@
   text-align: center;
 }
 
+.lobby-invite-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: min(62vh, 560px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
 .lobby-tunnel-password {
   font-size: 1.2rem;
   font-weight: bold;
@@ -711,6 +720,8 @@
   gap: 10px;
   margin-bottom: 12px;
   padding: 14px;
+  max-height: min(46vh, 380px);
+  overflow: hidden;
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -730,6 +741,9 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+  max-height: min(34vh, 280px);
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .lobby-steam-friends__row {
@@ -740,6 +754,14 @@
   padding: 10px 12px;
   border-radius: 8px;
   background: rgba(0, 0, 0, 0.18);
+}
+
+.lobby-steam-friends__row.is-online {
+  border: 1px solid rgba(113, 219, 149, 0.4);
+}
+
+.lobby-steam-friends__row.is-offline {
+  border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .lobby-steam-friends__identity {
@@ -1804,8 +1826,7 @@
 
 /* Lobby Invite Container */
 .lobby-invite-container {
-  display: flex;
-  gap: 5px;
+  display: block;
 }
 
 /* Option Level */
