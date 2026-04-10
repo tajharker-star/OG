@@ -7,6 +7,48 @@ import { platforms } from "./release-config.mjs";
 const errors = [];
 
 const runtimeChecks = {
+  macos: {
+    asarEntries: [
+      "/dist/index.html",
+      "/electron/main.cjs",
+      "/electron/steamNativeBridge.cjs",
+      "/electron/steamRelayBridge.cjs",
+      "/node_modules/cors/lib/index.js",
+      "/node_modules/express/index.js",
+      "/node_modules/localtunnel/package.json",
+      "/node_modules/socket.io/dist/index.js",
+      "/node_modules/socket.io-client/build/cjs/index.js",
+    ],
+    stageFiles: [
+      "ConquerorsDominationDemo.app/Contents/MacOS/ConquerorsDominationDemo",
+      "ConquerorsDominationDemo.app/Contents/Resources/server/dist/index.js",
+      "ConquerorsDominationDemo.app/Contents/Resources/server/package.json",
+    ],
+    unpackedFiles: [
+      "electron/native/steam-native-bridge-darwin-arm64",
+      "electron/native/steam-native-bridge-darwin-x64",
+      "electron/native/libsteam_api.dylib",
+    ],
+    executableFiles: [
+      "electron/native/steam-native-bridge-darwin-arm64",
+      "electron/native/steam-native-bridge-darwin-x64",
+      "electron/native/libsteam_api.dylib",
+    ],
+    nativeSignatures: [
+      {
+        relPath: "electron/native/steam-native-bridge-darwin-arm64",
+        signature: "Mach-O 64-bit executable arm64",
+      },
+      {
+        relPath: "electron/native/steam-native-bridge-darwin-x64",
+        signature: "Mach-O 64-bit executable x86_64",
+      },
+      {
+        relPath: "electron/native/libsteam_api.dylib",
+        signature: "Mach-O",
+      },
+    ],
+  },
   windows: {
     asarEntries: [
       "/dist/index.html",
@@ -116,6 +158,19 @@ for (const platform of platforms.filter((entry) => entry.key in runtimeChecks)) 
     check(
       description.includes(signature),
       `${platform.label} native runtime signature mismatch for ${absolutePath}. Expected ${JSON.stringify(signature)} in ${JSON.stringify(description)}`
+    );
+  }
+
+  for (const relPath of checks.executableFiles ?? []) {
+    const absolutePath = path.join(unpackedDir, relPath);
+    if (!fs.existsSync(absolutePath)) {
+      continue;
+    }
+
+    const mode = fs.statSync(absolutePath).mode;
+    check(
+      (mode & 0o111) !== 0,
+      `${platform.label} unpacked runtime file is missing execute permission at ${absolutePath}`
     );
   }
 

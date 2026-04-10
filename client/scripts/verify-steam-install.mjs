@@ -69,7 +69,11 @@ const appManifest = fs.readFileSync(appManifestPath, "utf8");
 const installedDirName = acfValue(appManifest, "installdir");
 const buildId = acfValue(appManifest, "buildid");
 const installedDepots = parseInstalledDepots(appManifest).sort();
-const expectedDepots = [platform.depotId].sort();
+const requiredDepots = new Set([platform.depotId]);
+const optionalDepots = new Set(["4432221"]);
+const unexpectedDepots = installedDepots.filter(
+  (depotId) => !requiredDepots.has(depotId) && !optionalDepots.has(depotId)
+);
 
 if (installedDirName !== installFolder) {
   fail(`Steam install folder mismatch. Expected ${JSON.stringify(installFolder)}, found ${JSON.stringify(installedDirName)}.`);
@@ -82,12 +86,14 @@ if (!fs.existsSync(installRoot)) {
   fail(`Missing Steam install root at ${installRoot}.`);
 }
 
-if (JSON.stringify(installedDepots) !== JSON.stringify(expectedDepots)) {
+if (!installedDepots.includes(platform.depotId) || unexpectedDepots.length > 0) {
   fail(
     [
       `Wrong depots installed for ${platform.label}.`,
-      `Expected: ${expectedDepots.join(", ") || "(none)"}`,
+      `Expected required: ${[...requiredDepots].join(", ") || "(none)"}`,
+      `Allowed optional: ${[...optionalDepots].join(", ") || "(none)"}`,
       `Found: ${installedDepots.join(", ") || "(none)"}`,
+      `Unexpected: ${unexpectedDepots.join(", ") || "(none)"}`,
       `Install root: ${installRoot}`,
       `BuildID: ${buildId ?? "unknown"}`,
     ].join("\n")
@@ -105,9 +111,21 @@ if (platform.key === "macos") {
     "MacOS",
     path.basename(platform.launchExecutable, ".app")
   );
+  const macResourcesPath = path.join(launchTargetPath, "Contents", "Resources");
+  const macNativeRuntimePaths = [
+    path.join(macResourcesPath, "app.asar.unpacked", "electron", "native", "steam-native-bridge-darwin-arm64"),
+    path.join(macResourcesPath, "app.asar.unpacked", "electron", "native", "steam-native-bridge-darwin-x64"),
+    path.join(macResourcesPath, "app.asar.unpacked", "electron", "native", "libsteam_api.dylib"),
+  ];
 
   if (!fs.existsSync(macBinaryPath)) {
     fail(`Missing macOS app binary at ${macBinaryPath}.`);
+  }
+
+  for (const runtimePath of macNativeRuntimePaths) {
+    if (!fs.existsSync(runtimePath)) {
+      fail(`Missing macOS Steam runtime dependency at ${runtimePath}.`);
+    }
   }
 }
 

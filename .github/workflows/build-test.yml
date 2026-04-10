@@ -65,6 +65,13 @@ jobs:
           cd client
           npm install
 
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install macOS Rust targets for Steam bridge
+        if: matrix.os == 'macos-latest'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
       - name: Install Linux Electron deps
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -103,6 +110,7 @@ jobs:
           cp server/package.json client/server/
           cd client/server && npm install --omit=dev && cd ../..
           cd client
+          npm run build:native-steam-bridge
           if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
             npx electron-builder --mac --x64 --dir
             if [ -d "dist_electron/mac-x64" ]; then
@@ -304,6 +312,7 @@ jobs:
           cd client
           node scripts/verify-steam-layout.mjs
           node scripts/verify-release-binaries.mjs
+          node scripts/verify-steam-runtime.mjs
 
       - name: Summarize staged depot file counts
         run: |
