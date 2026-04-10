@@ -166,12 +166,7 @@ if (!fs.existsSync(bridgeManifestPath)) {
 const hostRustTarget = detectHostRustTarget();
 const installedTargets = listInstalledRustTargets();
 const plans = getBridgePlans(hostRustTarget, installedTargets);
-const runtimeRoot = resolveSteamworksSysRuntimeRoot();
-
-if (!runtimeRoot) {
-  console.error("Unable to locate the steamworks-sys redistributable runtime in the Cargo registry.");
-  process.exit(1);
-}
+let runtimeRoot = resolveSteamworksSysRuntimeRoot();
 
 cleanOutputDirectory();
 
@@ -201,6 +196,16 @@ for (const plan of plans) {
   fs.copyFileSync(compiledBinaryPath, stagedBinaryPath);
   if (!plan.binaryName.endsWith(".exe")) {
     fs.chmodSync(stagedBinaryPath, 0o755);
+  }
+
+  // A fresh CI runner may not have steamworks-sys extracted in the Cargo
+  // registry until after the first successful cargo build in this loop.
+  if (!runtimeRoot) {
+    runtimeRoot = resolveSteamworksSysRuntimeRoot();
+  }
+  if (!runtimeRoot) {
+    console.error("Unable to locate the steamworks-sys redistributable runtime in the Cargo registry.");
+    process.exit(1);
   }
 
   const runtimeSourcePath = path.join(runtimeRoot, plan.runtimeSubdir, plan.runtimeLibraryName);
