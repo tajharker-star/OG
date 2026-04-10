@@ -31,6 +31,54 @@ function removeIfPresent(targetPath) {
   fs.rmSync(targetPath, { recursive: true, force: true });
 }
 
+function chmodIfPresent(targetPath, mode = 0o755) {
+  if (!fs.existsSync(targetPath)) {
+    return;
+  }
+
+  fs.chmodSync(targetPath, mode);
+}
+
+function normalizePlatformPermissions(platform) {
+  if (platform.key === "macos" && platform.bundlePath) {
+    const nativeDir = path.join(
+      platform.bundlePath,
+      "Contents",
+      "Resources",
+      "app.asar.unpacked",
+      "electron",
+      "native"
+    );
+
+    for (const relPath of [
+      "steam-native-bridge-darwin-arm64",
+      "steam-native-bridge-darwin-x64",
+      "libsteam_api.dylib",
+    ]) {
+      chmodIfPresent(path.join(nativeDir, relPath));
+    }
+  }
+
+  if (platform.key === "linux") {
+    chmodIfPresent(path.join(platform.stageDir, "conquerors-domination-demo"));
+    chmodIfPresent(path.join(platform.stageDir, "chrome-sandbox"));
+
+    const nativeDir = path.join(
+      platform.stageDir,
+      "resources",
+      "app.asar.unpacked",
+      "node_modules",
+      "steamworks.js",
+      "dist",
+      "linux64"
+    );
+
+    for (const relPath of ["steamworksjs.linux-x64-gnu.node", "libsteam_api.so"]) {
+      chmodIfPresent(path.join(nativeDir, relPath));
+    }
+  }
+}
+
 const selectedPlatforms = getSelectedPlatforms();
 const selectedLaunchOptions = getSelectedLaunchOptions();
 
@@ -46,6 +94,8 @@ for (const platform of selectedPlatforms) {
     removeIfPresent(path.join(platform.bundlePath, "Contents", "MacOS", "steam_appid.txt"));
     removeIfPresent(path.join(platform.bundlePath, "Contents", "Resources", "steam_appid.txt"));
   }
+
+  normalizePlatformPermissions(platform);
 }
 
 const manifest = {

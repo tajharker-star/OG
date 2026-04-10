@@ -6,6 +6,18 @@ import { platforms } from "./release-config.mjs";
 
 const errors = [];
 
+function signatureIncludes(description, signature) {
+  if (typeof signature === "string") {
+    return description.includes(signature);
+  }
+
+  if (Array.isArray(signature)) {
+    return signature.every((token) => description.includes(token));
+  }
+
+  return false;
+}
+
 const runtimeChecks = {
   macos: {
     asarEntries: [
@@ -37,11 +49,11 @@ const runtimeChecks = {
     nativeSignatures: [
       {
         relPath: "electron/native/steam-native-bridge-darwin-arm64",
-        signature: "Mach-O 64-bit executable arm64",
+        signature: ["Mach-O 64-bit", "arm64", "executable"],
       },
       {
         relPath: "electron/native/steam-native-bridge-darwin-x64",
-        signature: "Mach-O 64-bit executable x86_64",
+        signature: ["Mach-O 64-bit", "x86_64", "executable"],
       },
       {
         relPath: "electron/native/libsteam_api.dylib",
@@ -156,7 +168,7 @@ for (const platform of platforms.filter((entry) => entry.key in runtimeChecks)) 
 
     const description = execFileSync("file", [absolutePath], { encoding: "utf8" }).trim();
     check(
-      description.includes(signature),
+      signatureIncludes(description, signature),
       `${platform.label} native runtime signature mismatch for ${absolutePath}. Expected ${JSON.stringify(signature)} in ${JSON.stringify(description)}`
     );
   }
