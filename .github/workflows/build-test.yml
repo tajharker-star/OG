@@ -92,7 +92,11 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: |
           cd client
-          npx playwright install --with-deps
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            npx playwright install chromium
+          else
+            npx playwright install
+          fi
 
       - name: Build Client
         run: |
