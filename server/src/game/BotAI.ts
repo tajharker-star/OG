@@ -21,6 +21,8 @@ const PLAYER_TARGET_BIAS = [0.00, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.75
 const BUILD_DELAY_MIN = [5000, 4200, 3400, 2600, 2100, 1700, 1300, 950, 700, 450];
 const BUILD_DELAY_MAX = [10000, 8500, 7000, 5600, 4600, 3600, 2800, 2000, 1400, 900];
 const ATTACK_START_TIME = [100, 95, 90, 85, 80, 75, 65, 55, 50, 45]; // Sec
+const BOT_BASIC_INFANTRY_TYPES = ['soldier', 'sniper', 'rocketeer'] as const;
+const BOT_BASIC_INFANTRY_CAP = 10;
 
 export const DifficultyConfig = (level: number) => {
     const i = Math.max(0, Math.min(9, level - 1));
@@ -41,6 +43,11 @@ export class BotAI {
   playerId: string;
   difficulty: number; // 1-10
   public readonly strategyProfile: BotStrategyProfile;
+  private readonly baseActionInterval: number;
+  private readonly baseMinBuildDelay: number;
+  private readonly baseMaxBuildDelay: number;
+  private readonly baseMaxApmTokens: number;
+  private loadFactor: number = 0;
   
   // Timing & State
   startTime: number;
@@ -72,6 +79,7 @@ export class BotAI {
   private nextMothershipSavingsAt: number | null = null;
   private mothershipSavingsActive: boolean = false;
   private unitLastPositions: Map<string, { x: number; y: number; lastMoveTime: number }> = new Map();
+  private recentMoveOrders: Map<string, { x: number; y: number; issuedAt: number }> = new Map();
   private lastGateAutoTime: number = 0;
   private buildRetryCooldownUntil: Map<string, number> = new Map();
   private recruitSelectionCursor: Map<string, number> = new Map();
@@ -134,11 +142,15 @@ export class BotAI {
     const levelIdx = this.difficulty - 1;
     
     // 1. Difficulty Scaling
-    this.actionInterval = THINK_INTERVALS[levelIdx];
-    this.maxApmTokens = MAX_APM[levelIdx];
+    this.baseActionInterval = THINK_INTERVALS[levelIdx];
+    this.baseMaxApmTokens = MAX_APM[levelIdx];
+    this.baseMinBuildDelay = BUILD_DELAY_MIN[levelIdx];
+    this.baseMaxBuildDelay = BUILD_DELAY_MAX[levelIdx];
+    this.actionInterval = this.baseActionInterval;
+    this.maxApmTokens = this.baseMaxApmTokens;
     this.apmTokens = this.maxApmTokens; // Start full
-    this.minBuildDelay = BUILD_DELAY_MIN[levelIdx];
-    this.maxBuildDelay = BUILD_DELAY_MAX[levelIdx];
+    this.minBuildDelay = this.baseMinBuildDelay;
+    this.maxBuildDelay = this.baseMaxBuildDelay;
     this.setNextBuildDelay();
     
     // Air Phase: 600 - (level-1)*(510/9)
@@ -172,8 +184,31 @@ export class BotAI {
       this.firstAirBaseBuiltAt = null;
       this.nextMothershipSavingsAt = null;
       this.mothershipSavingsActive = false;
+      this.recentMoveOrders.clear();
       this.debugState.currentGoal = 'WAITING_FOR_PLAYERS';
       this.debugState.lastDecision = 'Match start synchronized to human-ready gate';
+      this.setLoadFactor(0);
+  }
+
+  public setLoadFactor(loadFactor: number) {
+      const clamped = Math.max(0, Math.min(1, loadFactor));
+      if (Math.abs(clamped - this.loadFactor) < 0.01) return;
+
+      this.loadFactor = clamped;
+      const actionIntervalScale = 1 + clamped * 2.1;
+      const apmScale = Math.max(0.22, 1 - clamped * 0.74);
+      const buildDelayScale = 1 + clamped * 1.05;
+
+      this.actionInterval = Math.round(this.baseActionInterval * actionIntervalScale);
+      this.maxApmTokens = Math.max(8, Math.round(this.baseMaxApmTokens * apmScale));
+      this.minBuildDelay = Math.round(this.baseMinBuildDelay * buildDelayScale);
+      this.maxBuildDelay = Math.round(this.baseMaxBuildDelay * buildDelayScale);
+      this.currentBuildDelay = Math.max(this.currentBuildDelay, this.minBuildDelay);
+      this.apmTokens = Math.min(this.apmTokens, this.maxApmTokens);
+
+      this.debugState.simulationLoad = Number(clamped.toFixed(2));
+      this.debugState.thinkInterval = this.actionInterval;
+      this.debugState.maxApm = this.maxApmTokens;
   }
 
   public hasAssignedUnitOrder(unitId: string): boolean {
@@ -240,6 +275,9 @@ export class BotAI {
     
     this.debugState.apm = Math.floor(this.apmTokens);
     this.debugState.nextThink = Math.max(0, (this.lastActionTime + this.actionInterval) - now);
+    this.debugState.simulationLoad = Number(this.loadFactor.toFixed(2));
+    this.debugState.thinkInterval = this.actionInterval;
+    this.debugState.maxApm = this.maxApmTokens;
 
     // C2: Aggression State Debug
     const config = DifficultyConfig(this.difficulty);
@@ -819,7 +857,15 @@ export class BotAI {
       );
       const oilOnlineForCapital = this.hasStableOil(player) || oilClaims > 0 || player.resources.oil >= 600;
       const desiredMotherships = this.getDesiredMothershipCount(phase, readyAirBaseCount, oilOnlineForCapital);
+      const currentMothershipCount = this.countUnitsIncludingQueue(gameState, myIslands, myUnits, 'mothership');
+      const mothershipDeficit = Math.max(0, desiredMotherships - currentMothershipCount);
       const capitalEconomyUrgency = desiredMotherships > 0 && oilShortfall > 0;
+      const capitalStrikeAdvantage = this.hasMothershipStrikeAdvantage(gameState, myUnits);
+      const highTierCapitalFocus =
+          this.difficulty >= 9 &&
+          phase !== 'EARLY' &&
+          desiredMotherships > 0 &&
+          mothershipDeficit > 0;
       const defenceTargets = this.getDefenceTargets(gameState.mapType);
       const defenceReady =
           this.baseDefenseBuilder.debugState.towersBuilt >= Math.max(1, defenceTargets.towers) &&
@@ -834,7 +880,16 @@ export class BotAI {
       if (myUnits.some(u => u.type === 'builder' && u.status === 'idle')) expandScore += 30;
       if (mineClaims + oilClaims < desiredClaims) expandScore += 45;
       if (oilShortfall > 0) expandScore += 35 + Math.min(90, oilShortfall * 18);
+      if (this.difficulty >= 9 && oilShortfall > 0) {
+          expandScore += 45 + oilShortfall * 22;
+      }
       if (capitalEconomyUrgency) expandScore += 30 + this.difficulty * 6;
+      if (highTierCapitalFocus) {
+          expandScore += 70 + mothershipDeficit * 32;
+      }
+      if (capitalStrikeAdvantage) {
+          expandScore *= 0.62;
+      }
       if (phase === 'EARLY') expandScore += 30;
       if (phase === 'LATE') expandScore -= 20;
       if (this.difficulty >= 10 && phase === 'MID') expandScore *= 0.82;
@@ -867,6 +922,12 @@ export class BotAI {
       }
       if (capitalEconomyUrgency && phase !== 'LATE') {
           attackScore *= this.difficulty >= 8 ? 0.9 : 0.78;
+      }
+      if (highTierCapitalFocus) {
+          attackScore *= this.difficulty >= 10 ? 0.58 : 0.68;
+      }
+      if (capitalStrikeAdvantage) {
+          attackScore = attackScore * 1.4 + 240;
       }
       
       // --- DEFEND SCORE ---
@@ -1468,31 +1529,35 @@ export class BotAI {
   private getDesiredAirBaseCount(mapType: string, oilOnline: boolean, phase: BotMatchPhase = this.getMatchPhase()): number {
       if (!oilOnline) return 0;
       if (phase === 'EARLY') {
-          if (this.difficulty >= 10 && mapType !== 'islands') {
+          if (this.difficulty >= 10) {
               return 1;
           }
-          if (this.difficulty >= 9 && mapType === 'islands') {
+          if (this.difficulty >= 9) {
               return 1;
           }
           return 0;
       }
       if (mapType === 'islands') {
           if (phase === 'MID') {
-              if (this.difficulty >= 10) return Math.max(2, Math.min(3, this.strategyProfile.airBases + 1));
+              if (this.difficulty >= 10) return 3;
+              if (this.difficulty >= 9) return Math.max(2, Math.min(3, this.strategyProfile.airBases + 1));
               if (this.difficulty >= 8) return Math.max(1, Math.min(2, this.strategyProfile.airBases));
               if (this.difficulty >= 6) return 1;
               return 0;
           }
-          if (this.difficulty >= 9) return Math.max(2, Math.min(3, this.strategyProfile.airBases));
+          if (this.difficulty >= 10) return 3;
+          if (this.difficulty >= 9) return Math.max(2, Math.min(3, this.strategyProfile.airBases + 1));
           return Math.max(1, this.strategyProfile.airBases);
       }
       if (phase === 'MID') {
-          if (this.difficulty >= 9) return Math.max(2, Math.min(3, this.strategyProfile.airBases));
+          if (this.difficulty >= 10) return 3;
+          if (this.difficulty >= 9) return Math.max(2, Math.min(3, this.strategyProfile.airBases + 1));
           if (this.difficulty >= 7) return Math.max(1, Math.min(2, this.strategyProfile.airBases));
           if (this.difficulty >= 5) return Math.min(1, this.strategyProfile.airBases);
           return 0;
       }
-      if (this.difficulty >= 9) return Math.max(2, this.strategyProfile.airBases);
+      if (this.difficulty >= 10) return Math.max(3, this.strategyProfile.airBases);
+      if (this.difficulty >= 9) return Math.max(2, Math.min(3, this.strategyProfile.airBases + 1));
       if (this.difficulty >= 7) return Math.max(1, this.strategyProfile.airBases);
       return Math.max(1, this.strategyProfile.airBases);
   }
@@ -1501,12 +1566,13 @@ export class BotAI {
       if (!oilOnline || readyAirBaseCount <= 0) return 0;
 
       if (phase === 'EARLY') {
-          if (this.difficulty >= 10 && readyAirBaseCount >= 2) return 1;
+          if (this.difficulty >= 10 && readyAirBaseCount >= 1) return 1;
+          if (this.difficulty >= 9 && readyAirBaseCount >= 1) return 1;
           return 0;
       }
 
       if (phase === 'MID') {
-          if (this.difficulty >= 10) return Math.min(3, Math.max(2, readyAirBaseCount));
+          if (this.difficulty >= 10) return Math.min(3, Math.max(3, readyAirBaseCount));
           if (this.difficulty >= 9) return Math.min(3, Math.max(2, readyAirBaseCount));
           if (this.difficulty >= 7) return Math.min(2, Math.max(1, readyAirBaseCount));
           if (this.difficulty >= 5) return 1;
@@ -1514,15 +1580,21 @@ export class BotAI {
       }
 
       const lateCap =
-          this.difficulty >= 10 ? 4 :
+          this.difficulty >= 10 ? 3 :
+          this.difficulty >= 9 ? 3 :
           this.difficulty >= 8 ? 3 :
           this.difficulty >= 5 ? 2 : 1;
-      return Math.min(lateCap, Math.max(1, readyAirBaseCount));
+      const lateFloor =
+          this.difficulty >= 10 ? 2 :
+          this.difficulty >= 9 ? 2 :
+          1;
+      return Math.min(lateCap, Math.max(lateFloor, readyAirBaseCount));
   }
 
   private getDedicatedMothershipAirBaseCount(readyAirBaseCount: number, desiredMothershipCount: number): number {
       if (readyAirBaseCount <= 0 || desiredMothershipCount <= 0) return 0;
-      if (this.difficulty >= 10) return Math.min(2, readyAirBaseCount, desiredMothershipCount);
+      if (this.difficulty >= 10) return Math.min(3, readyAirBaseCount, desiredMothershipCount);
+      if (this.difficulty >= 9) return Math.min(2, readyAirBaseCount, desiredMothershipCount);
       if (this.difficulty >= 8) return Math.min(2, readyAirBaseCount, desiredMothershipCount);
       return 1;
   }
@@ -1547,9 +1619,15 @@ export class BotAI {
       const mothershipOilCost = UnitData.mothership?.cost?.oil ?? 1000;
       const mothershipGoldCost = UnitData.mothership?.cost?.gold ?? 2000;
       const reserveFactor = savingsActive
-          ? 1
-          : this.difficulty >= 9
-              ? 0.7
+          ? this.difficulty >= 10
+              ? 1.35
+              : this.difficulty >= 9
+                  ? 1.2
+                  : 1
+          : this.difficulty >= 10
+              ? 1.1
+              : this.difficulty >= 9
+                  ? 0.95
               : this.difficulty >= 7
                   ? 0.5
                   : this.difficulty >= 4
@@ -1580,7 +1658,7 @@ export class BotAI {
       const earlyFraction =
           this.difficulty <= 3 ? 0.45 :
           this.difficulty <= 6 ? 0.6 :
-          this.difficulty <= 8 ? 0.75 : 0.85;
+          this.difficulty <= 8 ? 0.75 : 1.0;
       const midFraction =
           this.difficulty <= 3 ? 0.75 :
           this.difficulty <= 6 ? 0.9 :
@@ -1634,6 +1712,68 @@ export class BotAI {
               return building.ownerId === this.playerId && (building.type === 'barracks' || building.type === 'tank_factory' || building.type === 'dock');
           }).length;
       }, 0);
+  }
+
+  private getAirCapitalForceScore(units: Unit[]): number {
+      const weights: Record<string, number> = {
+          mothership: 2500,
+          aircraft_carrier: 1600,
+          heavy_alien: 700,
+          heavy_plane: 380,
+          alien_scout: 220,
+          light_plane: 130,
+          destroyer: 180,
+          pirate_ship: 80,
+          missile_launcher: 260,
+          rocketeer: 110,
+          tower: 240,
+          base: 180
+      };
+
+      return units.reduce((sum, unit) => {
+          const base = weights[unit.type] ?? 0;
+          if (base <= 0) return sum;
+          const healthRatio = Math.max(0.35, Math.min(1.05, unit.health / Math.max(1, unit.maxHealth)));
+          return sum + base * healthRatio;
+      }, 0);
+  }
+
+  private hasMothershipStrikeAdvantage(gameState: GameState, myUnits: Unit[]): boolean {
+      if (this.difficulty < 9) return false;
+
+      const myMotherships = myUnits.filter(unit => unit.type === 'mothership');
+      if (myMotherships.length < 2) return false;
+
+      const enemyUnits = gameState.units.filter(unit => unit.ownerId !== this.playerId);
+      const enemyCapitalShips = enemyUnits.filter(unit => ['mothership', 'aircraft_carrier'].includes(unit.type)).length;
+      const enemyResponders = enemyUnits.filter(unit =>
+          ['light_plane', 'heavy_plane', 'alien_scout', 'heavy_alien', 'mothership', 'aircraft_carrier', 'destroyer', 'pirate_ship', 'missile_launcher', 'rocketeer'].includes(unit.type)
+      );
+      const myCapitalForce = this.getAirCapitalForceScore(
+          myUnits.filter(unit =>
+              ['mothership', 'aircraft_carrier', 'heavy_alien', 'alien_scout', 'heavy_plane', 'light_plane'].includes(unit.type)
+          )
+      );
+      const enemyResponseForce = this.getAirCapitalForceScore(enemyResponders);
+      const enemyBuildings = this.getEnemyBuildings(gameState);
+      const enemyBases = enemyBuildings.filter(building => building.type === 'base');
+      if (enemyBases.length === 0) return false;
+
+      const enemyBaseOwnerIds = new Set(enemyBases.map(base => base.ownerId).filter((id): id is string => !!id));
+      const nearbyAirDefences = enemyBuildings.filter(building =>
+          !!building.ownerId &&
+          enemyBaseOwnerIds.has(building.ownerId) &&
+          ['tower', 'air_base', 'dock', 'repair_dock'].includes(building.type)
+      );
+      const defencePressure = nearbyAirDefences.reduce((sum, building) => {
+          const weight =
+              building.type === 'tower' ? 220 :
+              building.type === 'air_base' ? 140 :
+              building.type === 'dock' ? 70 : 40;
+          return sum + weight;
+      }, 0);
+
+      return enemyCapitalShips === 0 && myCapitalForce >= (enemyResponseForce + defencePressure) * 1.2;
   }
 
   private updateMothershipSavingsMode(
@@ -2215,6 +2355,9 @@ export class BotAI {
       let airBaseCount = 0;
       myIslands.forEach(i => airBaseCount += this.countOwnedBuildingsOfType(i, 'air_base'));
       const fieldedCapitalShips = myUnits.filter(unit => unit.type === 'mothership' || unit.type === 'aircraft_carrier').length;
+      const fieldedMothershipIds = myUnits
+          .filter(unit => unit.ownerId === this.playerId && unit.type === 'mothership')
+          .map(unit => unit.id);
       const lowOilAirFallback =
           this.difficulty >= 8 &&
           phase !== 'EARLY' &&
@@ -2381,8 +2524,18 @@ export class BotAI {
       const mothershipReserveOil = mothershipReserve.oil;
       const mothershipReserveGold = mothershipReserve.gold;
       const capitalShipReady = capitalShipInfrastructureReady;
+      const mothershipOilCost = UnitData.mothership?.cost?.oil ?? 1000;
+      const mothershipGoldCost = UnitData.mothership?.cost?.gold ?? 2000;
+      const alienScoutOilCost = UnitData.alien_scout?.cost?.oil ?? 50;
+      const alienScoutGoldCost = UnitData.alien_scout?.cost?.gold ?? 150;
+      const heavyAlienOilCost = UnitData.heavy_alien?.cost?.oil ?? 400;
+      const heavyAlienGoldCost = UnitData.heavy_alien?.cost?.gold ?? 800;
+      const highTierMothershipPriorityMode =
+          this.difficulty >= 9 &&
+          capitalShipReady &&
+          desiredMotherships > motherships;
       const shouldHardSaveForMothership =
-          mothershipSavingsActive &&
+          (mothershipSavingsActive || highTierMothershipPriorityMode) &&
           desiredMotherships > motherships;
       const canSpendAirBudget = (oilCost: number, goldCost: number): boolean => {
           if (shouldHardSaveForMothership) return false;
@@ -2421,7 +2574,11 @@ export class BotAI {
       }
 
       const hasReadyDock = myIslands.some(island => this.islandHasReadyOwnedBuildingOfType(island, 'dock'));
-      if (!shouldHardSaveForMothership && capitalShipReady && hasReadyDock && carriers < 1) {
+      const carrierAllowedByCapitalPlan =
+          this.difficulty < 9 ||
+          desiredMotherships <= 0 ||
+          motherships >= Math.min(1, desiredMotherships);
+      if (!shouldHardSaveForMothership && capitalShipReady && hasReadyDock && carriers < 1 && carrierAllowedByCapitalPlan) {
           this.recruitUnitType(gameState, player, myIslands, 'aircraft_carrier', 'dock');
       }
 
@@ -2442,9 +2599,25 @@ export class BotAI {
               this.difficulty <= 3 ? 0 : 1
           );
       }
+      if (highTierMothershipPriorityMode) {
+          const preserveCapitalResources =
+              player.resources.oil < mothershipOilCost + 240 ||
+              player.resources.gold < mothershipGoldCost + 600 ||
+              orderedMotherships;
+          if (preserveCapitalResources) {
+              airProductionBursts = 0;
+          } else {
+              airProductionBursts = Math.min(airProductionBursts, this.difficulty >= 10 ? 0 : 1);
+          }
+      }
       if (shouldHardSaveForMothership) {
           airProductionBursts = 0;
       }
+
+      const preferAlienBroodMode =
+          this.difficulty >= 9 &&
+          fieldedMothershipIds.length > 0 &&
+          (player.resources.oil >= 1000 || motherships >= Math.min(2, desiredMotherships));
 
       for (let burst = 0; burst < airProductionBursts; burst += 1) {
           if (canSpendAirBudget(UnitData.light_plane?.cost?.oil ?? 20, UnitData.light_plane?.cost?.gold ?? 100)) {
@@ -2457,8 +2630,10 @@ export class BotAI {
                   strikeAirBasePool
               );
           }
-          this.recruitUnitType(gameState, player, myIslands, 'light_plane', 'mothership');
-          this.recruitUnitType(gameState, player, myIslands, 'light_plane', 'aircraft_carrier');
+          if (!preferAlienBroodMode) {
+              this.recruitUnitType(gameState, player, myIslands, 'light_plane', 'mothership');
+              this.recruitUnitType(gameState, player, myIslands, 'light_plane', 'aircraft_carrier');
+          }
 
           if (
               (!lowOilAirMode || player.resources.oil >= (this.difficulty >= 10 ? 220 : 180)) &&
@@ -2472,8 +2647,10 @@ export class BotAI {
                   'air_base',
                   strikeAirBasePool
               );
-              this.recruitUnitType(gameState, player, myIslands, 'heavy_plane', 'mothership');
-              this.recruitUnitType(gameState, player, myIslands, 'heavy_plane', 'aircraft_carrier');
+              if (!preferAlienBroodMode) {
+                  this.recruitUnitType(gameState, player, myIslands, 'heavy_plane', 'mothership');
+                  this.recruitUnitType(gameState, player, myIslands, 'heavy_plane', 'aircraft_carrier');
+              }
           }
 
           if (canSpendAirBudget(UnitData.light_plane?.cost?.oil ?? 20, UnitData.light_plane?.cost?.gold ?? 100)) {
@@ -2486,8 +2663,55 @@ export class BotAI {
                   strikeAirBasePool
               );
           }
-          this.recruitUnitType(gameState, player, myIslands, 'light_plane', 'mothership');
-          this.recruitUnitType(gameState, player, myIslands, 'light_plane', 'aircraft_carrier');
+          if (!preferAlienBroodMode) {
+              this.recruitUnitType(gameState, player, myIslands, 'light_plane', 'mothership');
+              this.recruitUnitType(gameState, player, myIslands, 'light_plane', 'aircraft_carrier');
+          }
+      }
+
+      const highTierOilOverflow =
+          this.difficulty >= 9 &&
+          fieldedMothershipIds.length > 0 &&
+          player.resources.oil >= 1000 &&
+          motherships >= Math.min(3, desiredMotherships);
+      let queuedAlienScouts = 0;
+      let queuedHeavyAliens = 0;
+      if (highTierOilOverflow) {
+          const currentAlienScouts = this.countUnitsIncludingQueue(gameState, myIslands, myUnits, 'alien_scout');
+          const currentHeavyAliens = this.countUnitsIncludingQueue(gameState, myIslands, myUnits, 'heavy_alien');
+          const alienScoutCap = this.difficulty >= 10 ? 10 : 8;
+          const heavyAlienCap = this.difficulty >= 10 ? 5 : 4;
+          const alienBurstCap = this.difficulty >= 10 ? 4 : 3;
+          for (let burst = 0; burst < alienBurstCap; burst += 1) {
+              const totalHeavyAliens = this.countUnitsIncludingQueue(gameState, myIslands, myUnits, 'heavy_alien');
+              const totalAlienScouts = this.countUnitsIncludingQueue(gameState, myIslands, myUnits, 'alien_scout');
+              const preferHeavyAlien =
+                  totalHeavyAliens < heavyAlienCap &&
+                  player.resources.oil >= heavyAlienOilCost &&
+                  player.resources.gold >= heavyAlienGoldCost;
+              if (preferHeavyAlien) {
+                  const before = this.countUnitsIncludingQueue(gameState, myIslands, myUnits, 'heavy_alien');
+                  this.recruitUnitType(gameState, player, myIslands, 'heavy_alien', 'mothership', fieldedMothershipIds);
+                  const after = this.countUnitsIncludingQueue(gameState, myIslands, myUnits, 'heavy_alien');
+                  if (after > before) {
+                      queuedHeavyAliens += 1;
+                      continue;
+                  }
+              }
+
+              if (
+                  totalAlienScouts < alienScoutCap &&
+                  player.resources.oil >= alienScoutOilCost &&
+                  player.resources.gold >= alienScoutGoldCost
+              ) {
+                  const before = this.countUnitsIncludingQueue(gameState, myIslands, myUnits, 'alien_scout');
+                  this.recruitUnitType(gameState, player, myIslands, 'alien_scout', 'mothership', fieldedMothershipIds);
+                  const after = this.countUnitsIncludingQueue(gameState, myIslands, myUnits, 'alien_scout');
+                  if (after > before) {
+                      queuedAlienScouts += 1;
+                  }
+              }
+          }
       }
 
       const mothershipSavingsCountdownMs =
@@ -2521,6 +2745,7 @@ export class BotAI {
           mothershipAirBaseIds,
           strikeAirBaseIds: strikeAirBasePool,
           mothershipSavingsActive,
+          highTierMothershipPriorityMode,
           shouldHardSaveForMothership,
           mothershipReserveOil,
           mothershipReserveGold,
@@ -2528,7 +2753,10 @@ export class BotAI {
           fieldedCapitalShips,
           lowOilAirFallback,
           lowOilAirMode,
-          orderedMotherships
+          orderedMotherships,
+          highTierOilOverflow,
+          queuedAlienScouts,
+          queuedHeavyAliens
       };
   }
 
@@ -2539,6 +2767,7 @@ export class BotAI {
         const motherships = myUnits.filter(u => u.type === 'mothership');
         const carriers = myUnits.filter(u => u.type === 'aircraft_carrier');
         const capitalShips = [...motherships, ...carriers];
+        const capitalStrikeAdvantage = this.hasMothershipStrikeAdvantage(gameState, myUnits);
         const enemyThreats = capitalShips.length > 0 ? this.getEnemyThreatZones(gameState) : [];
 
         if (airUnits.length === 0 && capitalShips.length === 0) return;
@@ -2563,6 +2792,9 @@ export class BotAI {
         if (requiredCapitalShips === 0 && this.difficulty >= 9 && phase !== 'EARLY') {
             attackThreshold = Math.min(attackThreshold, 5);
         }
+        if (capitalStrikeAdvantage) {
+            attackThreshold = Math.min(attackThreshold, 2);
+        }
         const capitalReady = capitalShips.length >= requiredCapitalShips;
 
         // Find Rally Point
@@ -2582,6 +2814,9 @@ export class BotAI {
 
         if (this.airState.mode === 'GATHER') {
             let grouped = false;
+            const farCapitalCount = rally
+                ? capitalShips.filter(u => Math.hypot(u.x - rally.x, u.y - rally.y) > 700).length
+                : 0;
             if (airUnits.length >= attackThreshold && capitalReady) {
                 if (rally) {
                     const farAir = airUnits.filter(u => Math.hypot(u.x - rally!.x, u.y - rally!.y) > 440);
@@ -2592,6 +2827,14 @@ export class BotAI {
                 } else {
                     grouped = true;
                 }
+            }
+            if (
+                !grouped &&
+                capitalStrikeAdvantage &&
+                motherships.length >= 2 &&
+                (!rally || farCapitalCount === 0)
+            ) {
+                grouped = true;
             }
 
             if (grouped) {
@@ -2628,6 +2871,7 @@ export class BotAI {
             capitalShips: capitalShips.length,
             requiredCapitalShips,
             capitalReady,
+            capitalStrikeAdvantage,
             oilReadyForCapitalRequirement,
             target: target ? { x: Math.round(target.x), y: Math.round(target.y) } : null
         };
@@ -3265,6 +3509,30 @@ export class BotAI {
 
   private findAirTarget(gameState: GameState): {x: number, y: number} | null {
       const phase = this.getMatchPhase();
+      const myUnits = gameState.units.filter(unit => unit.ownerId === this.playerId);
+      const capitalStrikeAdvantage = this.hasMothershipStrikeAdvantage(gameState, myUnits);
+      const enemyBuildings = this.getEnemyBuildings(gameState);
+      const enemyBases = enemyBuildings.filter(building => building.type === 'base');
+      if (capitalStrikeAdvantage && enemyBases.length > 0) {
+          const myIslands = this.getControlledIslands(gameState);
+          const home = this.getOwnedBaseIsland(gameState, myIslands) || myIslands[0] || null;
+          if (!home) {
+              return { x: enemyBases[0].x, y: enemyBases[0].y };
+          }
+
+          let bestBase = enemyBases[0];
+          let bestScore = -Infinity;
+          enemyBases.forEach(base => {
+              const distance = Math.hypot(base.x - home.x, base.y - home.y);
+              const score = -distance;
+              if (score > bestScore) {
+                  bestScore = score;
+                  bestBase = base;
+              }
+          });
+          return { x: bestBase.x, y: bestBase.y };
+      }
+
       const managerTarget = this.debugState?.attackManager?.targetPos;
       if (
           managerTarget &&
@@ -3274,8 +3542,6 @@ export class BotAI {
           return { x: managerTarget.x, y: managerTarget.y };
       }
 
-      const enemyBuildings = this.getEnemyBuildings(gameState);
-      const enemyBases = enemyBuildings.filter(building => building.type === 'base');
       if (enemyBases.length > 0 && (phase !== 'EARLY' || this.difficulty >= 8)) {
           const myIslands = this.getControlledIslands(gameState);
           const home = this.getOwnedBaseIsland(gameState, myIslands) || myIslands[0] || null;
@@ -3719,7 +3985,13 @@ export class BotAI {
 
   private findGridPath(gameState: GameState, unit: Unit, target: { x: number, y: number }): { x: number, y: number }[] {
       const map = gameState.map;
-      const cellSize = this.getUnitDomain(unit.type) === 'LAND' ? 48 : 80;
+      const isSharedLandPath =
+          this.getUnitDomain(unit.type) === 'LAND' &&
+          ['grasslands', 'desert'].includes(gameState.mapType);
+      const cellSize =
+          this.getUnitDomain(unit.type) === 'LAND'
+              ? (isSharedLandPath ? (this.difficulty >= 7 ? 36 : 40) : 48)
+              : 80;
       const cols = Math.max(1, Math.ceil(map.width / cellSize));
       const rows = Math.max(1, Math.ceil(map.height / cellSize));
 
@@ -3842,8 +4114,21 @@ export class BotAI {
       return [];
   }
 
+  private getIslandSurfaceDepth(gameState: GameState, island: Island, x: number, y: number, buffer: number = 0): number {
+      if (island.points && island.points.length > 2) {
+          const closest = MapGenerator.getClosestPointOnPolygon(x, y, island.points);
+          const edgeDistance = Math.hypot(x - closest.x, y - closest.y);
+          if (MapGenerator.isPointInPolygon(x, y, island.points)) {
+              return edgeDistance;
+          }
+          return buffer - edgeDistance;
+      }
+
+      return island.radius - Math.hypot(x - island.x, y - island.y) + buffer;
+  }
+
   private getIslandContainingPoint(gameState: GameState, x: number, y: number, buffer: number = 35): Island | null {
-      const island = gameState.map.islands.find(candidate => {
+      const candidates = gameState.map.islands.filter(candidate => {
           if (candidate.points) {
               if (MapGenerator.isPointInPolygon(x, y, candidate.points)) return true;
               const closest = MapGenerator.getClosestPointOnPolygon(x, y, candidate.points);
@@ -3851,7 +4136,21 @@ export class BotAI {
           }
           return Math.hypot(x - candidate.x, y - candidate.y) <= candidate.radius + buffer;
       });
-      return island || null;
+      if (candidates.length === 0) return null;
+
+      const ranked = candidates.sort((left, right) => {
+          const leftDepth = this.getIslandSurfaceDepth(gameState, left, x, y, buffer);
+          const rightDepth = this.getIslandSurfaceDepth(gameState, right, x, y, buffer);
+          if (leftDepth !== rightDepth) return rightDepth - leftDepth;
+
+          const leftCenterDist = Math.hypot(x - left.x, y - left.y);
+          const rightCenterDist = Math.hypot(x - right.x, y - right.y);
+          if (leftCenterDist !== rightCenterDist) return leftCenterDist - rightCenterDist;
+
+          return left.radius - right.radius;
+      });
+
+      return ranked[0] || null;
   }
 
   private getBridgeEndpoints(gameState: GameState, bridge: any): { ax: number; ay: number; bx: number; by: number } | null {
@@ -3962,12 +4261,32 @@ export class BotAI {
       if (!unit) return;
 
       const adjusted = gameState.adjustTarget(unit.type, x, y);
-      let path = this.computePathForUnit(gameState, unit, adjusted);
+      const now = Date.now();
+      const activeMoveTarget =
+          unit.status === 'moving' &&
+          typeof unit.targetX === 'number' &&
+          typeof unit.targetY === 'number' &&
+          Math.hypot(unit.targetX - adjusted.x, unit.targetY - adjusted.y) <= (this.loadFactor >= 0.55 ? 34 : 18);
+      const recentMove = this.recentMoveOrders.get(unitId);
+      const recentDuplicate =
+          !!recentMove &&
+          Math.hypot(recentMove.x - adjusted.x, recentMove.y - adjusted.y) <= 22 &&
+          (now - recentMove.issuedAt) <= (this.loadFactor >= 0.7 ? 1800 : 900);
+
+      if (activeMoveTarget || recentDuplicate) {
+          this.usedUnitIds.add(unitId);
+          return;
+      }
+
+      const skipBotPathPlanning =
+          this.loadFactor >= 0.58 ||
+          (this.loadFactor >= 0.34 && this.isCombatUnitType(unit.type));
+      let path = skipBotPathPlanning ? [adjusted] : this.computePathForUnit(gameState, unit, adjusted);
 
       if (path.length === 0) {
           const fallback = this.findNearestReachablePoint(gameState, unit, adjusted);
           if (fallback) {
-              path = this.computePathForUnit(gameState, unit, fallback);
+              path = skipBotPathPlanning ? [fallback] : this.computePathForUnit(gameState, unit, fallback);
           }
           if (path.length === 0) {
               path = [adjusted];
@@ -3977,17 +4296,19 @@ export class BotAI {
       const domain = this.getUnitDomain(unit.type);
       const directLine = this.isDirectLine(gameState, unit, adjusted, path.length);
 
-      this.logEvent('BOT_PATH', {
-          unitId: unit.id,
-          type: unit.type,
-          domain,
-          directLine,
-          pathPoints: path.length,
-          start: { x: unit.x, y: unit.y },
-          goal: adjusted
-      });
+      if (this.loadFactor < 0.55) {
+          this.logEvent('BOT_PATH', {
+              unitId: unit.id,
+              type: unit.type,
+              domain,
+              directLine,
+              pathPoints: path.length,
+              start: { x: unit.x, y: unit.y },
+              goal: adjusted
+          });
+      }
 
-      if (path.length > 1) {
+      if (!skipBotPathPlanning && path.length > 1) {
           unit.path = path.slice(1);
           for (let i = 0; i < path.length - 1; i++) {
               const from = i === 0 ? { x: unit.x, y: unit.y } : path[i];
@@ -4025,13 +4346,15 @@ export class BotAI {
       if (unit) {
           if (unit.targetX !== undefined && unit.targetY !== undefined) {
               const dist = Math.hypot(unit.targetX - x, unit.targetY - y);
-              if (dist < 10) {
+              const sameTargetThreshold = this.loadFactor >= 0.55 ? 22 : 10;
+              if (dist < sameTargetThreshold) {
                   this.usedUnitIds.add(unitId);
                   return;
               }
           }
 
           gameState.handleMoveIntent(this.playerId, unitId, intentPrefix + Date.now(), x, y);
+          this.recentMoveOrders.set(unitId, { x, y, issuedAt: Date.now() });
           this.usedUnitIds.add(unitId);
           
           this.debugState.intents.push({
@@ -4108,6 +4431,55 @@ export class BotAI {
   private countUnitsIncludingQueue(gameState: GameState, myIslands: Island[], myUnits: Unit[], type: string): number {
       const liveUnits = myUnits.filter(unit => unit.type === type).length;
       return liveUnits + this.countQueuedUnitsOfType(gameState, myIslands, type);
+  }
+
+  private isBasicInfantryType(type: string): boolean {
+      return (BOT_BASIC_INFANTRY_TYPES as readonly string[]).includes(type);
+  }
+
+  private getBasicInfantryCountIncludingQueue(gameState: GameState, myIslands: Island[], myUnits: Unit[]): number {
+      return BOT_BASIC_INFANTRY_TYPES.reduce(
+          (count, unitType) => count + this.countUnitsIncludingQueue(gameState, myIslands, myUnits, unitType),
+          0
+      );
+  }
+
+  private getBasicInfantrySoftCap(gameState: GameState, player: Player, myIslands: Island[]): number {
+      if (this.difficulty <= 6) return BOT_BASIC_INFANTRY_CAP;
+
+      const phase = this.getMatchPhase();
+      const oilOnline = this.hasStableOil(player) || this.playerHasOilBuilding(gameState, myIslands);
+      const readyFactories = myIslands.reduce(
+          (count, island) =>
+              count +
+              island.buildings.filter(
+                  building => building.ownerId === this.playerId && building.type === 'tank_factory' && !building.isConstructing
+              ).length,
+          0
+      );
+      const readyAirBases = myIslands.reduce(
+          (count, island) =>
+              count +
+              island.buildings.filter(
+                  building => building.ownerId === this.playerId && building.type === 'air_base' && !building.isConstructing
+              ).length,
+          0
+      );
+      const capitalUnitsOnline = gameState.units.some(
+          unit => unit.ownerId === this.playerId && (unit.type === 'mothership' || unit.type === 'aircraft_carrier')
+      );
+      const techOnline = oilOnline || readyFactories > 0 || readyAirBases > 0 || capitalUnitsOnline;
+
+      if (this.difficulty >= 10) {
+          if (techOnline) return phase === 'EARLY' ? 2 : 1;
+          return 3;
+      }
+      if (this.difficulty >= 9) {
+          if (techOnline) return phase === 'EARLY' ? 3 : 2;
+          return 4;
+      }
+      if (techOnline) return phase === 'EARLY' ? 4 : 3;
+      return 5;
   }
 
   private findAutoBuildPosition(gameState: GameState, island: Island, buildingType: string): { x: number; y: number } | null {
@@ -4668,6 +5040,22 @@ export class BotAI {
           return;
       }
       const myUnits = gameState.units.filter(unit => unit.ownerId === this.playerId);
+      if (this.isBasicInfantryType(type)) {
+          const totalBasicInfantry = this.getBasicInfantryCountIncludingQueue(gameState, myIslands, myUnits);
+          const infantryCap = Math.min(
+              BOT_BASIC_INFANTRY_CAP,
+              this.getBasicInfantrySoftCap(gameState, player, myIslands)
+          );
+          if (totalBasicInfantry >= infantryCap) {
+              this.logEvent('PRODUCTION_CAP', {
+                  type,
+                  cap: infantryCap,
+                  group: 'basic_infantry',
+                  totalBasicInfantry
+              });
+              return;
+          }
+      }
       const combatUnits = myUnits.filter(unit => this.isCombatUnitType(unit.type)).length;
       const phase = this.getMatchPhase();
       const isCombatRecruit =
@@ -4806,6 +5194,21 @@ export class BotAI {
       const rocketeerCount = myUnits.filter(unit => unit.type === 'rocketeer').length;
       const tankCount = myUnits.filter(unit => unit.type === 'tank').length;
       const missileCount = myUnits.filter(unit => unit.type === 'missile_launcher').length;
+      const tankCountIncludingQueue = this.countUnitsIncludingQueue(gameState, myIslands, myUnits, 'tank');
+      const missileCountIncludingQueue = this.countUnitsIncludingQueue(gameState, myIslands, myUnits, 'missile_launcher');
+      const basicInfantryCount = this.getBasicInfantryCountIncludingQueue(gameState, myIslands, myUnits);
+      const basicInfantrySoftCap = this.getBasicInfantrySoftCap(gameState, player, myIslands);
+      const readyAirBaseCount = myIslands.reduce(
+          (count, island) =>
+              count + island.buildings.filter(
+                  building => building.ownerId === this.playerId && building.type === 'air_base' && !building.isConstructing
+              ).length,
+          0
+      );
+      const desiredMothershipCount = this.getDesiredMothershipCount(phase, readyAirBaseCount, oilOnline || player.resources.oil >= 600);
+      const mothershipCount = this.countUnitsIncludingQueue(gameState, myIslands, myUnits, 'mothership');
+      const mothershipOilCost = UnitData.mothership?.cost?.oil ?? 1000;
+      const mothershipGoldCost = UnitData.mothership?.cost?.gold ?? 2000;
       let soldierOrders = 1;
       let rocketeerOrders = 0;
       let tankOrders = 0;
@@ -4831,31 +5234,31 @@ export class BotAI {
           tankOrders = 2;
           missileLauncherOrders = 1;
       } else if (this.difficulty === 7) {
-          soldierOrders = 2;
-          rocketeerOrders = 2;
+          soldierOrders = 1;
+          rocketeerOrders = 1;
           tankOrders = 3;
           missileLauncherOrders = 2;
       } else if (this.difficulty <= 9) {
-          soldierOrders = 2;
-          rocketeerOrders = 2;
+          soldierOrders = 0;
+          rocketeerOrders = 1;
           tankOrders = 3;
           missileLauncherOrders = 2;
       } else {
-          soldierOrders = 2;
-          rocketeerOrders = 2;
+          soldierOrders = 0;
+          rocketeerOrders = 1;
           tankOrders = 4;
           missileLauncherOrders = 2;
       }
 
       if (phase === 'MID') {
           if (this.difficulty <= 5) soldierOrders += 1;
-          if (this.difficulty >= 3) rocketeerOrders += 1;
+          if (this.difficulty >= 3 && this.difficulty <= 6) rocketeerOrders += 1;
           if (this.difficulty >= 5) tankOrders += 1;
           if (this.difficulty >= 7) missileLauncherOrders += 1;
       }
       if (phase === 'LATE') {
           soldierOrders += this.difficulty <= 6 ? 1 : 0;
-          if (this.difficulty >= 4) rocketeerOrders += 1;
+          if (this.difficulty >= 4 && this.difficulty <= 6) rocketeerOrders += 1;
           if (this.difficulty >= 4) tankOrders += this.difficulty >= 9 ? 2 : 1;
           if (this.difficulty >= 8) missileLauncherOrders += this.difficulty >= 10 ? 2 : 1;
       }
@@ -4863,6 +5266,10 @@ export class BotAI {
       const airInfrastructureOnline =
           myIslands.some(island => this.countOwnedBuildingsOfType(island, 'air_base') > 0) ||
           myUnits.some(unit => unit.type === 'mothership' || unit.type === 'aircraft_carrier');
+      const highTierMothershipPriority =
+          this.difficulty >= 9 &&
+          readyAirBaseCount > 0 &&
+          desiredMothershipCount > mothershipCount;
       if (this.difficulty >= 9 && phase !== 'EARLY' && airInfrastructureOnline) {
           const lowOilForAir = player.resources.oil < (this.difficulty >= 10 ? 300 : 220);
           if (lowOilForAir) {
@@ -4938,6 +5345,48 @@ export class BotAI {
               rocketeerOrders = Math.min(rocketeerOrders, 1);
               soldierOrders = Math.min(soldierOrders, 2);
           }
+      }
+
+      if (highTierMothershipPriority) {
+          const missileEscortCap = this.difficulty >= 10 ? 5 : 4;
+          const tankEscortCap =
+              this.difficulty >= 10
+                  ? (phase === 'EARLY' ? 1 : 2)
+                  : (phase === 'EARLY' ? 1 : 2);
+          const remainingMissiles = Math.max(0, missileEscortCap - missileCountIncludingQueue);
+          const remainingTanks = Math.max(0, tankEscortCap - tankCountIncludingQueue);
+          const preserveMothershipBudget =
+              this.mothershipSavingsActive ||
+              player.resources.oil < mothershipOilCost + 220 ||
+              player.resources.gold < mothershipGoldCost + 500;
+
+          soldierOrders = 0;
+          rocketeerOrders = 0;
+
+          if (preserveMothershipBudget) {
+              tankOrders = 0;
+              missileLauncherOrders = 0;
+          } else {
+              missileLauncherOrders = Math.min(missileLauncherOrders, remainingMissiles);
+              tankOrders = Math.min(tankOrders, remainingTanks);
+          }
+      }
+
+      let remainingBasicInfantryBudget = Math.max(
+          0,
+          Math.min(BOT_BASIC_INFANTRY_CAP, basicInfantrySoftCap) - basicInfantryCount
+      );
+      if (remainingBasicInfantryBudget <= 0) {
+          soldierOrders = 0;
+          rocketeerOrders = 0;
+      } else if (this.difficulty >= 7) {
+          rocketeerOrders = Math.min(rocketeerOrders, remainingBasicInfantryBudget);
+          remainingBasicInfantryBudget -= rocketeerOrders;
+          soldierOrders = Math.min(soldierOrders, remainingBasicInfantryBudget);
+      } else {
+          soldierOrders = Math.min(soldierOrders, remainingBasicInfantryBudget);
+          remainingBasicInfantryBudget -= soldierOrders;
+          rocketeerOrders = Math.min(rocketeerOrders, remainingBasicInfantryBudget);
       }
 
       for (let i = 0; i < missileLauncherOrders; i++) {

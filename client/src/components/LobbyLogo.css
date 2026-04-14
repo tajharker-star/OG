@@ -42,6 +42,71 @@
   will-change: transform, filter;
 }
 
+.lobby-logo--safe {
+  width: clamp(260px, 42vw, 520px);
+  max-width: min(100%, calc(100vh - 320px));
+}
+
+.lobby-logo__safe-halo {
+  position: absolute;
+  inset: 16% 10% 18%;
+  z-index: 1;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 50% 45%, rgba(255, 236, 183, 0.9) 0 7%, rgba(255, 191, 84, 0.58) 20%, rgba(255, 125, 28, 0.28) 44%, rgba(255, 90, 20, 0.12) 58%, transparent 72%);
+  opacity: 0.95;
+}
+
+.lobby-logo__safe-media {
+  position: relative;
+  z-index: 3;
+  width: 100%;
+  display: grid;
+  place-items: center;
+  transform: translateY(4%) scale(1.08);
+}
+
+.lobby-logo__image--safe {
+  grid-area: 1 / 1;
+  animation: none;
+  filter:
+    drop-shadow(0 0 14px rgba(255, 192, 81, 0.22))
+    drop-shadow(0 12px 28px rgba(0, 0, 0, 0.42));
+}
+
+.lobby-logo__safe-shine {
+  position: absolute;
+  inset: 0;
+  grid-area: 1 / 1;
+  z-index: 7;
+  overflow: hidden;
+  -webkit-mask-image: var(--lobby-logo-image);
+  mask-image: var(--lobby-logo-image);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  opacity: 0.9;
+  pointer-events: none;
+}
+
+.lobby-logo__safe-shine::before {
+  content: '';
+  position: absolute;
+  top: -10%;
+  bottom: -10%;
+  left: -26%;
+  width: 26%;
+  background:
+    linear-gradient(96deg, transparent 0 10%, rgba(255, 255, 255, 0.08) 30%, rgba(255, 250, 234, 0.9) 52%, rgba(255, 223, 149, 0.25) 66%, transparent 92%);
+  filter: blur(1px);
+  mix-blend-mode: screen;
+  transform: translateX(0) skewX(-20deg);
+  animation: lobby-shine-sweep 5.6s cubic-bezier(0.2, 0.72, 0.08, 1) infinite;
+}
+
 .lobby-logo__burst,
 .lobby-logo__ray-fan,
 .lobby-logo__halo,
@@ -245,6 +310,38 @@
   animation-duration: 6.2s;
 }
 
+.lobby-logo--safe .lobby-logo__artwork,
+.lobby-logo--safe .lobby-logo__burst,
+.lobby-logo--safe .lobby-logo__ray-fan,
+.lobby-logo--safe .lobby-logo__halo,
+.lobby-logo--safe .lobby-logo__edge-glow,
+.lobby-logo--safe .lobby-logo__star-glint,
+.lobby-logo--safe .lobby-logo__shine,
+.lobby-logo--safe .lobby-logo__spark {
+  display: none;
+}
+
+.lobby-logo--safe.lobby-logo--performance .lobby-logo__safe-halo {
+  inset: 18% 12% 20%;
+  opacity: 0.78;
+  filter: blur(4px);
+}
+
+.lobby-logo--safe.lobby-logo--performance .lobby-logo__image--safe {
+  filter:
+    drop-shadow(0 0 10px rgba(255, 192, 81, 0.18))
+    drop-shadow(0 10px 22px rgba(0, 0, 0, 0.36));
+}
+
+.lobby-logo--safe.lobby-logo--performance .lobby-logo__safe-shine {
+  opacity: 0.72;
+}
+
+.lobby-logo--safe.lobby-logo--performance .lobby-logo__safe-shine::before {
+  filter: none;
+  animation-duration: 6.8s;
+}
+
 @keyframes lobby-burst-spin {
   0% { transform: rotate(0deg) scale(0.98); }
   50% { transform: rotate(180deg) scale(1.04); }
@@ -358,6 +455,10 @@
   .lobby-logo__star-glint,
   .lobby-logo__shine,
   .lobby-logo__spark {
+    animation: none !important;
+  }
+
+  .lobby-logo__safe-shine::before {
     animation: none !important;
   }
 }

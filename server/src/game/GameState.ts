@@ -5,6 +5,7 @@ import { UnitData, BuildingData } from './data/Registry';
 import { randomUUID } from 'crypto';
 
 const ENABLE_VALID_POSITION_LOGS = process.env.DEBUG_VALID_POSITION === '1';
+const ENABLE_DEATH_LOGS = process.env.DEBUG_DEATH_LOGS === '1';
 const SIMULATION_TICKS_PER_SECOND = 30;
 const CONSTRUCTION_SPEED_MULTIPLIER = 3;
 const PLAYER_SNAPSHOT_INTERVAL_MS = 250;
@@ -20,6 +21,12 @@ const MOTHERSHIP_RADIATION_STACK_DURATION_MS = 5000;
 const MOTHERSHIP_RADIATION_STACK_DAMAGE_PER_SECOND = 4;
 const ECONOMY_PRODUCTION_INTERVAL_SECONDS = 2;
 const ECONOMY_PRODUCTION_MULTIPLIER = 2;
+const MIN_SERVER_TICK_MS = 33;
+const HUMAN_READY_GATE_TIMEOUT_MS = 12000;
+const MAX_GLOBAL_UNITS_UNDER_LOAD = 1100;
+const MAX_GLOBAL_INFANTRY_UNDER_LOAD = 700;
+
+const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
 export interface Player {
     id: string;
@@ -68,6 +75,9 @@ export interface Unit {
     salvoShotsRemaining?: number;
     salvoNextShotTime?: number;
     reloadEndsAt?: number;
+    nextMovementRetryAt?: number;
+    lastPathfindAt?: number;
+    blockedMoveCount?: number;
 }
 
 type EconomyBurst = {
@@ -79,6 +89,7 @@ type EconomyBurst = {
 };
 
 type QueueType = 'standard' | 'ranked_quick_match';
+type RuntimeMode = 'networked' | 'internal_singleplayer';
 
 type MatchEndedPayload = {
     winnerPlayerId: string | null;
@@ -106,6 +117,7 @@ export class GameState {
     lastMapEmitTime: number = 0;
     lastUnitEmitTime: number = 0;
     lastPlayerEmitTime: number = 0;
+    lastHealthEmitTime: number = 0;
     lastPlayerSnapshotSignature: string = '';
     tickCounter: number = 0;
     io: any;
@@ -133,14 +145,26 @@ export class GameState {
     private humanMatchReadyPlayerIds: Set<string> = new Set();
     private requireHumanReadyForBotStart: boolean = false;
     private botsReleasedForMatch: boolean = true;
+    private humanReadyGateArmedAt: number = 0;
     private traversalPathCache: Map<string, string[]> = new Map();
     private economySecondAccumulator: number = 0;
     private economyProductionAccumulatorSeconds: number = 0;
     private placementByPlayerId: Map<string, number> = new Map();
+    private smoothedTickDurationMs: number = MIN_SERVER_TICK_MS;
+    private simulationLoadFactor: number = 0;
+    private botUpdateCursor: number = 0;
+    private overloadStrikeCount: number = 0;
+    private overloadRecoveryTicks: number = 0;
+    private emergencyLoadMode: boolean = false;
+    private runtimeMode: RuntimeMode = 'networked';
 
     // Spatial Grid for O(N) optimization
     private grid: Map<string, Unit[]> = new Map();
     private readonly cellSize = 200;
+    private readonly obstacleCellSize = 220;
+    private blockingBuildingGrid: Map<string, Array<{ x: number; y: number; radius: number }>> = new Map();
+    private wallSegmentGrid: Map<string, Array<{ ax: number; ay: number; bx: number; by: number }>> = new Map();
+    private obstacleGridTick: number = -1;
 
     constructor(mapType: string = 'random') {
         this.mapType = mapType;
@@ -173,6 +197,20 @@ export class GameState {
         this.maxHumanPlayers = 10;
         this.allowBots = true;
         this.allowForceStart = true;
+    }
+
+    public setRuntimeMode(mode: RuntimeMode) {
+        this.runtimeMode = mode;
+        if (mode === 'internal_singleplayer') {
+            this.requireHumanReadyForBotStart = false;
+            this.humanMatchReadyPlayerIds.clear();
+            this.botsReleasedForMatch = true;
+            this.humanReadyGateArmedAt = 0;
+        }
+    }
+
+    public isInternalSingleplayerMode(): boolean {
+        return this.runtimeMode === 'internal_singleplayer';
     }
 
     public isRankedQuickMatch(): boolean {
@@ -259,6 +297,78 @@ export class GameState {
         }));
     }
 
+    private getTotalBuildingCount() {
+        const islandBuildings = this.map.islands.reduce((count, island) => count + island.buildings.length, 0);
+        return islandBuildings + (this.map.waterBuildings?.length || 0);
+    }
+
+    private computeSimulationLoadFactor(deltaTimeSeconds: number) {
+        const unitBaseline = this.runtimeMode === 'internal_singleplayer' ? 52 : 90;
+        const unitSpan = this.runtimeMode === 'internal_singleplayer' ? 110 : 190;
+        const buildingBaseline = this.runtimeMode === 'internal_singleplayer' ? 54 : 90;
+        const buildingSpan = this.runtimeMode === 'internal_singleplayer' ? 120 : 220;
+        const unitPressure = clamp((this.units.length - unitBaseline) / unitSpan, 0, 1);
+        const buildingPressure = clamp((this.getTotalBuildingCount() - buildingBaseline) / buildingSpan, 0, 1);
+        const botPressure = clamp((this.bots.length - 2) / 6, 0, 1);
+        const tickPressure = clamp((this.smoothedTickDurationMs - MIN_SERVER_TICK_MS) / 60, 0, 1);
+        const lagSpikePressure = clamp((deltaTimeSeconds * 1000 - 45) / 100, 0, 1);
+        const projectilePressure = clamp((this.pendingProjectiles.length - 160) / 380, 0, 1);
+
+        return clamp(
+            unitPressure * (this.runtimeMode === 'internal_singleplayer' ? 0.46 : 0.4) +
+            buildingPressure * (this.runtimeMode === 'internal_singleplayer' ? 0.18 : 0.12) +
+            botPressure * 0.16 +
+            tickPressure * 0.14 +
+            lagSpikePressure * 0.06 +
+            projectilePressure * (this.runtimeMode === 'internal_singleplayer' ? 0.12 : 0.08),
+            0,
+            1
+        );
+    }
+
+    private getBotUpdatesPerTick(loadFactor: number) {
+        if (this.bots.length <= 2) return this.bots.length;
+        if (this.runtimeMode === 'internal_singleplayer') {
+            if (loadFactor >= 0.9) return Math.max(1, Math.ceil(this.bots.length * 0.16));
+            if (loadFactor >= 0.72) return Math.max(1, Math.ceil(this.bots.length * 0.24));
+            if (loadFactor >= 0.52) return Math.max(1, Math.ceil(this.bots.length * 0.38));
+            if (loadFactor >= 0.34) return Math.max(1, Math.ceil(this.bots.length * 0.52));
+            if (this.bots.length > 3) {
+                return Math.max(2, Math.ceil(this.bots.length * 0.62));
+            }
+        }
+        if (loadFactor >= 0.9) return Math.max(1, Math.ceil(this.bots.length * 0.2));
+        if (loadFactor >= 0.75) return Math.max(1, Math.ceil(this.bots.length * 0.32));
+        if (loadFactor >= 0.55) return Math.max(1, Math.ceil(this.bots.length * 0.45));
+        if (this.runtimeMode === 'internal_singleplayer' && this.bots.length > 3) {
+            return Math.max(2, Math.ceil(this.bots.length * 0.7));
+        }
+        return this.bots.length;
+    }
+
+    private updateOverloadState(rawDeltaTime: number, loadFactor: number) {
+        const overloadSpike = rawDeltaTime > 0.45 || loadFactor >= 0.94;
+        if (overloadSpike) {
+            this.overloadStrikeCount = Math.min(1000, this.overloadStrikeCount + 1);
+            this.overloadRecoveryTicks = 0;
+        } else {
+            this.overloadStrikeCount = Math.max(0, this.overloadStrikeCount - 1);
+            this.overloadRecoveryTicks += 1;
+        }
+
+        if (!this.emergencyLoadMode && this.overloadStrikeCount >= 3) {
+            this.emergencyLoadMode = true;
+        }
+
+        if (this.emergencyLoadMode && this.overloadRecoveryTicks >= 120 && this.overloadStrikeCount === 0) {
+            this.emergencyLoadMode = false;
+        }
+    }
+
+    private getEffectiveSimulationLoadFactor() {
+        return this.emergencyLoadMode ? Math.max(this.simulationLoadFactor, 0.96) : this.simulationLoadFactor;
+    }
+
     public getPlayersSnapshot(trackEmission: boolean = false): Player[] {
         const snapshot = Array.from(this.players.values()).map(player => ({
             ...player,
@@ -311,18 +421,32 @@ export class GameState {
         const now = Date.now();
         this.botsReleasedForMatch = true;
         this.matchState = 'IN_MATCH';
+        this.humanReadyGateArmedAt = 0;
         this.bots.forEach(bot => bot.resetMatchStartTime(now));
         console.log(`[BOT_START_GATE] released room=${this.roomId || 'unknown'} reason=${reason} ready=${this.humanMatchReadyPlayerIds.size}/${this.getActiveHumanPlayerIds().length}`);
     }
 
     public armHumanReadyBotStartGate() {
+        if (this.runtimeMode === 'internal_singleplayer') {
+            this.requireHumanReadyForBotStart = false;
+            this.humanMatchReadyPlayerIds.clear();
+            this.botsReleasedForMatch = true;
+            this.humanReadyGateArmedAt = 0;
+            this.matchState = 'IN_MATCH';
+            const now = Date.now();
+            this.bots.forEach(bot => bot.resetMatchStartTime(now));
+            return;
+        }
+
         this.humanMatchReadyPlayerIds.clear();
         this.requireHumanReadyForBotStart = true;
+        this.humanReadyGateArmedAt = Date.now();
         const humanIds = this.getActiveHumanPlayerIds();
         this.botsReleasedForMatch = humanIds.length === 0;
         this.matchState = this.botsReleasedForMatch ? 'IN_MATCH' : 'STARTING';
         if (this.botsReleasedForMatch) {
             const now = Date.now();
+            this.humanReadyGateArmedAt = 0;
             this.bots.forEach(bot => bot.resetMatchStartTime(now));
         } else {
             console.log(`[BOT_START_GATE] armed room=${this.roomId || 'unknown'} humans=${humanIds.length}`);
@@ -330,6 +454,7 @@ export class GameState {
     }
 
     public markHumanPlayerMatchReady(playerId: string): boolean {
+        if (this.runtimeMode === 'internal_singleplayer') return true;
         if (!this.requireHumanReadyForBotStart || this.status !== 'playing') return false;
         const player = this.players.get(playerId);
         if (!player || player.isBot || player.status === 'eliminated') return false;
@@ -401,6 +526,11 @@ export class GameState {
         const targetRoomId = roomId || this.roomId;
         if (!io || !targetRoomId) return;
 
+        if (this.runtimeMode === 'internal_singleplayer') {
+            io.to(targetRoomId).emit('mapData', this.map);
+            return;
+        }
+
         let emitted = false;
         this.players.forEach(player => {
             if (player.isBot) return;
@@ -415,6 +545,12 @@ export class GameState {
 
     public emitVisibleMapDataToPlayer(io: any, playerId: string) {
         if (!io) return;
+
+        if (this.runtimeMode === 'internal_singleplayer') {
+            io.to(playerId).emit('mapData', this.map);
+            return;
+        }
+
         io.to(playerId).emit('mapData', this.getVisibleMapForPlayer(playerId));
     }
 
@@ -490,8 +626,78 @@ export class GameState {
         this.traversalPathCache.clear();
     }
 
+    private isSharedLandMap(): boolean {
+        return this.mapType === 'grasslands' || this.mapType === 'desert';
+    }
+
+    private isPointBlockedByHighGround(x: number, y: number, tolerance: number = 0): boolean {
+        if (!this.map.highGrounds) return false;
+
+        return this.map.highGrounds.some(hg => {
+            if (MapGenerator.isPointInPolygon(x, y, hg.points)) {
+                return true;
+            }
+            if (tolerance <= 0) return false;
+            const closest = MapGenerator.getClosestPointOnPolygon(x, y, hg.points);
+            return Math.hypot(x - closest.x, y - closest.y) <= tolerance;
+        });
+    }
+
     private isPointOnAnyIslandSurface(x: number, y: number): boolean {
         return this.map.islands.some(island => this.isPointOnIslandSurface(island, x, y));
+    }
+
+    private isPointOnSharedLandSurface(x: number, y: number, tolerance: number = 6): boolean {
+        if (this.isPointBlockedByHighGround(x, y, Math.max(0, tolerance * 0.5))) {
+            return false;
+        }
+
+        if (!this.isSharedLandMap()) {
+            return this.isPointOnAnyIslandSurface(x, y);
+        }
+
+        return this.map.islands.some(island => this.isPointTouchingIslandSurface(island, x, y, tolerance));
+    }
+
+    private getIslandSurfaceDepth(island: Island, x: number, y: number, buffer: number = 0): number {
+        if (island.points && island.points.length > 2) {
+            const closest = MapGenerator.getClosestPointOnPolygon(x, y, island.points);
+            const edgeDistance = Math.hypot(x - closest.x, y - closest.y);
+            if (MapGenerator.isPointInPolygon(x, y, island.points)) {
+                return edgeDistance;
+            }
+            return buffer - edgeDistance;
+        }
+
+        return island.radius - Math.hypot(x - island.x, y - island.y) + buffer;
+    }
+
+    private isSharedLandFootprintClear(absX: number, absY: number, footprint: number, nonBlocking: boolean): boolean {
+        const tolerance = nonBlocking ? 4 : 6;
+        if (!this.isPointOnSharedLandSurface(absX, absY, tolerance)) {
+            return false;
+        }
+
+        if (footprint <= 2) return true;
+
+        const sampleRadii = nonBlocking
+            ? [Math.max(0, footprint * 0.45)]
+            : [Math.max(0, footprint * 0.45), Math.max(0, footprint - 4)];
+        const samples = 12;
+
+        for (const radius of sampleRadii) {
+            if (radius <= 1) continue;
+            for (let index = 0; index < samples; index++) {
+                const angle = (index / samples) * Math.PI * 2;
+                const sampleX = absX + Math.cos(angle) * radius;
+                const sampleY = absY + Math.sin(angle) * radius;
+                if (!this.isPointOnSharedLandSurface(sampleX, sampleY, tolerance)) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
     }
 
     private getExactIslandCandidatesAtPoint(x: number, y: number): Island[] {
@@ -614,15 +820,24 @@ export class GameState {
     }
 
     private getIslandContainingPoint(x: number, y: number, buffer: number = 35): Island | null {
-        const island = this.map.islands.find(candidate => {
-            if (candidate.points) {
-                if (MapGenerator.isPointInPolygon(x, y, candidate.points)) return true;
-                const closest = MapGenerator.getClosestPointOnPolygon(x, y, candidate.points);
-                return Math.hypot(x - closest.x, y - closest.y) <= buffer;
-            }
-            return Math.hypot(x - candidate.x, y - candidate.y) <= candidate.radius + buffer;
+        const candidates = this.map.islands.filter(candidate =>
+            this.isPointTouchingIslandSurface(candidate, x, y, buffer)
+        );
+        if (candidates.length === 0) return null;
+
+        const ranked = candidates.sort((left, right) => {
+            const leftDepth = this.getIslandSurfaceDepth(left, x, y, buffer);
+            const rightDepth = this.getIslandSurfaceDepth(right, x, y, buffer);
+            if (leftDepth !== rightDepth) return rightDepth - leftDepth;
+
+            const leftCenterDist = Math.hypot(x - left.x, y - left.y);
+            const rightCenterDist = Math.hypot(x - right.x, y - right.y);
+            if (leftCenterDist !== rightCenterDist) return leftCenterDist - rightCenterDist;
+
+            return left.radius - right.radius;
         });
-        return island || null;
+
+        return ranked[0] || null;
     }
 
     private getTraversalNeighbors(token: string): string[] {
@@ -809,6 +1024,7 @@ export class GameState {
     }
 
     private processSupportBuildingHealingTick() {
+        this.updateGrid();
         this.map.islands.forEach(island => {
             island.buildings.forEach(building => {
                 if (building.isConstructing || !building.ownerId) return;
@@ -822,14 +1038,11 @@ export class GameState {
                 const healRadius = building.range || BuildingData[building.type]?.range || 220;
                 const isHospital = building.type === 'hospital';
 
-                this.units.forEach(unit => {
+                this.getNearbyUnits(centerX, centerY, healRadius).forEach(unit => {
                     if (unit.ownerId !== building.ownerId || unit.health >= unit.maxHealth) return;
-
                     const isHospitalUnit = this.isHospitalUnitType(unit.type);
                     if (isHospital && !isHospitalUnit) return;
                     if (!isHospital && isHospitalUnit) return;
-
-                    if (Math.hypot(unit.x - centerX, unit.y - centerY) > healRadius) return;
 
                     const missingHealth = unit.maxHealth - unit.health;
                     const healAmount = missingHealth * 0.05;
@@ -965,6 +1178,45 @@ export class GameState {
         const tickDelta = this.getSimulationTickDelta(deltaTimeSeconds);
         if (tickDelta <= 0) return;
         let mapStateChanged = false;
+        const infantryTypes = new Set(['soldier', 'sniper', 'rocketeer']);
+        const effectiveLoadFactor = this.getEffectiveSimulationLoadFactor();
+        const buildingStride =
+            effectiveLoadFactor >= 0.95 ? 4 :
+            effectiveLoadFactor >= 0.82 ? 3 :
+            effectiveLoadFactor >= 0.62 ? 2 : 1;
+        const unitRecruitmentStride =
+            effectiveLoadFactor >= 0.95 ? 5 :
+            effectiveLoadFactor >= 0.82 ? 4 :
+            effectiveLoadFactor >= 0.62 ? 2 : 1;
+        const processedBuildingTickDelta = tickDelta * buildingStride;
+        const processedUnitRecruitmentTickDelta = tickDelta * unitRecruitmentStride;
+        const playerUnitCounts = new Map<string, number>();
+        const playerInfantryCounts = new Map<string, number>();
+        let totalInfantryUnits = 0;
+
+        this.units.forEach(unit => {
+            playerUnitCounts.set(unit.ownerId, (playerUnitCounts.get(unit.ownerId) || 0) + 1);
+            if (infantryTypes.has(unit.type)) {
+                playerInfantryCounts.set(unit.ownerId, (playerInfantryCounts.get(unit.ownerId) || 0) + 1);
+                totalInfantryUnits += 1;
+            }
+        });
+
+        const infantryPressure = clamp((totalInfantryUnits - 140) / 280, 0, 1);
+        const recruitmentPressure = Math.max(this.simulationLoadFactor, infantryPressure);
+        const globalUnitLimitBase = this.runtimeMode === 'internal_singleplayer' ? 420 : MAX_GLOBAL_UNITS_UNDER_LOAD;
+        const globalInfantryLimitBase = this.runtimeMode === 'internal_singleplayer' ? 220 : MAX_GLOBAL_INFANTRY_UNDER_LOAD;
+        const globalUnitCap =
+            recruitmentPressure >= 0.92 ? Math.round(globalUnitLimitBase * 0.58) :
+            recruitmentPressure >= 0.82 ? Math.round(globalUnitLimitBase * 0.7) :
+            recruitmentPressure >= 0.62 ? Math.round(globalUnitLimitBase * 0.86) :
+            globalUnitLimitBase;
+        const globalInfantryCap =
+            recruitmentPressure >= 0.92 ? Math.round(globalInfantryLimitBase * 0.48) :
+            recruitmentPressure >= 0.82 ? Math.round(globalInfantryLimitBase * 0.62) :
+            recruitmentPressure >= 0.62 ? Math.round(globalInfantryLimitBase * 0.82) :
+            globalInfantryLimitBase;
+        let totalUnits = this.units.length;
 
         const processConstruction = (b: any, x: number, y: number, ownerId: string) => {
             if (!b.isConstructing) return;
@@ -992,7 +1244,7 @@ export class GameState {
                 }
             }
 
-            b.constructionProgress = (b.constructionProgress || 0) + (progressPerTick * tickDelta);
+            b.constructionProgress = (b.constructionProgress || 0) + (progressPerTick * processedBuildingTickDelta);
             const calculatedHealth = Math.floor(b.maxHealth * (b.constructionProgress / 100));
             b.health = Math.max(1, Math.min(b.maxHealth, calculatedHealth));
 
@@ -1024,51 +1276,113 @@ export class GameState {
 
                 if (builders.length > 0) {
                     const count = Math.min(builders.length, 5);
-                    const repairAmount = 0.15 * count * tickDelta;
+                    const repairAmount = 0.15 * count * processedBuildingTickDelta;
                     b.health = Math.min(b.maxHealth, b.health + repairAmount);
                 }
             }
         };
 
-        const processRecruitment = (b: any, island: any) => {
+        const processRecruitment = (b: any, island: any, availableTickDelta: number) => {
             if (!b.recruitmentQueue || b.recruitmentQueue.length === 0) return;
+            const ownerId = b.ownerId || (island ? island.ownerId : null);
+            if (!ownerId) return;
 
-            let remainingTickBudget = tickDelta;
+            let remainingTickBudget = availableTickDelta;
             while (b.recruitmentQueue.length > 0 && remainingTickBudget > 0) {
                 const item = b.recruitmentQueue[0];
                 item.progress = item.progress || 0;
                 item.totalTime = item.totalTime || 100;
+                const isInfantryQueueItem = infantryTypes.has(item.unitType);
+
+                let queueSpeedMultiplier = 1;
+                if (recruitmentPressure > 0.25) {
+                    const ownerInfantry = playerInfantryCounts.get(ownerId) || 0;
+                    const ownerTotalUnits = playerUnitCounts.get(ownerId) || 0;
+                    const infantryCap =
+                        this.runtimeMode === 'internal_singleplayer'
+                            ? (recruitmentPressure >= 0.92 ? 42 : recruitmentPressure >= 0.82 ? 56 : recruitmentPressure >= 0.62 ? 78 : 112)
+                            : (recruitmentPressure >= 0.82 ? 80 : recruitmentPressure >= 0.62 ? 112 : 165);
+                    const totalUnitCap =
+                        this.runtimeMode === 'internal_singleplayer'
+                            ? (recruitmentPressure >= 0.92 ? 96 : recruitmentPressure >= 0.82 ? 124 : recruitmentPressure >= 0.62 ? 164 : 220)
+                            : (recruitmentPressure >= 0.82 ? 150 : recruitmentPressure >= 0.62 ? 210 : 320);
+
+                    if (isInfantryQueueItem && ownerInfantry >= infantryCap) {
+                        break; // Pause infantry queue while overloaded.
+                    }
+
+                    if (ownerTotalUnits >= totalUnitCap) {
+                        queueSpeedMultiplier *= recruitmentPressure >= 0.92 ? 0.12 : recruitmentPressure >= 0.82 ? 0.2 : recruitmentPressure >= 0.62 ? 0.35 : 0.55;
+                    } else if (isInfantryQueueItem) {
+                        queueSpeedMultiplier *= recruitmentPressure >= 0.92 ? 0.18 : recruitmentPressure >= 0.82 ? 0.32 : recruitmentPressure >= 0.62 ? 0.5 : 0.72;
+                    }
+                }
+
+                const ownerInfantry = playerInfantryCounts.get(ownerId) || 0;
+                const ownerTotalUnits = playerUnitCounts.get(ownerId) || 0;
+                const ownerUnitHardCap =
+                    this.runtimeMode === 'internal_singleplayer'
+                        ? (recruitmentPressure >= 0.92 ? 120 : recruitmentPressure >= 0.82 ? 150 : recruitmentPressure >= 0.62 ? 190 : 260)
+                        : (recruitmentPressure >= 0.82 ? 180 : recruitmentPressure >= 0.62 ? 240 : 360);
+                const ownerInfantryHardCap =
+                    this.runtimeMode === 'internal_singleplayer'
+                        ? (recruitmentPressure >= 0.92 ? 56 : recruitmentPressure >= 0.82 ? 70 : recruitmentPressure >= 0.62 ? 94 : 148)
+                        : (recruitmentPressure >= 0.82 ? 90 : recruitmentPressure >= 0.62 ? 140 : 220);
+
+                if (totalUnits >= globalUnitCap) break;
+                if (isInfantryQueueItem && totalInfantryUnits >= globalInfantryCap) break;
+                if (ownerTotalUnits >= ownerUnitHardCap) break;
+                if (isInfantryQueueItem && ownerInfantry >= ownerInfantryHardCap) break;
+
+                const effectiveTickBudget = remainingTickBudget * queueSpeedMultiplier;
+                if (effectiveTickBudget <= 0.001) break;
 
                 const remainingTicks = Math.max(0, item.totalTime - item.progress);
-                if (remainingTicks > remainingTickBudget) {
-                    item.progress += remainingTickBudget;
-                    remainingTickBudget = 0;
+                if (remainingTicks > effectiveTickBudget) {
+                    item.progress += effectiveTickBudget;
+                    remainingTickBudget = Math.max(0, remainingTickBudget - effectiveTickBudget);
                     break;
                 }
 
                 item.progress = item.totalTime;
-                remainingTickBudget -= remainingTicks;
+                remainingTickBudget = Math.max(0, remainingTickBudget - remainingTicks);
 
-                const ownerId = b.ownerId || (island ? island.ownerId : null);
-                if (ownerId) {
-                    this.spawnUnit(ownerId, item.unitType, island, b);
+                const unitCountBeforeSpawn = this.units.length;
+                this.spawnUnit(ownerId, item.unitType, island, b);
+                if (this.units.length > unitCountBeforeSpawn) {
+                    playerUnitCounts.set(ownerId, (playerUnitCounts.get(ownerId) || 0) + 1);
+                    totalUnits += 1;
+                    if (infantryTypes.has(item.unitType)) {
+                        playerInfantryCounts.set(ownerId, (playerInfantryCounts.get(ownerId) || 0) + 1);
+                        totalInfantryUnits += 1;
+                    }
                 }
                 b.recruitmentQueue.shift();
             }
         };
 
+        let buildingSlot = 0;
         this.map.islands.forEach(island => {
             island.buildings.forEach(b => {
                 if (!b.ownerId) return;
+                const shouldProcessBuilding = buildingStride <= 1 || ((this.tickCounter + buildingSlot) % buildingStride) === 0;
+                buildingSlot += 1;
+                if (!shouldProcessBuilding) return;
                 processConstruction(b, island.x + (b.x || 0), island.y + (b.y || 0), b.ownerId);
                 processRepair(b, island.x + (b.x || 0), island.y + (b.y || 0), b.ownerId);
-                processRecruitment(b, island);
+                processRecruitment(b, island, processedBuildingTickDelta);
             });
         });
 
+        let recruitmentUnitSlot = 0;
         this.units.forEach(u => {
             if (u.type === 'mothership' || u.type === 'aircraft_carrier') {
-                processRecruitment(u, null);
+                const shouldProcessUnitRecruitment =
+                    unitRecruitmentStride <= 1 || ((this.tickCounter + recruitmentUnitSlot) % unitRecruitmentStride) === 0;
+                recruitmentUnitSlot += 1;
+                if (shouldProcessUnitRecruitment) {
+                    processRecruitment(u, null, processedUnitRecruitmentTickDelta);
+                }
             }
         });
 
@@ -1372,6 +1686,9 @@ export class GameState {
     public isBuildingPlacementClearOnIsland(island: Island, buildingType: string, absX: number, absY: number): boolean {
         const footprint = this.getEffectivePlacementFootprintRadius(buildingType, island);
         const nonBlocking = this.isNonBlockingBuildingType(buildingType);
+        const useSharedLandRules =
+            this.isSharedLandMap() &&
+            !['dock', 'oil_rig', 'bridge_node'].includes(buildingType);
 
         if (
             absX < footprint ||
@@ -1405,24 +1722,30 @@ export class GameState {
                 return false;
             }
 
-            const edgePadding = nonBlocking
-                ? 0
-                : this.mapType === 'islands'
-                    ? ['air_base', 'barracks', 'tank_factory', 'tower', 'farm', 'oil_well', 'hospital', 'repair_dock'].includes(buildingType)
-                        ? Math.max(1, Math.round(footprint * 0.15))
-                        : Math.max(1, Math.round(footprint * 0.25))
-                    : footprint + 4;
-            if (island.points) {
-                if (!MapGenerator.isPointInPolygon(absX, absY, island.points)) {
+            if (useSharedLandRules) {
+                if (!this.isSharedLandFootprintClear(absX, absY, footprint, nonBlocking)) {
                     return false;
                 }
+            } else {
+                const edgePadding = nonBlocking
+                    ? 0
+                    : this.mapType === 'islands'
+                        ? ['air_base', 'barracks', 'tank_factory', 'tower', 'farm', 'oil_well', 'hospital', 'repair_dock'].includes(buildingType)
+                            ? Math.max(1, Math.round(footprint * 0.15))
+                            : Math.max(1, Math.round(footprint * 0.25))
+                        : footprint + 4;
+                if (island.points) {
+                    if (!MapGenerator.isPointInPolygon(absX, absY, island.points)) {
+                        return false;
+                    }
 
-                const closest = MapGenerator.getClosestPointOnPolygon(absX, absY, island.points);
-                if (Math.hypot(absX - closest.x, absY - closest.y) < edgePadding) {
+                    const closest = MapGenerator.getClosestPointOnPolygon(absX, absY, island.points);
+                    if (Math.hypot(absX - closest.x, absY - closest.y) < edgePadding) {
+                        return false;
+                    }
+                } else if (Math.hypot(absX - island.x, absY - island.y) > Math.max(0, island.radius - footprint - edgePadding)) {
                     return false;
                 }
-            } else if (Math.hypot(absX - island.x, absY - island.y) > Math.max(0, island.radius - footprint - edgePadding)) {
-                return false;
             }
         }
 
@@ -1640,7 +1963,10 @@ export class GameState {
                 const tx = bx + Math.cos(angle) * radius;
                 const ty = by + Math.sin(angle) * radius;
 
-                if (!this.isPointOnIslandSurface(island, tx, ty) && !this.isPointOnBridge(tx, ty)) continue;
+                const onAllowedLandSurface = this.isSharedLandMap()
+                    ? this.isPointOnSharedLandSurface(tx, ty, 5)
+                    : this.isPointOnIslandSurface(island, tx, ty);
+                if (!onAllowedLandSurface && !this.isPointOnBridge(tx, ty)) continue;
                 if (!this.isRecruitSpawnCandidateValid(tx, ty, island, unitType)) continue;
 
                 return { x: tx, y: ty };
@@ -1655,7 +1981,10 @@ export class GameState {
                 const tx = bx + Math.cos(angle) * radius;
                 const ty = by + Math.sin(angle) * radius;
 
-                if (!this.isPointOnIslandSurface(island, tx, ty) && !this.isPointOnBridge(tx, ty)) continue;
+                const onAllowedLandSurface = this.isSharedLandMap()
+                    ? this.isPointOnSharedLandSurface(tx, ty, 5)
+                    : this.isPointOnIslandSurface(island, tx, ty);
+                if (!onAllowedLandSurface && !this.isPointOnBridge(tx, ty)) continue;
                 if (!this.isRecruitSpawnCandidateValid(tx, ty, island, unitType)) continue;
 
                 return { x: tx, y: ty };
@@ -2711,6 +3040,9 @@ export class GameState {
                 let candidates = useExactBridgeNodeIslandLookup
                     ? this.getExactIslandCandidatesAtPoint(x, y)
                     : this.map.islands.filter(i => {
+                        if (this.isSharedLandMap()) {
+                            return this.isPointTouchingIslandSurface(i, x, y, 6);
+                        }
                         if (i.points) return MapGenerator.isPointInPolygon(x, y, i.points);
                         return Math.hypot(i.x - x, i.y - y) < i.radius + 50;
                     });
@@ -2738,7 +3070,22 @@ export class GameState {
                         );
                         island = ranked[0];
                     } else {
-                        island = candidates[0];
+                        const ranked = [...candidates].sort((a, b) => {
+                            const aClear = this.isBuildingPlacementClearOnIsland(a, type, x!, y!) ? 1 : 0;
+                            const bClear = this.isBuildingPlacementClearOnIsland(b, type, x!, y!) ? 1 : 0;
+                            if (aClear !== bClear) return bClear - aClear;
+
+                            const aDepth = this.getIslandSurfaceDepth(a, x!, y!, 8);
+                            const bDepth = this.getIslandSurfaceDepth(b, x!, y!, 8);
+                            if (aDepth !== bDepth) return bDepth - aDepth;
+
+                            const aCenterDist = Math.hypot(a.x - x!, a.y - y!);
+                            const bCenterDist = Math.hypot(b.x - x!, b.y - y!);
+                            if (aCenterDist !== bCenterDist) return aCenterDist - bCenterDist;
+
+                            return a.radius - b.radius;
+                        });
+                        island = ranked[0];
                     }
                 }
             } else {
@@ -2752,6 +3099,9 @@ export class GameState {
             // - Neutral islands on classic maps still require bridge footholds / bridge nodes.
             // - Enemy-owned land is now buildable as long as the player still satisfies normal worker/range/footprint rules.
             const isSharedMap = this.mapType === 'desert' || this.mapType === 'grasslands';
+            const useSharedMapLandPlacement =
+                isSharedMap &&
+                !['dock', 'oil_rig', 'bridge_node'].includes(type);
             const enemyOwnedIsland = !!island.ownerId && island.ownerId !== playerId;
             const allowNeutralBridgeNode = !island.ownerId && this.canBuildOnNeutralIsland(type);
             const hasForwardBridgeFoothold =
@@ -2806,7 +3156,7 @@ export class GameState {
                     } else if (type === 'dock') {
                         if (!this.isPointOnExposedIslandShoreline(island, absX, absY)) return false;
                         if (!hasDockWaterSpawn(absX, absY)) return false;
-                    } else {
+                    } else if (!useSharedMapLandPlacement) {
                         const inside = MapGenerator.isPointInPolygon(absX, absY, island.points);
                         if (!inside) return false;
                     }
@@ -2817,7 +3167,7 @@ export class GameState {
                         const absY = island.y + targetY;
                         if (!this.isPointOnExposedIslandShoreline(island, absX, absY)) return false;
                         if (!hasDockWaterSpawn(absX, absY)) return false;
-                    } else if (dist > island.radius) {
+                    } else if (!useSharedMapLandPlacement && dist > island.radius) {
                         return false;
                     }
                 }
@@ -3485,6 +3835,9 @@ export class GameState {
         unitIds.forEach(uid => {
             const unit = this.units.find(u => u.id === uid);
             if (unit && unit.ownerId === playerId) {
+                if (unit.status === 'moving' && unit.targetIslandId === targetIslandId) {
+                    return;
+                }
                 const isLandUnit = ['soldier', 'sniper', 'rocketeer', 'builder'].includes(unit.type);
 
                 if (isLandUnit) {
@@ -3533,9 +3886,30 @@ export class GameState {
                 }
 
                 unit.targetIslandId = targetIslandId;
+                unit.nextMovementRetryAt = undefined;
+                unit.blockedMoveCount = 0;
                 unit.status = 'moving';
             }
         });
+    }
+
+    private isSameDirectMoveTarget(unit: Unit, targetX: number, targetY: number) {
+        if (unit.status !== 'moving') return false;
+        if (unit.targetIslandId) return false;
+        if (typeof unit.targetX !== 'number' || typeof unit.targetY !== 'number') return false;
+        if (Math.hypot(unit.targetX - targetX, unit.targetY - targetY) > 12) return false;
+        return true;
+    }
+
+    private isSamePathMoveTarget(unit: Unit, targetX: number, targetY: number, path?: { x: number; y: number }[]) {
+        if (!this.isSameDirectMoveTarget(unit, targetX, targetY)) return false;
+        const currentPath = unit.path || [];
+        const nextPath = path || [];
+        if (currentPath.length !== nextPath.length) return false;
+        if (currentPath.length === 0) return true;
+        const currentLast = currentPath[currentPath.length - 1];
+        const nextLast = nextPath[nextPath.length - 1];
+        return Math.hypot(currentLast.x - nextLast.x, currentLast.y - nextLast.y) <= 14;
     }
 
     unloadCargo(playerId: string, carrierId: string) {
@@ -3719,10 +4093,10 @@ export class GameState {
         this.units = this.units.filter(u => {
             if (u.health <= 0) {
                 // Check for cargo
-                if (u.cargo && u.cargo.length > 0) {
+                if (ENABLE_DEATH_LOGS && u.cargo && u.cargo.length > 0) {
                     console.log(`[Cleanup] Transport ${u.type} (${u.id}) destroyed with ${u.cargo.length} units inside.`);
                     u.cargo.forEach(c => console.log(`   - Cargo Lost: ${c.type} (${c.id})`));
-                } else {
+                } else if (ENABLE_DEATH_LOGS) {
                     console.log(`[Cleanup] Removing dead unit: ${u.type} (${u.id}) Owner: ${u.ownerId} Health: ${u.health}`);
                 }
                 return false;
@@ -3940,19 +4314,29 @@ export class GameState {
 
                 if (isAirUnit) {
                     // Air units fly directly
+                    if (this.isSameDirectMoveTarget(unit, adjusted.x, adjusted.y)) {
+                        return;
+                    }
                     unit.targetX = adjusted.x;
                     unit.targetY = adjusted.y;
                     unit.targetIslandId = undefined;
                     unit.path = undefined;
+                    unit.nextMovementRetryAt = undefined;
+                    unit.blockedMoveCount = 0;
                     unit.status = 'moving';
                     return;
                 }
 
                 if (isWaterUnit) {
+                    if (this.isSameDirectMoveTarget(unit, adjusted.x, adjusted.y)) {
+                        return;
+                    }
                     unit.targetX = adjusted.x;
                     unit.targetY = adjusted.y;
                     unit.targetIslandId = undefined;
                     unit.path = undefined;
+                    unit.nextMovementRetryAt = undefined;
+                    unit.blockedMoveCount = 0;
                     unit.status = 'moving';
                     return;
                 }
@@ -3969,10 +4353,15 @@ export class GameState {
 
                     const bridgeWaypoints = this.buildLandBridgeWaypointPath(unit, adjusted);
                     if (bridgeWaypoints.length > 0) {
+                        if (this.isSamePathMoveTarget(unit, adjusted.x, adjusted.y, bridgeWaypoints)) {
+                            return;
+                        }
                         unit.targetX = adjusted.x;
                         unit.targetY = adjusted.y;
                         unit.targetIslandId = undefined;
                         unit.path = bridgeWaypoints;
+                        unit.nextMovementRetryAt = undefined;
+                        unit.blockedMoveCount = 0;
                         unit.status = 'moving';
                         return;
                     }
@@ -4036,16 +4425,19 @@ export class GameState {
                     }
                 }
 
+                if (this.isSameDirectMoveTarget(unit, adjusted.x, adjusted.y)) {
+                    return;
+                }
                 unit.targetX = adjusted.x;
                 unit.targetY = adjusted.y;
                 unit.targetIslandId = undefined; // Direct move
                 unit.path = undefined;
+                unit.nextMovementRetryAt = undefined;
+                unit.blockedMoveCount = 0;
                 unit.status = 'moving';
 
-                if (!this.isValidPosition(adjusted.x, adjusted.y, unit.type)) {
+                if (ENABLE_VALID_POSITION_LOGS && !this.isValidPosition(adjusted.x, adjusted.y, unit.type)) {
                     console.log(`[Move] WARNING: Target ${adjusted.x.toFixed(1)},${adjusted.y.toFixed(1)} is INVALID for ${unit.type}!`);
-                } else {
-                    // console.log(`[Move] Unit ${unitIds[0]} moving to ${adjusted.x.toFixed(1)},${adjusted.y.toFixed(1)}`);
                 }
             }
         });
@@ -4496,6 +4888,105 @@ export class GameState {
         });
     }
 
+    private getObstacleCellKey(gx: number, gy: number) {
+        return `${gx},${gy}`;
+    }
+
+    private addObstacleBuildingEntry(x: number, y: number, radius: number) {
+        const paddedRadius = radius + 12;
+        const startX = Math.floor((x - paddedRadius) / this.obstacleCellSize);
+        const endX = Math.floor((x + paddedRadius) / this.obstacleCellSize);
+        const startY = Math.floor((y - paddedRadius) / this.obstacleCellSize);
+        const endY = Math.floor((y + paddedRadius) / this.obstacleCellSize);
+        for (let gx = startX; gx <= endX; gx += 1) {
+            for (let gy = startY; gy <= endY; gy += 1) {
+                const key = this.getObstacleCellKey(gx, gy);
+                if (!this.blockingBuildingGrid.has(key)) {
+                    this.blockingBuildingGrid.set(key, []);
+                }
+                this.blockingBuildingGrid.get(key)!.push({ x, y, radius });
+            }
+        }
+    }
+
+    private addWallSegmentEntry(ax: number, ay: number, bx: number, by: number) {
+        const padding = 30;
+        const startX = Math.floor((Math.min(ax, bx) - padding) / this.obstacleCellSize);
+        const endX = Math.floor((Math.max(ax, bx) + padding) / this.obstacleCellSize);
+        const startY = Math.floor((Math.min(ay, by) - padding) / this.obstacleCellSize);
+        const endY = Math.floor((Math.max(ay, by) + padding) / this.obstacleCellSize);
+        for (let gx = startX; gx <= endX; gx += 1) {
+            for (let gy = startY; gy <= endY; gy += 1) {
+                const key = this.getObstacleCellKey(gx, gy);
+                if (!this.wallSegmentGrid.has(key)) {
+                    this.wallSegmentGrid.set(key, []);
+                }
+                this.wallSegmentGrid.get(key)!.push({ ax, ay, bx, by });
+            }
+        }
+    }
+
+    private rebuildObstacleGrids() {
+        this.blockingBuildingGrid.clear();
+        this.wallSegmentGrid.clear();
+
+        this.map.islands.forEach(island => {
+            island.buildings.forEach(building => {
+                if (building.health <= 0 || building.isConstructing || this.isNonBlockingBuildingType(building.type)) return;
+                const worldX = island.x + (building.x || 0);
+                const worldY = island.y + (building.y || 0);
+                this.addObstacleBuildingEntry(worldX, worldY, this.getBuildingCollisionRadius(building.type));
+            });
+        });
+
+        this.map.bridges.forEach(bridge => {
+            if (bridge.type !== 'wall') return;
+            const endpoints = this.getBridgeEndpoints(bridge);
+            if (!endpoints) return;
+            this.addWallSegmentEntry(endpoints.ax, endpoints.ay, endpoints.bx, endpoints.by);
+        });
+
+        this.obstacleGridTick = this.tickCounter;
+    }
+
+    private ensureObstacleGrids() {
+        if (this.obstacleGridTick !== this.tickCounter) {
+            this.rebuildObstacleGrids();
+        }
+    }
+
+    private getNearbyBlockingBuildings(x: number, y: number, radius: number) {
+        this.ensureObstacleGrids();
+        const results: Array<{ x: number; y: number; radius: number }> = [];
+        const startX = Math.floor((x - radius) / this.obstacleCellSize);
+        const endX = Math.floor((x + radius) / this.obstacleCellSize);
+        const startY = Math.floor((y - radius) / this.obstacleCellSize);
+        const endY = Math.floor((y + radius) / this.obstacleCellSize);
+        for (let gx = startX; gx <= endX; gx += 1) {
+            for (let gy = startY; gy <= endY; gy += 1) {
+                const cell = this.blockingBuildingGrid.get(this.getObstacleCellKey(gx, gy));
+                if (cell) results.push(...cell);
+            }
+        }
+        return results;
+    }
+
+    private getNearbyWallSegments(x: number, y: number, radius: number) {
+        this.ensureObstacleGrids();
+        const results: Array<{ ax: number; ay: number; bx: number; by: number }> = [];
+        const startX = Math.floor((x - radius) / this.obstacleCellSize);
+        const endX = Math.floor((x + radius) / this.obstacleCellSize);
+        const startY = Math.floor((y - radius) / this.obstacleCellSize);
+        const endY = Math.floor((y + radius) / this.obstacleCellSize);
+        for (let gx = startX; gx <= endX; gx += 1) {
+            for (let gy = startY; gy <= endY; gy += 1) {
+                const cell = this.wallSegmentGrid.get(this.getObstacleCellKey(gx, gy));
+                if (cell) results.push(...cell);
+            }
+        }
+        return results;
+    }
+
     private getNearbyUnits(x: number, y: number, radius: number): Unit[] {
         const results: Unit[] = [];
         const startX = Math.floor((x - radius) / this.cellSize);
@@ -4535,62 +5026,71 @@ export class GameState {
             return 10;
         };
 
+        const getLayer = (type: string): 'land' | 'air' | 'water' => {
+            if (['light_plane', 'heavy_plane', 'mothership', 'alien_scout', 'heavy_alien'].includes(type)) return 'air';
+            if (['destroyer', 'pirate_ship', 'construction_ship', 'ferry', 'oil_rig', 'aircraft_carrier'].includes(type)) return 'water';
+            return 'land';
+        };
+
         this.updateGrid();
+        const unitIndexById = new Map<string, number>(this.units.map((unit, index) => [unit.id, index]));
+        const unitMeta = this.units.map(unit => ({
+            radius: getRadius(unit.type),
+            mass: getMass(unit.type),
+            layer: getLayer(unit.type),
+        }));
 
-        for (let i = 0; i < this.units.length; i++) {
+        for (let i = 0; i < this.units.length; i += 1) {
             const u1 = this.units[i];
-            const r1 = getRadius(u1.type);
-            const m1 = getMass(u1.type);
-            if (m1 >= 1000) continue;
-
-            // Check only nearby grid cells
+            const meta1 = unitMeta[i];
             const gx = Math.floor(u1.x / this.cellSize);
             const gy = Math.floor(u1.y / this.cellSize);
 
-            for (let ox = -1; ox <= 1; ox++) {
-                for (let oy = -1; oy <= 1; oy++) {
+            for (let ox = -1; ox <= 1; ox += 1) {
+                for (let oy = -1; oy <= 1; oy += 1) {
                     const cell = this.grid.get(`${gx + ox},${gy + oy}`);
                     if (!cell) continue;
 
                     for (const u2 of cell) {
                         if (u1 === u2) continue;
+                        const j = unitIndexById.get(u2.id);
+                        if (j === undefined || j <= i) continue; // Pair each combination once.
 
-                        const r2 = getRadius(u2.type);
-                        const m2 = getMass(u2.type);
-                        const sep = r1 + r2;
+                        const meta2 = unitMeta[j];
+                        if (meta1.layer !== meta2.layer) continue;
 
-                        // Category filters
-                        const isU1Land = ['soldier', 'sniper', 'rocketeer', 'builder', 'tank', 'humvee', 'missile_launcher', 'oil_seeker'].includes(u1.type);
-                        const isU2Land = ['soldier', 'sniper', 'rocketeer', 'builder', 'tank', 'humvee', 'missile_launcher', 'oil_seeker'].includes(u2.type);
-                        const isU1Air = ['light_plane', 'heavy_plane', 'mothership'].includes(u1.type);
-                        const isU2Air = ['light_plane', 'heavy_plane', 'mothership'].includes(u2.type);
-                        const isU1Water = ['destroyer', 'pirate_ship', 'construction_ship', 'ferry', 'oil_rig', 'aircraft_carrier'].includes(u1.type);
-                        const isU2Water = ['destroyer', 'pirate_ship', 'construction_ship', 'ferry', 'oil_rig', 'aircraft_carrier'].includes(u2.type);
-
-                        if (isU1Land && !isU2Land) continue;
-                        if (isU1Air && !isU2Air) continue;
-                        if (isU1Water && !isU2Water) continue;
-
+                        const sep = meta1.radius + meta2.radius;
                         const dx = u1.x - u2.x;
                         const dy = u1.y - u2.y;
                         const d2 = dx * dx + dy * dy;
+                        if (d2 >= sep * sep || d2 <= 0.001) continue;
 
-                        if (d2 < sep * sep && d2 > 0.001) {
-                            const dist = Math.sqrt(d2);
-                            const overlap = sep - dist;
-                            if (overlap <= 5.0) continue;
+                        const dist = Math.sqrt(d2);
+                        const overlap = sep - dist;
+                        if (overlap <= 2.5) continue;
 
-                            const nx = dx / dist;
-                            const ny = dy / dist;
-                            const totalMass = m1 + m2;
-                            const push = overlap * 0.5;
+                        const nx = dx / dist;
+                        const ny = dy / dist;
+                        const totalMass = meta1.mass + meta2.mass;
+                        const pushTotal = Math.min(overlap * 0.52, 6);
+                        const push1 = meta1.mass >= 1000 ? 0 : Math.min(pushTotal * (meta2.mass / totalMass), 4.5);
+                        const push2 = meta2.mass >= 1000 ? 0 : Math.min(pushTotal * (meta1.mass / totalMass), 4.5);
 
-                            const p1 = Math.min(push * (m2 / totalMass), 4.0);
-                            const nextX1 = u1.x + nx * p1;
-                            const nextY1 = u1.y + ny * p1;
+                        if (push1 > 0) {
+                            const nextX1 = u1.x + nx * push1;
+                            const nextY1 = u1.y + ny * push1;
                             if (this.isValidPosition(nextX1, nextY1, u1.type)) {
                                 u1.x = nextX1;
                                 u1.y = nextY1;
+                            }
+                        }
+
+                        if (push2 > 0) {
+                            const nextX2 = u2.x - nx * push2;
+                            const nextY2 = u2.y - ny * push2;
+                            if (this.isValidPosition(nextX2, nextY2, u2.type)) {
+                                u2.x = nextX2;
+                                u2.y = nextY2;
                             }
                         }
                     }
@@ -4599,8 +5099,9 @@ export class GameState {
         }
     }
 
-    resolveCombat(io: any, roomId: string) {
+    resolveCombat(io: any, roomId: string, loadFactorOverride?: number) {
         const now = Date.now();
+        const activeLoadFactor = clamp(loadFactorOverride ?? this.simulationLoadFactor, 0, 1);
         const getLayer = (type: string) => {
             const stats = UnitData[type];
             if (stats?.height === 2) return 'AIR_2';
@@ -4638,7 +5139,173 @@ export class GameState {
             return 2;
         };
 
-        this.units.forEach(attacker => {
+        const infantryCombatTypes = new Set(['soldier', 'sniper', 'rocketeer']);
+        const totalInfantryUnits = this.units.reduce(
+            (count, unit) => count + (infantryCombatTypes.has(unit.type) ? 1 : 0),
+            0
+        );
+        const projectileBacklogPressure = clamp((this.pendingProjectiles.length - 160) / 380, 0, 1);
+        const infantryPressure = clamp((totalInfantryUnits - 120) / 260, 0, 1);
+        const combatPressure = clamp(
+            activeLoadFactor * 0.5 +
+            infantryPressure * 0.35 +
+            projectileBacklogPressure * 0.25,
+            0,
+            1
+        );
+        const baseCombatStride = combatPressure >= 0.94 ? 5 : combatPressure >= 0.82 ? 4 : combatPressure >= 0.66 ? 3 : combatPressure >= 0.48 ? 2 : 1;
+        const infantryCombatStride = combatPressure >= 0.9 ? 6 : combatPressure >= 0.78 ? 5 : combatPressure >= 0.62 ? 4 : combatPressure >= 0.4 ? 2 : 1;
+        const lowPriorityProjectileStride = combatPressure >= 0.9 ? 8 : combatPressure >= 0.78 ? 6 : combatPressure >= 0.62 ? 4 : combatPressure >= 0.38 ? 2 : 1;
+        const projectileHardCap =
+            this.runtimeMode === 'internal_singleplayer'
+                ? (combatPressure >= 0.9 ? 140 : combatPressure >= 0.78 ? 200 : combatPressure >= 0.62 ? 280 : 420)
+                : (combatPressure >= 0.82 ? 220 : combatPressure >= 0.62 ? 320 : 520);
+
+        const shouldProcessAttackerThisTick = (attackerType: string, attackerIndex: number) => {
+            const stride = infantryCombatTypes.has(attackerType)
+                ? Math.max(infantryCombatStride, baseCombatStride)
+                : baseCombatStride;
+            if (stride <= 1) return true;
+            return ((this.tickCounter + attackerIndex) % stride) === 0;
+        };
+
+        const shouldEmitProjectileVisual = (projectileType: string, emitterIndex: number) => {
+            if (projectileType === 'rocket_missile' || projectileType === 'rocketeer_rocket' || projectileType === 'heavy_plane_bomb' || projectileType === 'tesla') {
+                return true;
+            }
+            if (lowPriorityProjectileStride <= 1) return true;
+            return ((this.tickCounter + emitterIndex) % lowPriorityProjectileStride) === 0;
+        };
+
+        const queueProjectileVisual = (payload: any, emitterIndex: number, force = false) => {
+            const projectileType = payload?.type || 'bullet';
+            if (!force && !shouldEmitProjectileVisual(projectileType, emitterIndex)) {
+                return;
+            }
+            if (this.pendingProjectiles.length >= projectileHardCap) {
+                if (!force) return;
+                this.pendingProjectiles.shift();
+            }
+            this.pendingProjectiles.push(payload);
+        };
+
+        this.updateGrid();
+
+        type CombatBuildingEntry = {
+            id: string;
+            ownerId: string;
+            type: string;
+            x: number;
+            y: number;
+            ref: any;
+            islandId?: string;
+            isWaterBuilding?: boolean;
+            isOilBuilding?: boolean;
+        };
+
+        const buildingCellSize = 280;
+        const buildingGrid = new Map<string, CombatBuildingEntry[]>();
+        const buildingTargetById = new Map<string, CombatBuildingEntry>();
+        const addBuildingEntry = (entry: CombatBuildingEntry) => {
+            buildingTargetById.set(entry.id, entry);
+            const gx = Math.floor(entry.x / buildingCellSize);
+            const gy = Math.floor(entry.y / buildingCellSize);
+            const key = `${gx},${gy}`;
+            if (!buildingGrid.has(key)) buildingGrid.set(key, []);
+            buildingGrid.get(key)!.push(entry);
+        };
+
+        this.map.islands.forEach(island => {
+            island.buildings.forEach(building => {
+                if (!building.ownerId || building.health <= 0) return;
+                addBuildingEntry({
+                    id: building.id,
+                    ownerId: building.ownerId,
+                    type: building.type,
+                    x: island.x + (building.x || 0),
+                    y: island.y + (building.y || 0),
+                    ref: building,
+                    islandId: island.id,
+                });
+            });
+        });
+
+        (this.map.waterBuildings || []).forEach(building => {
+            if (!building.ownerId || building.health <= 0) return;
+            addBuildingEntry({
+                id: building.id,
+                ownerId: building.ownerId,
+                type: building.type,
+                x: building.x || 0,
+                y: building.y || 0,
+                ref: building,
+                isWaterBuilding: true,
+            });
+        });
+
+        this.map.oilSpots.forEach(spot => {
+            const building = (spot as any).building;
+            const ownerId = (spot as any).ownerId;
+            if (!building || !ownerId || building.health <= 0) return;
+            if (this.isOilStructureBackedByIslandBuilding(building)) return;
+            addBuildingEntry({
+                id: building.id,
+                ownerId,
+                type: building.type,
+                x: spot.x,
+                y: spot.y,
+                ref: building,
+                isOilBuilding: true,
+            });
+        });
+
+        const getEnemyBuildingEntriesInRange = (x: number, y: number, radius: number, ownerId: string) => {
+            const entries: CombatBuildingEntry[] = [];
+            const startX = Math.floor((x - radius) / buildingCellSize);
+            const endX = Math.floor((x + radius) / buildingCellSize);
+            const startY = Math.floor((y - radius) / buildingCellSize);
+            const endY = Math.floor((y + radius) / buildingCellSize);
+            const radiusSquared = radius * radius;
+
+            for (let gx = startX; gx <= endX; gx += 1) {
+                for (let gy = startY; gy <= endY; gy += 1) {
+                    const cell = buildingGrid.get(`${gx},${gy}`);
+                    if (!cell) continue;
+                    for (const entry of cell) {
+                        if (entry.ownerId === ownerId) continue;
+                        if (entry.ref.health <= 0) continue;
+                        const dx = entry.x - x;
+                        const dy = entry.y - y;
+                        if (dx * dx + dy * dy <= radiusSquared) {
+                            entries.push(entry);
+                        }
+                    }
+                }
+            }
+            return entries;
+        };
+
+        const toCombatBuildingTarget = (entry: CombatBuildingEntry) => ({
+            ...entry.ref,
+            realX: entry.x,
+            realY: entry.y,
+            islandId: entry.islandId,
+            isWaterBuilding: !!entry.isWaterBuilding,
+            isOilBuilding: !!entry.isOilBuilding,
+            buildingRef: entry.ref,
+        });
+
+        const resolveCombatBuildingRef = (target: any) => {
+            if (target?.buildingRef) return target.buildingRef;
+            if (target?.id) {
+                const fromIndex = buildingTargetById.get(target.id);
+                if (fromIndex?.ref) return fromIndex.ref;
+            }
+            return null;
+        };
+
+        this.units.forEach((attacker, attackerIndex) => {
+            if (!shouldProcessAttackerThisTick(attacker.type, attackerIndex)) return;
             const attackerOwner = this.players.get(attacker.ownerId);
             if (attackerOwner?.status === 'eliminated') return;
             const isMissileLauncher = attacker.type === 'missile_launcher';
@@ -4646,39 +5313,18 @@ export class GameState {
             if (attacker.type === 'mothership' && (attacker as any).laserTargetId) {
                 const targetId = (attacker as any).laserTargetId;
                 let targetUnit = this.units.find(u => u.id === targetId);
-                let targetBuilding: any = null;
-                let targetIsland: any = null;
+                const targetBuildingEntry = targetUnit ? null : buildingTargetById.get(targetId);
+                const targetBuilding = targetBuildingEntry?.ref || null;
                 let targetWorldX = attacker.x;
                 let targetWorldY = attacker.y;
-
-                if (!targetUnit) {
-                    for (const island of this.map.islands) {
-                        const b = island.buildings.find(b => b.id === targetId);
-                        if (b) { targetBuilding = b; targetIsland = island; break; }
-                    }
-                    if (!targetBuilding) {
-                        const spot = this.map.oilSpots.find(s => s.occupiedBy === targetId);
-                        if (spot) targetBuilding = (spot as any).building;
-                    }
-                }
 
                 if (targetUnit) {
                     targetWorldX = targetUnit.x;
                     targetWorldY = targetUnit.y;
                     this.setUnitFacingFromVector(attacker, targetUnit.x - attacker.x, targetUnit.y - attacker.y);
                 } else if (targetBuilding) {
-                    let buildingX = 0;
-                    let buildingY = 0;
-                    if (targetIsland) {
-                        buildingX = targetIsland.x + (targetBuilding.x || 0);
-                        buildingY = targetIsland.y + (targetBuilding.y || 0);
-                    } else {
-                        const oilSpot = this.map.oilSpots.find(s => s.occupiedBy === targetBuilding.id);
-                        if (oilSpot) {
-                            buildingX = oilSpot.x;
-                            buildingY = oilSpot.y;
-                        }
-                    }
+                    const buildingX = targetBuildingEntry?.x ?? attacker.x;
+                    const buildingY = targetBuildingEntry?.y ?? attacker.y;
                     targetWorldX = buildingX;
                     targetWorldY = buildingY;
                     this.setUnitFacingFromVector(attacker, buildingX - attacker.x, buildingY - attacker.y);
@@ -4710,42 +5356,8 @@ export class GameState {
             const nearbyEnemies = this.getNearbyUnits(attacker.x, attacker.y, attacker.range)
                 .filter(u => u.ownerId !== attacker.ownerId && u.health > 0 && canHit(attacker.type, u.type));
 
-            // Throttled building lookup (keep as is or optimize if needed, but buildings are fewer)
-            let buildingsInRange: any[] = [];
-            if (this.tickCounter % 5 === 0) { // Optimization: Only check buildings every few ticks
-                this.map.islands.forEach(island => {
-                    if (Math.hypot(island.x - attacker.x, island.y - attacker.y) > island.radius + attacker.range + 100) return;
-                    island.buildings.forEach(b => {
-                        if (b.ownerId && b.ownerId !== attacker.ownerId) {
-                            const bx = island.x + (b.x || 0);
-                            const by = island.y + (b.y || 0);
-                            if (Math.hypot(bx - attacker.x, by - attacker.y) <= attacker.range) {
-                                buildingsInRange.push({ ...b, realX: bx, realY: by, islandId: island.id });
-                            }
-                        }
-                    });
-                });
-                (this.map.waterBuildings || []).forEach(b => {
-                    if (!b.ownerId || b.ownerId === attacker.ownerId) return;
-                    const bx = b.x || 0;
-                    const by = b.y || 0;
-                    if (Math.hypot(bx - attacker.x, by - attacker.y) <= attacker.range) {
-                        buildingsInRange.push({ ...b, realX: bx, realY: by, isWaterBuilding: true });
-                    }
-                });
-                this.map.oilSpots.forEach(spot => {
-                    const b = (spot as any).building;
-                    if (b && (spot as any).ownerId && (spot as any).ownerId !== attacker.ownerId) {
-                        if (this.isOilStructureBackedByIslandBuilding(b)) return;
-                        if (Math.hypot(spot.x - attacker.x, spot.y - attacker.y) <= attacker.range) {
-                            buildingsInRange.push({ ...b, realX: spot.x, realY: spot.y, isOilBuilding: true });
-                        }
-                    }
-                });
-                (attacker as any).cachedBuildingsInRange = buildingsInRange;
-            } else {
-                buildingsInRange = (attacker as any).cachedBuildingsInRange || [];
-            }
+            const buildingEntriesInRange = getEnemyBuildingEntriesInRange(attacker.x, attacker.y, attacker.range, attacker.ownerId);
+            const buildingsInRange = buildingEntriesInRange.map(toCombatBuildingTarget);
 
             let targets: any[] = [];
             if (attacker.type === 'missile_launcher') {
@@ -4813,7 +5425,7 @@ export class GameState {
                     });
                 } else if (attacker.type === 'heavy_plane') {
                     const blastRadius = 90;
-                    this.pendingProjectiles.push({
+                    queueProjectileVisual({
                         attackerId: attacker.id,
                         x1: attacker.x,
                         y1: attacker.y,
@@ -4822,79 +5434,28 @@ export class GameState {
                         type: 'heavy_plane_bomb',
                         speed: 760,
                         radius: blastRadius
+                    }, attackerIndex, true);
+
+                    this.getNearbyUnits(tx, ty, blastRadius).forEach(u => {
+                        if (u.ownerId === attacker.ownerId || u.health <= 0) return;
+                        if (getLayer(u.type) !== 'GROUND') return;
+                        if (!this.players.get(u.ownerId)?.godMode) u.health -= attacker.damage;
                     });
 
-                    this.units.forEach(u => {
-                        if (
-                            u.ownerId !== attacker.ownerId &&
-                            u.health > 0 &&
-                            getLayer(u.type) === 'GROUND' &&
-                            Math.hypot(u.x - tx, u.y - ty) <= blastRadius
-                        ) {
-                            if (!this.players.get(u.ownerId)?.godMode) u.health -= attacker.damage;
-                        }
-                    });
-
-                    this.map.islands.forEach(island => {
-                        if (Math.hypot(island.x - tx, island.y - ty) > island.radius + blastRadius + 50) return;
-                        island.buildings.forEach(b => {
-                            if (!b.ownerId || b.ownerId === attacker.ownerId || b.health <= 0) return;
-                            const bx = island.x + (b.x || 0);
-                            const by = island.y + (b.y || 0);
-                            if (Math.hypot(bx - tx, by - ty) <= blastRadius) {
-                                this.damageBuilding(b, attacker.damage);
-                            }
-                        });
-                    });
-
-                    (this.map.waterBuildings || []).forEach(b => {
-                        if (!b.ownerId || b.ownerId === attacker.ownerId || b.health <= 0) return;
-                        const bx = b.x || 0;
-                        const by = b.y || 0;
-                        if (Math.hypot(bx - tx, by - ty) <= blastRadius) {
-                            this.damageBuilding(b, attacker.damage);
-                        }
-                    });
-
-                    this.map.oilSpots.forEach(spot => {
-                        const b = (spot as any).building;
-                        if (!b || !(spot as any).ownerId || (spot as any).ownerId === attacker.ownerId || b.health <= 0) return;
-                        if (this.isOilStructureBackedByIslandBuilding(b)) return;
-                        if (Math.hypot(spot.x - tx, spot.y - ty) <= blastRadius) {
-                            this.damageBuilding(b, attacker.damage);
-                        }
+                    getEnemyBuildingEntriesInRange(tx, ty, blastRadius, attacker.ownerId).forEach(entry => {
+                        this.damageBuilding(entry.ref, attacker.damage);
                     });
 
                     attacker.lastAttackTime = now;
                 } else if (attacker.type === 'aircraft_carrier') {
-                    this.pendingProjectiles.push({ attackerId: attacker.id, x1: attacker.x, y1: attacker.y, x2: tx, y2: ty, type: 'rocket_missile', speed: 600 });
+                    queueProjectileVisual({ attackerId: attacker.id, x1: attacker.x, y1: attacker.y, x2: tx, y2: ty, type: 'rocket_missile', speed: 600 }, attackerIndex, true);
                     const aoe = 150;
-                    this.units.forEach(u => {
-                        if (u.ownerId !== attacker.ownerId && u.health > 0 && Math.hypot(u.x - tx, u.y - ty) <= aoe) {
-                            if (!this.players.get(u.ownerId)?.godMode) u.health -= attacker.damage;
-                        }
+                    this.getNearbyUnits(tx, ty, aoe).forEach(u => {
+                        if (u.ownerId === attacker.ownerId || u.health <= 0) return;
+                        if (!this.players.get(u.ownerId)?.godMode) u.health -= attacker.damage;
                     });
-                    // Simplified building AoE for performance
-                    this.map.islands.forEach(island => {
-                        if (Math.hypot(island.x - tx, island.y - ty) > island.radius + aoe + 50) return;
-                        island.buildings.forEach(b => {
-                            if (b.ownerId && b.ownerId !== attacker.ownerId && Math.hypot(island.x + (b.x || 0) - tx, island.y + (b.y || 0) - ty) <= aoe) {
-                                this.damageBuilding(b, attacker.damage);
-                                if (b.health <= 0) {
-                                    if (b.type === 'base' && b.ownerId && this.shouldEliminateOnBaseLoss(b.ownerId)) {
-                                        this.eliminatePlayer(b.ownerId, 'HQ_DESTROYED');
-                                    }
-                                    if (b.type === 'mine') {
-                                        const spot = island.goldSpots.find(s => s.occupiedBy === b.id);
-                                        if (spot) spot.occupiedBy = undefined;
-                                    }
-                                    if (b.type === 'oil_rig' || b.type === 'oil_well') {
-                                        this.destroyOilStructureById(b.id);
-                                    }
-                                    island.buildings = island.buildings.filter(build => build.id !== b.id);
-                                }
-                            }
-                        });
+                    getEnemyBuildingEntriesInRange(tx, ty, aoe, attacker.ownerId).forEach(entry => {
+                        this.damageBuilding(entry.ref, attacker.damage);
                     });
                     attacker.lastAttackTime = now;
                 } else if (attacker.type === 'missile_launcher') {
@@ -4907,7 +5468,7 @@ export class GameState {
                         return;
                     }
 
-                    this.pendingProjectiles.push({
+                    queueProjectileVisual({
                         attackerId: attacker.id,
                         x1: attacker.x,
                         y1: attacker.y,
@@ -4916,17 +5477,11 @@ export class GameState {
                         type: 'rocket_missile',
                         speed: 640,
                         radius: 46
-                    });
+                    }, attackerIndex, true);
 
                     if ('realX' in target) {
-                        const building = target.isOilBuilding
-                            ? (this.map.oilSpots.find(s => s.occupiedBy === target.id) as any)?.building
-                            : target.isWaterBuilding
-                                ? (this.map.waterBuildings || []).find(b => b.id === target.id)
-                                : this.map.islands.find(i => i.id === target.islandId)?.buildings.find(b => b.id === target.id);
-                        if (building) {
-                            this.damageBuilding(building, attacker.damage);
-                        }
+                        const building = resolveCombatBuildingRef(target);
+                        if (building) this.damageBuilding(building, attacker.damage);
                     } else {
                         if (!this.players.get(target.ownerId)?.godMode) target.health -= attacker.damage;
                     }
@@ -4941,27 +5496,27 @@ export class GameState {
                         attacker.reloadEndsAt = now + attacker.fireRate;
                     }
                 } else if (attacker.type === 'rocketeer') {
-                    this.pendingProjectiles.push({ attackerId: attacker.id, x1: attacker.x, y1: attacker.y, x2: tx, y2: ty, type: 'rocketeer_rocket', speed: 720 });
+                    queueProjectileVisual({ attackerId: attacker.id, x1: attacker.x, y1: attacker.y, x2: tx, y2: ty, type: 'rocketeer_rocket', speed: 720 }, attackerIndex, true);
                     if ('realX' in target) {
-                        const building = target.isOilBuilding ? (this.map.oilSpots.find(s => s.occupiedBy === target.id) as any)?.building : this.map.islands.find(i => i.id === target.islandId)?.buildings.find(b => b.id === target.id);
+                        const building = resolveCombatBuildingRef(target);
                         if (building) { this.damageBuilding(building, attacker.damage); attacker.lastAttackTime = now; }
                     } else {
                         if (!this.players.get(target.ownerId)?.godMode) target.health -= attacker.damage;
                         attacker.lastAttackTime = now;
                     }
                 } else if (attacker.type === 'pirate_ship') {
-                    this.pendingProjectiles.push({ attackerId: attacker.id, x1: attacker.x, y1: attacker.y, x2: tx, y2: ty, type: 'cannon_ball', speed: 560 });
+                    queueProjectileVisual({ attackerId: attacker.id, x1: attacker.x, y1: attacker.y, x2: tx, y2: ty, type: 'cannon_ball', speed: 560 }, attackerIndex);
                     if ('realX' in target) {
-                        const building = target.isOilBuilding ? (this.map.oilSpots.find(s => s.occupiedBy === target.id) as any)?.building : this.map.islands.find(i => i.id === target.islandId)?.buildings.find(b => b.id === target.id);
+                        const building = resolveCombatBuildingRef(target);
                         if (building) { this.damageBuilding(building, attacker.damage); attacker.lastAttackTime = now; }
                     } else {
                         if (!this.players.get(target.ownerId)?.godMode) target.health -= attacker.damage;
                         attacker.lastAttackTime = now;
                     }
                 } else {
-                    this.pendingProjectiles.push({ attackerId: attacker.id, x1: attacker.x, y1: attacker.y, x2: tx, y2: ty, type: 'bullet', speed: 800 });
+                    queueProjectileVisual({ attackerId: attacker.id, x1: attacker.x, y1: attacker.y, x2: tx, y2: ty, type: 'bullet', speed: 800 }, attackerIndex);
                     if ('realX' in target) {
-                        const building = target.isOilBuilding ? (this.map.oilSpots.find(s => s.occupiedBy === target.id) as any)?.building : this.map.islands.find(i => i.id === target.islandId)?.buildings.find(b => b.id === target.id);
+                        const building = resolveCombatBuildingRef(target);
                         if (building) { this.damageBuilding(building, attacker.damage); attacker.lastAttackTime = now; }
                     } else {
                         if (!this.players.get(target.ownerId)?.godMode) target.health -= attacker.damage;
@@ -4972,11 +5527,16 @@ export class GameState {
         });
 
         // Simplified Tower Logic
+        let buildingProjectileCounter = 0;
+        const buildingCombatStride = combatPressure >= 0.88 ? 3 : combatPressure >= 0.66 ? 2 : 1;
+        let buildingCombatCounter = 0;
         this.map.islands.forEach(island => {
-            island.buildings.forEach(b => {
+            island.buildings.forEach((b) => {
                 if (!b.ownerId) return;
                 const buildingOwner = this.players.get(b.ownerId);
                 if (buildingOwner?.status === 'eliminated') return;
+                const buildingSlot = buildingCombatCounter++;
+                if (buildingCombatStride > 1 && ((this.tickCounter + buildingSlot) % buildingCombatStride) !== 0) return;
                 let stats = BuildingData[b.type];
                 if (b.type === 'base' && b.hasTesla) stats = { ...stats, range: 400, damage: 100, fireRate: 500 };
                 if (!stats?.damage || (b.lastAttackTime && now - b.lastAttackTime < (stats.fireRate || 1000))) return;
@@ -4988,7 +5548,20 @@ export class GameState {
                 if (target) {
                     if (!this.players.get(target.ownerId)?.godMode) target.health -= stats.damage!;
                     b.lastAttackTime = now;
-                    io.to(roomId).emit('projectile', { x1: bx, y1: by, x2: target.x, y2: target.y, type: (b.type === 'base' && b.hasTesla) ? 'tesla' : 'bullet', speed: (b.type === 'base' && b.hasTesla) ? 1500 : 800 });
+                    buildingProjectileCounter += 1;
+                    const projectileType = (b.type === 'base' && b.hasTesla) ? 'tesla' : 'bullet';
+                    queueProjectileVisual(
+                        {
+                            x1: bx,
+                            y1: by,
+                            x2: target.x,
+                            y2: target.y,
+                            type: projectileType,
+                            speed: projectileType === 'tesla' ? 1500 : 800,
+                        },
+                        buildingProjectileCounter,
+                        projectileType === 'tesla'
+                    );
                 }
             });
         });
@@ -4996,10 +5569,10 @@ export class GameState {
         this.units = this.units.filter(u => {
             if (u.health <= 0) {
                 // If transport dies, log cargo loss
-                if (u.cargo && u.cargo.length > 0) {
+                if (ENABLE_DEATH_LOGS && u.cargo && u.cargo.length > 0) {
                     console.log(`[Death] Transport ${u.type} (${u.id}) destroyed with ${u.cargo.length} units inside.`);
                     u.cargo.forEach(c => console.log(`   - Cargo Lost: ${c.type} (${c.id})`));
-                } else {
+                } else if (ENABLE_DEATH_LOGS) {
                     console.log(`[Death] Unit ${u.type} (${u.id}) died.`);
                 }
                 return false;
@@ -5405,62 +5978,50 @@ export class GameState {
 
         let isLand = false;
 
-        for (const island of this.map.islands) {
-            // Optimization: Bounding Box / Radius check
-            if (x < island.x - island.radius - 50 || x > island.x + island.radius + 50 || y < island.y - island.radius - 50 || y > island.y + island.radius + 50) continue;
+        if (this.isSharedLandMap()) {
+            isLand = this.isPointOnSharedLandSurface(x, y, 6);
+        } else {
+            for (const island of this.map.islands) {
+                // Optimization: Bounding Box / Radius check
+                if (x < island.x - island.radius - 50 || x > island.x + island.radius + 50 || y < island.y - island.radius - 50 || y > island.y + island.radius + 50) continue;
 
-            if (island.points) {
-                // Add buffer for movement to prevent getting stuck on edges
-                // Check if point is inside OR within small distance of edge
-                if (MapGenerator.isPointInPolygon(x, y, island.points)) {
-                    isLand = true;
-                    break;
-                }
-                // Buffer check (expensive but necessary for smooth movement near edges)
-                // Only do it if we are very close to the center or radius
-                const distToCenter = Math.hypot(x - island.x, y - island.y);
-                if (distToCenter < island.radius + 10) {
-                    const closest = MapGenerator.getClosestPointOnPolygon(x, y, island.points);
-                    if (Math.hypot(x - closest.x, y - closest.y) < 1) { // Strict tolerance for invisible walls
+                if (island.points) {
+                    // Add buffer for movement to prevent getting stuck on edges
+                    // Check if point is inside OR within small distance of edge
+                    if (MapGenerator.isPointInPolygon(x, y, island.points)) {
                         isLand = true;
                         break;
                     }
-                }
-            } else {
-                if (Math.hypot(x - island.x, y - island.y) <= island.radius) { // Strict radius
-                    isLand = true;
-                    break;
+                    // Buffer check (expensive but necessary for smooth movement near edges)
+                    // Only do it if we are very close to the center or radius
+                    const distToCenter = Math.hypot(x - island.x, y - island.y);
+                    if (distToCenter < island.radius + 10) {
+                        const closest = MapGenerator.getClosestPointOnPolygon(x, y, island.points);
+                        if (Math.hypot(x - closest.x, y - closest.y) < 1) { // Strict tolerance for invisible walls
+                            isLand = true;
+                            break;
+                        }
+                    }
+                } else {
+                    if (Math.hypot(x - island.x, y - island.y) <= island.radius) { // Strict radius
+                        isLand = true;
+                        break;
+                    }
                 }
             }
         }
 
         if (this.isLandUnitType(type)) {
             // Building Collision Check for Land Units
-            // Find the island we are on (or moving to)
-            const currentIsland = this.map.islands.find(i => {
-                if (i.points) return MapGenerator.isPointInPolygon(x, y, i.points);
-                return Math.hypot(x - i.x, y - i.y) <= i.radius + 15;
-            });
+            const currentIsland = this.getIslandContainingPoint(x, y, 15);
 
             if (currentIsland) {
-                // Check collision with buildings
-                // Farm radius is 30. Most buildings are ~30-40.
-                // We use a safe collision radius of 25 to prevent walking through center but allow getting close.
-                const hitBuilding = currentIsland.buildings.some(b => {
-                    if (b.type === 'bridge_node' || b.type === 'wall_node' || b.type === 'mine') return false;
-
-                    // Base is larger (approx 50-60 radius visual)
-                    // Farm is 30
-                    // Others ~30
-                    const bRadius = this.getBuildingCollisionRadius(b.type, type);
-                    // Relaxed buffer for builders to prevent getting stuck/spawn failure
-                    const buffer = type === 'builder' ? 2 : 5;
-
-                    // Allow Builders to walk through OWN buildings to prevent getting stuck
-                    if (type === 'builder') return false;
-
-                    return Math.hypot(x - (currentIsland.x + (b.x || 0)), y - (currentIsland.y + (b.y || 0))) < bRadius + buffer;
-                });
+                const buffer = type === 'builder' ? 2 : 5;
+                const hitBuilding = type === 'builder'
+                    ? false
+                    : this.getNearbyBlockingBuildings(x, y, 64).some((entry) =>
+                        Math.hypot(x - entry.x, y - entry.y) < entry.radius + buffer
+                    );
 
                 if (hitBuilding) {
                     if (shouldLogValidPos) console.log(`[ValidPos] Builder HIT BUILDING on Island ${currentIsland.id}`);
@@ -5469,13 +6030,8 @@ export class GameState {
             }
 
             if (this.map.bridges && !['light_plane', 'heavy_plane', 'aircraft_carrier', 'mothership'].includes(type)) {
-                for (const bridge of this.map.bridges) {
-                    if (bridge.type !== 'wall') continue;
-                    const endpoints = this.getBridgeEndpoints(bridge);
-                    if (!endpoints) continue;
-                    const { ax, ay, bx, by } = endpoints;
-
-                    const closest = MapGenerator.getClosestPointOnSegment(x, y, ax, ay, bx, by);
+                for (const segment of this.getNearbyWallSegments(x, y, 30)) {
+                    const closest = MapGenerator.getClosestPointOnSegment(x, y, segment.ax, segment.ay, segment.bx, segment.by);
                     const distToWall = Math.hypot(x - closest.x, y - closest.y);
                     if (distToWall < 26) {
                         return false;
@@ -5538,10 +6094,12 @@ export class GameState {
         this.io = io;
         this.roomId = roomId;
         this.lastTickTime = Date.now();
+        this.lastHealthEmitTime = 0;
         this.economySecondAccumulator = 0;
         this.economyProductionAccumulatorSeconds = 0;
         // Run loop at 20 Hz (50ms)
         this.gameLoopInterval = setInterval(() => {
+            try {
             if (this.gameEnded) return;
 
             if (this.status === 'voting') {
@@ -5561,8 +6119,12 @@ export class GameState {
             }
 
             const now = Date.now();
-            const deltaTime = (now - this.lastTickTime) / 1000; // in seconds
+            const rawDeltaTime = Math.max(0, (now - this.lastTickTime) / 1000); // in seconds
+            // Never fast-forward simulation on frame hitches: large spikes were causing
+            // sudden mass movement/recruit jumps that looked like a full player reset.
+            const deltaTime = Math.min(rawDeltaTime, 0.1);
             this.lastTickTime = now;
+            const tickStartedAt = now;
 
             // Debug movement
             // if (Math.random() < 0.05) {
@@ -5578,6 +6140,12 @@ export class GameState {
             // This keeps economy, construction, and movement from advancing off-screen and
             // ensures bots only begin acting once every human client has finished loading.
             if (holdForHumanReadyGate) {
+                if (this.humanReadyGateArmedAt > 0 && (now - this.humanReadyGateArmedAt) >= HUMAN_READY_GATE_TIMEOUT_MS) {
+                    this.releaseBotsForHumanReadyGate('human_ready_timeout');
+                }
+            }
+
+            if (this.requireHumanReadyForBotStart && !this.botsReleasedForMatch) {
                 this.bots.forEach(bot => {
                     bot.debugState.currentGoal = 'WAITING_FOR_PLAYERS';
                     bot.debugState.lastDecision = 'Holding until all human players finish match load';
@@ -5585,21 +6153,42 @@ export class GameState {
                 return;
             }
 
-            // Bot Updates (Every tick, let bots throttle themselves)
-            this.bots.forEach(bot => {
+            this.simulationLoadFactor = this.computeSimulationLoadFactor(rawDeltaTime);
+            this.updateOverloadState(rawDeltaTime, this.simulationLoadFactor);
+            const effectiveLoadFactor = this.getEffectiveSimulationLoadFactor();
+            this.bots.forEach(bot => bot.setLoadFactor(effectiveLoadFactor));
+
+            // Adaptive Bot Updates (round-robin batches under heavy server load)
+            const botUpdatesThisTick = this.getBotUpdatesPerTick(effectiveLoadFactor);
+            for (let i = 0; i < botUpdatesThisTick; i += 1) {
+                if (this.bots.length === 0) break;
+                const botIndex = (this.botUpdateCursor + i) % this.bots.length;
+                const bot = this.bots[botIndex];
                 try {
                     bot.update(this);
                 } catch (e) {
                     console.error(`Bot ${bot.playerId} update failed:`, e);
                 }
-            });
+            }
+            if (this.bots.length > 0) {
+                this.botUpdateCursor = (this.botUpdateCursor + botUpdatesThisTick) % this.bots.length;
+            }
 
             this.advanceEconomy(deltaTime, io);
             this.advanceConstructionRepairAndRecruitment(deltaTime);
+            this.rebuildObstacleGrids();
 
             // Unit Movement Logic
-            this.units.forEach(unit => {
-                if (unit.status === 'moving') {
+            const movementStride =
+                effectiveLoadFactor >= 0.97 ? 6 :
+                effectiveLoadFactor >= 0.88 ? 4 :
+                effectiveLoadFactor >= 0.72 ? 2 : 1;
+            const movementSlot = this.tickCounter % movementStride;
+            const canRunPathfinding = effectiveLoadFactor < 0.78;
+            for (let unitIndex = movementSlot; unitIndex < this.units.length; unitIndex += movementStride) {
+                const unit = this.units[unitIndex];
+                if (!unit || unit.status !== 'moving') continue;
+                    if (unit.nextMovementRetryAt && now < unit.nextMovementRetryAt) continue;
                     let targetX = unit.targetX;
                     let targetY = unit.targetY;
 
@@ -5611,7 +6200,7 @@ export class GameState {
                         unit.x = safeIsland.x;
                         unit.y = safeIsland.y;
                         unit.status = 'idle';
-                        return;
+                        continue;
                     }
 
                     if (unit.targetIslandId) {
@@ -5621,7 +6210,7 @@ export class GameState {
                             targetY = target.y;
                         } else {
                             unit.status = 'idle';
-                            return;
+                            continue;
                         }
                     }
 
@@ -5679,6 +6268,8 @@ export class GameState {
                                 unit.x = targetX;
                                 unit.y = targetY;
                             }
+                            unit.nextMovementRetryAt = undefined;
+                            unit.blockedMoveCount = 0;
                             unit.status = 'idle';
                             unit.targetIslandId = undefined;
                         } else {
@@ -5751,10 +6342,16 @@ export class GameState {
 
                                 if (!slid) {
                                     // Pathfinding Logic: Go Around
-                                    if (obstaclePoints && (!unit.path || unit.path.length === 0) && targetX !== undefined && targetY !== undefined) {
-                                        const path = MapGenerator.findPathAround({ x: unit.x, y: unit.y }, { x: targetX, y: targetY }, obstaclePoints);
-                                        if (path.length > 0) {
-                                            unit.path = path;
+                                    if (canRunPathfinding && obstaclePoints && (!unit.path || unit.path.length === 0) && targetX !== undefined && targetY !== undefined) {
+                                        const pathfindCooldownMs =
+                                            effectiveLoadFactor >= 0.82 ? 1200 :
+                                            effectiveLoadFactor >= 0.62 ? 700 : 320;
+                                        if (!unit.lastPathfindAt || (now - unit.lastPathfindAt) >= pathfindCooldownMs) {
+                                            unit.lastPathfindAt = now;
+                                            const path = MapGenerator.findPathAround({ x: unit.x, y: unit.y }, { x: targetX, y: targetY }, obstaclePoints);
+                                            if (path.length > 0) {
+                                                unit.path = path;
+                                            }
                                         }
                                     }
 
@@ -5793,38 +6390,63 @@ export class GameState {
                             }
 
                             if (!blocked) {
+                                unit.nextMovementRetryAt = undefined;
+                                unit.blockedMoveCount = 0;
                                 this.setUnitFacingFromVector(unit, nextX - unit.x, nextY - unit.y);
                                 unit.x = nextX;
                                 unit.y = nextY;
+                            } else {
+                                unit.blockedMoveCount = (unit.blockedMoveCount || 0) + 1;
+                                const retryDelayMs =
+                                    effectiveLoadFactor >= 0.88
+                                        ? Math.min(520, 80 + unit.blockedMoveCount * 70)
+                                        : Math.min(280, 40 + unit.blockedMoveCount * 35);
+                                unit.nextMovementRetryAt = now + retryDelayMs;
                             }
                         }
                     }
-                }
-            });
+            }
 
 
-            this.applyUnitSeparation();
-            this.processNavalMineTriggers(now);
-            this.resolveCombat(io, roomId);
+            const separationStride =
+                effectiveLoadFactor >= 0.97
+                    ? (this.units.length > 900 ? 12 : 8)
+                    : effectiveLoadFactor >= 0.88 ? 5
+                    : effectiveLoadFactor >= 0.72 ? 3
+                    : 1;
+            if (this.tickCounter % separationStride === 0) {
+                this.applyUnitSeparation();
+            }
+
+            const mineStride = effectiveLoadFactor >= 0.97 ? 2 : 1;
+            if (this.tickCounter % mineStride === 0) {
+                this.processNavalMineTriggers(now);
+            }
+
+            const combatStride = effectiveLoadFactor >= 0.97 ? 2 : 1;
+            if (this.tickCounter % combatStride === 0) {
+                this.resolveCombat(io, roomId, effectiveLoadFactor);
+            }
             this.processDamageOverTime(deltaTime, now);
             this.processPlayerAssetCollapse(now);
             this.cleanupDeadEntities(); // Ensure stale bots are removed
-            this.checkIslandCapture();
+            const captureCheckStride =
+                effectiveLoadFactor >= 0.94 ? 5 :
+                effectiveLoadFactor >= 0.82 ? 4 :
+                effectiveLoadFactor >= 0.62 ? 2 : 1;
+            if (this.tickCounter % captureCheckStride === 0) {
+                this.checkIslandCapture();
+            }
 
             // Increment tick counter for split emission
             this.tickCounter++;
 
             const simplifiedUnits = this.getSimplifiedUnitsSnapshot();
-
-            // Split Emission Strategy:
-            // Even Ticks: Broadcast to EVERYONE (Slow update ~15Hz)
-            // Odd Ticks: Broadcast to HOST/LOCAL only (Fast update ~30Hz)
-
-            if (this.tickCounter % 2 === 0) {
-                // Slow Update (Base Room)
-                io.to(roomId).emit('unitsData', simplifiedUnits);
-
-                if (now - this.lastPlayerEmitTime >= PLAYER_SNAPSHOT_INTERVAL_MS) {
+            const playerSnapshotIntervalMs = Math.round(
+                PLAYER_SNAPSHOT_INTERVAL_MS * (1 + effectiveLoadFactor * 1.8)
+            );
+            const emitPlayersSnapshot = () => {
+                if (now - this.lastPlayerEmitTime >= playerSnapshotIntervalMs) {
                     const playersSnapshot = this.getPlayersSnapshot();
                     const nextPlayerSnapshotSignature = this.getPlayersSnapshotSignature(playersSnapshot);
                     if (nextPlayerSnapshotSignature !== this.lastPlayerSnapshotSignature) {
@@ -5833,6 +6455,38 @@ export class GameState {
                     }
                     this.lastPlayerEmitTime = now;
                 }
+            };
+
+            // Split Emission Strategy:
+            // Even Ticks: Broadcast to EVERYONE (Slow update ~15Hz)
+            // Odd Ticks: Broadcast to HOST/LOCAL only (Fast update ~30Hz)
+            const highLoad = effectiveLoadFactor >= 0.62;
+            const severeLoad = effectiveLoadFactor >= 0.82;
+            const canUseFastChannel = this.runtimeMode !== 'internal_singleplayer';
+            if (severeLoad) {
+                if (this.tickCounter % 3 === 0) {
+                    io.to(roomId).emit('unitsData', simplifiedUnits);
+                    emitPlayersSnapshot();
+                    if (this.pendingProjectiles.length > 0) {
+                        io.to(roomId).emit('projectilesBatch', this.pendingProjectiles);
+                        this.pendingProjectiles = [];
+                    }
+                } else if (this.pendingProjectiles.length > 320) {
+                    this.pendingProjectiles = this.pendingProjectiles.slice(-320);
+                }
+            } else if (highLoad) {
+                if (this.tickCounter % 2 === 0) {
+                    io.to(roomId).emit('unitsData', simplifiedUnits);
+                    emitPlayersSnapshot();
+                    if (this.pendingProjectiles.length > 0) {
+                        io.to(roomId).emit('projectilesBatch', this.pendingProjectiles);
+                        this.pendingProjectiles = [];
+                    }
+                }
+            } else if (this.tickCounter % 2 === 0) {
+                // Slow Update (Base Room)
+                io.to(roomId).emit('unitsData', simplifiedUnits);
+                emitPlayersSnapshot();
 
                 // Flush Projectiles (Batch) - Only on slow ticks to save bandwidth
                 if (this.pendingProjectiles.length > 0) {
@@ -5841,19 +6495,45 @@ export class GameState {
                 }
             } else {
                 // Fast Update (Fast Room - Host/Local only)
-                io.to(roomId + '_fast').emit('unitsData', simplifiedUnits);
+                if (canUseFastChannel) {
+                    io.to(roomId + '_fast').emit('unitsData', simplifiedUnits);
+                } else {
+                    io.to(roomId).emit('unitsData', simplifiedUnits);
+                }
             }
 
             // Throttle map data (heavy) - Emit every 500ms -> 1000ms
-            if (now - this.lastMapEmitTime > 1000) {
+            const mapEmitBaseMs = this.runtimeMode === 'internal_singleplayer' ? 1250 : 1000;
+            const mapEmitIntervalMs = Math.round(mapEmitBaseMs * (1 + effectiveLoadFactor * 1.9));
+            if (now - this.lastMapEmitTime > mapEmitIntervalMs) {
                 this.emitVisibleMapData(io, roomId);
-                io.to(roomId).emit('buildingHitboxes', this.getBuildingHitboxSnapshot());
+                if (effectiveLoadFactor < 0.9 || this.tickCounter % 2 === 0) {
+                    io.to(roomId).emit('buildingHitboxes', this.getBuildingHitboxSnapshot());
+                }
                 this.emitHumanHqStatuses(io);
                 this.lastMapEmitTime = now;
             }
 
-            // Debug Data Emission (Throttle to ~2Hz)
-            if (this.tickCounter % 15 === 0) {
+            if (now - this.lastHealthEmitTime >= 1000) {
+                io.to(roomId).emit('serverTickHealth', {
+                    serverNow: now,
+                    status: this.status,
+                    matchState: this.matchState,
+                    runtimeMode: this.runtimeMode,
+                    loadFactor: Number(effectiveLoadFactor.toFixed(3)),
+                    smoothedTickMs: Math.round(this.smoothedTickDurationMs),
+                    units: this.units.length,
+                    buildings: this.getTotalBuildingCount(),
+                    pendingProjectiles: this.pendingProjectiles.length,
+                    botCount: this.bots.length,
+                    gateActive: this.requireHumanReadyForBotStart && !this.botsReleasedForMatch,
+                });
+                this.lastHealthEmitTime = now;
+            }
+
+            // Debug Data Emission (Throttle harder when overloaded)
+            const debugTickModulo = severeLoad ? 45 : highLoad ? 30 : 15;
+            if (this.tickCounter % debugTickModulo === 0) {
                 const debugData = this.getDebugState();
                 if (debugData.length > 0) {
                     io.to(roomId).emit('botDebugData', debugData);
@@ -5862,8 +6542,16 @@ export class GameState {
 
             this.checkMatchEnd();
 
+            const tickDurationMs = Date.now() - tickStartedAt;
+            this.smoothedTickDurationMs = this.smoothedTickDurationMs * 0.82 + tickDurationMs * 0.18;
+
             if (this.matchState === 'ENDED' && this.playerCollapseStates.size === 0) {
                 this.stopGameLoop();
+            }
+            } catch (error) {
+                console.error(`[GameLoop] Tick failure in room ${roomId}:`, error);
+                // Keep simulation alive after unexpected runtime errors.
+                this.lastTickTime = Date.now();
             }
         }, 33); // ~30Hz (33ms) -> Remote gets 15Hz, Local gets 30Hz
     }

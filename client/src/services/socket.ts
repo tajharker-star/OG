@@ -471,6 +471,18 @@ class ConnectionManager {
         this.startConnectTimeout();
     }
 
+    public idle(reason: string = 'Idle') {
+        console.log('[ConnectionManager] Returning to idle:', reason);
+        this.cleanupTimeouts();
+        socket.disconnect();
+        this.updateState({
+            phase: 'IDLE',
+            error: undefined,
+            details: reason,
+            retryCount: 0,
+        });
+    }
+
     public cancel() {
         console.log('[ConnectionManager] Cancelled by user');
         this.cleanupTimeouts();

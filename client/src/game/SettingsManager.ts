@@ -69,6 +69,13 @@ export interface GraphicsSettings {
     menuExplosionDensity: number; // 0.0 to 2.0 (Multiplier for main menu background explosions)
     screenShakeIntensity: number; // 0.0 to 2.0 (Multiplier for audio shake)
     menuProjectileMultiplierPercent: number; // 0 to 10000 (Main menu projectile density percent)
+    menuRocketMultiplierPercent: number; // 0 to 10000 (Main menu rocket density percent)
+    menuProjectileColorVariety: number; // 0.0 to 1.0
+    menuProjectileMaterialVariety: number; // 0.0 to 1.0
+    menuProjectileSizeVariance: number; // 0.0 to 2.0
+    menuRocketTurnStrength: number; // 0.0 to 2.5
+    autoPerformanceMode: boolean; // Dynamically scales visual detail during load spikes
+    autoPerformanceAggression: number; // 1 (gentle) to 5 (aggressive)
 }
 
 export interface Settings {
@@ -113,7 +120,14 @@ const DEFAULT_SETTINGS: Settings = {
         targetFps: 30,
         menuExplosionDensity: 1.0,
         screenShakeIntensity: 1.0,
-        menuProjectileMultiplierPercent: 100
+        menuProjectileMultiplierPercent: 100,
+        menuRocketMultiplierPercent: 100,
+        menuProjectileColorVariety: 0.85,
+        menuProjectileMaterialVariety: 0.8,
+        menuProjectileSizeVariance: 0.7,
+        menuRocketTurnStrength: 1.1,
+        autoPerformanceMode: true,
+        autoPerformanceAggression: 3
     }
 };
 
@@ -123,6 +137,17 @@ class SettingsManager extends SimpleEventEmitter {
     constructor() {
         super();
         this.settings = this.loadSettings();
+    }
+
+    private cloneSettings(settings: Settings = this.settings): Settings {
+        return {
+            keybinds: { ...settings.keybinds },
+            audio: {
+                ...settings.audio,
+                sfxEffectLevels: { ...settings.audio.sfxEffectLevels },
+            },
+            graphics: { ...settings.graphics },
+        };
     }
 
     private loadSettings(): Settings {
@@ -149,6 +174,14 @@ class SettingsManager extends SimpleEventEmitter {
                         merged.graphics.menuProjectileMultiplierPercent = percent;
                     }
                 }
+                if (merged.graphics.menuRocketMultiplierPercent === undefined) {
+                    merged.graphics.menuRocketMultiplierPercent = DEFAULT_SETTINGS.graphics.menuRocketMultiplierPercent;
+                }
+                merged.graphics.autoPerformanceMode = merged.graphics.autoPerformanceMode !== false;
+                merged.graphics.autoPerformanceAggression = Math.max(
+                    1,
+                    Math.min(5, Math.round(merged.graphics.autoPerformanceAggression ?? 3))
+                );
                 return merged;
             }
         } catch (e) {
@@ -159,11 +192,11 @@ class SettingsManager extends SimpleEventEmitter {
 
     public saveSettings() {
         localStorage.setItem('game_settings', JSON.stringify(this.settings));
-        this.emit('change', this.settings);
+        this.emit('change', this.cloneSettings());
     }
 
     public getSettings(): Settings {
-        return this.settings;
+        return this.cloneSettings();
     }
 
     public getKeybind(action: keyof Keybinds): string {
@@ -171,22 +204,57 @@ class SettingsManager extends SimpleEventEmitter {
     }
 
     public setKeybind(action: keyof Keybinds, key: string) {
-        this.settings.keybinds[action] = key.toUpperCase();
+        this.settings = {
+            ...this.settings,
+            keybinds: {
+                ...this.settings.keybinds,
+                [action]: key.toUpperCase(),
+            },
+        };
         this.saveSettings();
     }
 
     public setAudio(setting: AudioScalarSetting, value: number) {
-        this.settings.audio[setting] = Math.max(0, Math.min(1, value));
+        this.settings = {
+            ...this.settings,
+            audio: {
+                ...this.settings.audio,
+                [setting]: Math.max(0, Math.min(1, value)),
+            },
+        };
         this.saveSettings();
     }
 
     public setSfxEffectLevel(effectId: SfxEffectId, value: number) {
-        this.settings.audio.sfxEffectLevels[effectId] = Math.max(0, Math.min(1, value));
+        this.settings = {
+            ...this.settings,
+            audio: {
+                ...this.settings.audio,
+                sfxEffectLevels: {
+                    ...this.settings.audio.sfxEffectLevels,
+                    [effectId]: Math.max(0, Math.min(1, value)),
+                },
+            },
+        };
         this.saveSettings();
     }
 
     public setGraphics(setting: keyof GraphicsSettings, value: boolean | number) {
-        (this.settings.graphics as any)[setting] = value;
+        let nextValue: boolean | number;
+        if (setting === 'autoPerformanceAggression') {
+            nextValue = Math.max(1, Math.min(5, Math.round(Number(value) || 3)));
+        } else if (setting === 'autoPerformanceMode') {
+            nextValue = Boolean(value);
+        } else {
+            nextValue = value;
+        }
+        this.settings = {
+            ...this.settings,
+            graphics: {
+                ...this.settings.graphics,
+                [setting]: nextValue as never,
+            },
+        };
         this.saveSettings();
     }
 

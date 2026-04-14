@@ -1,42 +1,160 @@
-const { app, BrowserWindow, globalShortcut } = require('electron');
+const { app, BrowserWindow, nativeImage, ipcMain } = require('electron');
 const path = require('path');
 const { fork } = require('child_process');
 const http = require('http');
+const fs = require('fs');
 
-// Fix for SharedImageManager::ProduceSkia errors:
-// We enable HW Acceleration for better performance.
-// If black screen occurs, check for GPU driver compatibility.
-// app.disableHardwareAcceleration(); 
+const SAFE_RENDERER_MODE = process.argv.includes('--safe-renderer') || process.env.CONQUERORS_SAFE_RENDERER === '1';
 
-app.commandLine.appendSwitch('ignore-gpu-blocklist');
-app.commandLine.appendSwitch('disable-gpu-process-crash-limit');
-app.commandLine.appendSwitch('disable-features', 'OutOfBlinkCors');
-app.commandLine.appendSwitch('enable-gpu-rasterization');
-app.commandLine.appendSwitch('enable-zero-copy');
+// Run with the real GPU path by default. The old forced SwiftShader path kept
+// the game alive on unstable machines, but it also crushed FPS in both the
+// lobby and live matches. Safe mode still exists as an escape hatch.
+if (SAFE_RENDERER_MODE) {
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch('disable-gpu');
+  app.commandLine.appendSwitch('disable-gpu-process-crash-limit');
+  app.commandLine.appendSwitch('disable-gpu-compositing');
+  app.commandLine.appendSwitch('use-gl', 'swiftshader');
+  app.commandLine.appendSwitch('use-angle', 'swiftshader');
+  app.commandLine.appendSwitch('enable-unsafe-swiftshader');
+}
 
 // Keep a global reference of the window object
 let mainWindow;
 let serverProcess;
+let serverStartPromise = null;
+let serverStopPromise = null;
+let serverStopExpected = false;
+let rendererCrashCount = 0;
 const SERVER_PORT = 3001;
 const DEV_CLIENT_PORT = 5173;
 
+function registerDesktopIpcHandlers() {
+  const saveFile = path.join(app.getPath('userData'), 'save.json');
+
+  ipcMain.removeHandler('save-data');
+  ipcMain.handle('save-data', async (_, data) => {
+    try {
+      let existing = {};
+      if (fs.existsSync(saveFile)) {
+        try {
+          const current = await fs.promises.readFile(saveFile, 'utf-8');
+          const parsed = JSON.parse(current);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            existing = parsed;
+          }
+        } catch (err) {
+          console.warn('[Persistence] Failed to parse existing save file, replacing with incoming data.', err);
+        }
+      }
+
+      const next = (data && typeof data === 'object' && !Array.isArray(data))
+        ? { ...existing, ...data }
+        : existing;
+
+      await fs.promises.writeFile(saveFile, JSON.stringify(next, null, 2));
+      return { success: true };
+    } catch (err) {
+      console.error('[Persistence] Save Error:', err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.removeHandler('load-data');
+  ipcMain.handle('load-data', async () => {
+    try {
+      if (!fs.existsSync(saveFile)) {
+        return { success: true, data: null };
+      }
+
+      const data = await fs.promises.readFile(saveFile, 'utf-8');
+      return { success: true, data: JSON.parse(data) };
+    } catch (err) {
+      console.error('[Persistence] Load Error:', err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.removeHandler('local-server-status');
+  ipcMain.handle('local-server-status', async () => ({
+    ready: await checkPort(SERVER_PORT),
+    port: SERVER_PORT,
+    managed: Boolean(serverProcess && !serverProcess.killed),
+  }));
+
+  ipcMain.removeHandler('local-server-start');
+  ipcMain.handle('local-server-start', async () => ensureLocalServerRunning());
+
+  ipcMain.removeHandler('local-server-stop');
+  ipcMain.handle('local-server-stop', async () => stopLocalServer());
+
+  ipcMain.removeHandler('local-server-restart');
+  ipcMain.handle('local-server-restart', async () => {
+    await stopLocalServer();
+    return ensureLocalServerRunning();
+  });
+
+  // Keep the UI stable even when the Steam/public tunnel stack is unavailable in
+  // this lightweight desktop wrapper.
+  ipcMain.removeHandler('network:ensure-public-tunnel');
+  ipcMain.handle('network:ensure-public-tunnel', async (_, data) => ({
+    success: false,
+    error: `Public tunnel support is unavailable in this desktop build for port ${data?.port || SERVER_PORT}.`,
+  }));
+
+  ipcMain.removeHandler('network:close-public-tunnel');
+  ipcMain.handle('network:close-public-tunnel', async () => ({ success: true }));
+}
+
+function resolveAppIconPath() {
+  const candidates = app.isPackaged
+    ? [
+        path.join(process.resourcesPath, 'client', 'dist', 'app-icon.png'),
+        path.join(process.resourcesPath, 'app', 'client', 'dist', 'app-icon.png'),
+      ]
+    : [
+        path.join(__dirname, '..', 'client', 'public', 'app-icon.png'),
+        path.join(__dirname, '..', 'client', 'dist', 'app-icon.png'),
+      ];
+
+  return candidates.find((candidate) => fs.existsSync(candidate)) || null;
+}
+
 function createWindow() {
+  registerDesktopIpcHandlers();
+
+  const iconPath = resolveAppIconPath();
+  const icon = iconPath ? nativeImage.createFromPath(iconPath) : undefined;
+
   // Create the browser window.
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
-    title: "Conquerors: Dominion",
+    title: "Conquerors: Domination",
     backgroundColor: '#0f0f13', // Match loading screen bg
     webPreferences: {
-      nodeIntegration: false, // Security best practice
-      contextIsolation: true,
-      preload: path.join(__dirname, 'preload.js')
+      // The renderer still relies on window.require for Steam, save data, and
+      // local desktop launch hooks. Keep Node integration on until those APIs
+      // are fully migrated behind preload helpers.
+      nodeIntegration: true,
+      contextIsolation: false,
+      preload: path.join(__dirname, 'preload.js'),
+      webgl: true
     },
+    icon,
     show: false
   });
 
+  if (process.platform === 'darwin' && icon && !icon.isEmpty() && app.dock?.setIcon) {
+    app.dock.setIcon(icon);
+  }
+
   mainWindow.maximize();
   mainWindow.show();
+
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+    console.error('[Electron] Failed to load renderer URL:', { errorCode, errorDescription, validatedURL });
+  });
 
   // Load the loading screen first
   mainWindow.loadFile(path.join(__dirname, 'loading.html'));
@@ -52,8 +170,8 @@ function createWindow() {
     if (input.control || input.meta) {
       if (input.key.toLowerCase() === 'r') {
         event.preventDefault();
-        // Instead of full reload, just go back to home URL to avoid process kill
-        mainWindow.loadURL(`http://localhost:${SERVER_PORT}`);
+        mainWindow.loadFile(path.join(__dirname, 'loading.html'));
+        setTimeout(initAppSequence, 500);
       }
     }
   });
@@ -62,11 +180,25 @@ function createWindow() {
   mainWindow.webContents.on('render-process-gone', (event, details) => {
     console.error('[Electron] Render process gone:', details);
     if (details.reason !== 'clean-exit') {
+      rendererCrashCount += 1;
+      if (!SAFE_RENDERER_MODE && rendererCrashCount >= 2) {
+        console.error('[Electron] Renderer crashed repeatedly. Relaunching in safe renderer mode.');
+        app.relaunch({ args: process.argv.slice(1).concat('--safe-renderer') });
+        app.exit(0);
+        return;
+      }
+
+      if (rendererCrashCount >= 3) {
+        console.error('[Electron] Renderer crashed repeatedly, loading error screen instead of looping forever.');
+        sendError('Renderer crashed while loading the game window. The safe renderer fallback is active, but the UI still failed to start.');
+        return;
+      }
+
       console.log('[Electron] Reloading renderer due to crash...');
-      // Give it a moment to stabilize then reload
       setTimeout(() => {
         if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.reload();
+          mainWindow.loadFile(path.join(__dirname, 'loading.html'));
+          setTimeout(initAppSequence, 500);
         }
       }, 1000);
     }
@@ -116,6 +248,20 @@ function checkPort(port) {
   });
 }
 
+function resolveRendererEntry() {
+  const candidates = app.isPackaged
+    ? [
+        path.join(process.resourcesPath, 'client', 'dist', 'index.html'),
+        path.join(process.resourcesPath, 'app', 'client', 'dist', 'index.html'),
+        path.join(__dirname, '..', 'client', 'dist', 'index.html'),
+      ]
+    : [
+        path.join(__dirname, '..', 'client', 'dist', 'index.html'),
+      ];
+
+  return candidates.find((candidate) => fs.existsSync(candidate)) || null;
+}
+
 async function initAppSequence() {
   sendStatus('Scanning environment...', 10);
 
@@ -132,41 +278,32 @@ async function initAppSequence() {
     return;
   }
 
-  // 2. Check for Local Server (already running)
-  const isServerUp = await checkPort(SERVER_PORT);
-  if (isServerUp) {
-    sendStatus('Active Server detected on port ' + SERVER_PORT, 30);
+  const rendererEntry = resolveRendererEntry();
+  if (rendererEntry) {
+    sendStatus('Loading command deck...', 35);
     setTimeout(() => {
-      sendStatus('Connecting to Local Server...', 60);
+      sendStatus('Preparing lobby systems...', 70);
       setTimeout(() => {
-        loadGame(`http://localhost:${SERVER_PORT}`);
-      }, 500);
-    }, 500);
+        loadGame(rendererEntry);
+      }, 350);
+    }, 350);
     return;
   }
 
-  // 3. Spawn Server
-  spawnAndConnectServer();
+  sendError("Renderer build could not be found. Run 'npm --prefix client run build' and try again.");
 }
 
 const { exec } = require('child_process');
 
-function spawnAndConnectServer() {
-  sendStatus('Initializing launch parameters...', 10);
-
+function resolveServerLaunchConfig() {
   const isPackaged = app.isPackaged;
-  // In production, the server is usually in resources/app/server/dist/index.js
-  // or resources/server/dist/index.js depending on build config
   let serverPath;
   let cwd;
 
   if (isPackaged) {
-    // Try multiple potential paths for packaged production
     const p1 = path.join(process.resourcesPath, 'app', 'server', 'dist', 'index.js');
     const p2 = path.join(process.resourcesPath, 'server', 'dist', 'index.js');
     const p3 = path.join(__dirname, '..', 'server', 'dist', 'index.js');
-
-    const fs = require('fs');
     if (fs.existsSync(p1)) serverPath = p1;
     else if (fs.existsSync(p2)) serverPath = p2;
     else serverPath = p3;
@@ -177,38 +314,14 @@ function spawnAndConnectServer() {
     cwd = path.join(__dirname, '..', 'server');
   }
 
-  console.log('Launching server from:', serverPath);
-  console.log('CWD:', cwd);
-  sendStatus('Igniting server engines...', 25);
-
-  // Before starting, attempt to kill any existing server on this port (Windows safety)
-  if (process.platform === 'win32') {
-    exec(`taskkill /F /IM node.exe /T`, (err) => {
-      // Ignore error (might not be running)
-      startServer(serverPath, cwd);
-    });
-  } else {
-    startServer(serverPath, cwd);
-  }
+  return { serverPath, cwd };
 }
 
-function startServer(serverPath, cwd) {
-  // Fork the server process
-  try {
-    serverProcess = fork(serverPath, [], {
-      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-      cwd: cwd,
-      env: { ...process.env, PORT: SERVER_PORT.toString(), HEADLESS: 'true' }
-    });
-
-    sendStatus('Server ignition confirmed. Stabilizing...', 40);
-  } catch (err) {
-    console.error("Failed to fork server:", err);
-    sendError("Failed to launch server process: " + err.message + "\n(Ensure 'npm run build' was run in server/)");
+function attachServerProcessListeners() {
+  if (!serverProcess) {
     return;
   }
 
-  // Log server output
   serverProcess.stdout.on('data', (data) => {
     console.log(`[Server]: ${data}`);
   });
@@ -219,64 +332,236 @@ function startServer(serverPath, cwd) {
 
   serverProcess.on('error', (err) => {
     console.error('Failed to start server process:', err);
-    sendError("Server process failed: " + err.message);
+    if (!serverStopExpected) {
+      sendError("Server process failed: " + err.message);
+    }
   });
 
   serverProcess.on('exit', (code, signal) => {
     console.log(`Server process exited with code ${code} and signal ${signal}`);
-    if (code !== 0 && code !== null) {
+    const expectedStop = serverStopExpected;
+    serverProcess = null;
+    serverStopExpected = false;
+
+    if (!expectedStop && code !== 0 && code !== null) {
       sendError(`Server crashed with exit code ${code}`);
     }
   });
-
-  // Start polling
-  pollServer();
 }
 
-function pollServer(retries = 0) {
-  const maxRetries = 60;
+function spawnServerProcess() {
+  if (serverProcess && !serverProcess.killed) {
+    return { success: true };
+  }
 
-  // Calculate fake progress based on retries (from 40% to 90%)
-  const progress = 40 + Math.min(50, (retries / 5) * 10);
+  const { serverPath, cwd } = resolveServerLaunchConfig();
+  console.log('Launching server from:', serverPath);
+  console.log('CWD:', cwd);
 
-  if (retries === 0) sendStatus('Establishing connection uplink...', 45);
-  else if (retries === 5) sendStatus('Waiting for server heartbeat...', 55);
-  else if (retries === 10) sendStatus('Calibrating game assets...', 65);
-  else if (retries === 20) sendStatus('Finalizing protocols...', 80);
+  const clientDistDir = app.isPackaged
+    ? path.join(process.resourcesPath, 'client', 'dist')
+    : path.join(__dirname, '..', 'client', 'dist');
 
-  if (retries % 5 !== 0 && retries > 0) {
-    if (mainWindow && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
-      mainWindow.webContents.send('progress-update', progress);
+  try {
+    serverProcess = fork(serverPath, [], {
+      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+      cwd: cwd,
+      env: {
+        ...process.env,
+        PORT: SERVER_PORT.toString(),
+        HEADLESS: 'true',
+        CLIENT_DIST_DIR: clientDistDir,
+      }
+    });
+  } catch (err) {
+    console.error("Failed to fork server:", err);
+    return {
+      success: false,
+      error: "Failed to launch server process: " + err.message + "\n(Ensure 'npm run build' was run in server/)",
+    };
+  }
+
+  attachServerProcessListeners();
+  return { success: true };
+}
+
+async function waitForServerReady(maxRetries = 60, intervalMs = 200) {
+  for (let retries = 0; retries < maxRetries; retries += 1) {
+    if (await checkPort(SERVER_PORT)) {
+      return true;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  return false;
+}
+
+async function ensureLocalServerRunning() {
+  if (await checkPort(SERVER_PORT)) {
+    return {
+      success: true,
+      ready: true,
+      port: SERVER_PORT,
+      managed: Boolean(serverProcess && !serverProcess.killed),
+    };
+  }
+
+  if (serverStartPromise) {
+    return serverStartPromise;
+  }
+
+  serverStartPromise = (async () => {
+    sendStatus('Starting local match engine...', 35);
+
+    const spawnResult = spawnServerProcess();
+    if (!spawnResult.success) {
+      sendError(spawnResult.error);
+      return {
+        success: false,
+        ready: false,
+        port: SERVER_PORT,
+        error: spawnResult.error,
+      };
+    }
+
+    sendStatus('Waiting for local match engine heartbeat...', 55);
+    const ready = await waitForServerReady(80, 200);
+    if (!ready) {
+      const error = 'Local match engine failed to start in time.';
+      console.error(error);
+      sendError(error);
+      return {
+        success: false,
+        ready: false,
+        port: SERVER_PORT,
+        error,
+      };
+    }
+
+    return {
+      success: true,
+      ready: true,
+      port: SERVER_PORT,
+      managed: true,
+    };
+  })();
+
+  try {
+    return await serverStartPromise;
+  } finally {
+    serverStartPromise = null;
+  }
+}
+
+async function stopLocalServer() {
+  if (serverStartPromise) {
+    try {
+      await serverStartPromise;
+    } catch (error) {
+      console.warn('Ignoring local server start wait failure during stop.', error);
     }
   }
 
-  http.get(`http://localhost:${SERVER_PORT}`, (res) => {
-    if (res.statusCode === 200) {
-      loadGame(`http://localhost:${SERVER_PORT}`);
-    } else {
-      retryPoll(retries);
+  if (serverStopPromise) {
+    return serverStopPromise;
+  }
+
+  if (!serverProcess || serverProcess.killed) {
+    return {
+      success: true,
+      stopped: false,
+      port: SERVER_PORT,
+      reason: 'No managed local server process was running.',
+    };
+  }
+
+  serverStopExpected = true;
+  const processToStop = serverProcess;
+
+  serverStopPromise = new Promise((resolve) => {
+    let settled = false;
+
+    const finish = (result) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      resolve(result);
+    };
+
+    const timeoutId = setTimeout(() => {
+      try {
+        if (process.platform !== 'win32' && processToStop && !processToStop.killed) {
+          processToStop.kill('SIGKILL');
+        }
+      } catch (error) {
+        console.error('Failed to force stop local server process.', error);
+      }
+
+      finish({
+        success: false,
+        stopped: false,
+        port: SERVER_PORT,
+        error: 'Timed out while stopping the local match engine.',
+      });
+    }, 4000);
+
+    processToStop.once('exit', () => {
+      clearTimeout(timeoutId);
+      finish({
+        success: true,
+        stopped: true,
+        port: SERVER_PORT,
+      });
+    });
+
+    try {
+      if (process.platform === 'win32') {
+        exec(`taskkill /F /PID ${processToStop.pid} /T`, (err) => {
+          if (err) {
+            clearTimeout(timeoutId);
+            finish({
+              success: false,
+              stopped: false,
+              port: SERVER_PORT,
+              error: err.message,
+            });
+          }
+        });
+      } else {
+        processToStop.kill('SIGTERM');
+      }
+    } catch (error) {
+      clearTimeout(timeoutId);
+      finish({
+        success: false,
+        stopped: false,
+        port: SERVER_PORT,
+        error: error.message,
+      });
     }
-  }).on('error', (err) => {
-    retryPoll(retries);
   });
-}
 
-function retryPoll(retries) {
-  if (retries < 60) {
-    setTimeout(() => pollServer(retries + 1), 200);
-  } else {
-    console.error('Server failed to start in time.');
-    sendError("Connection timed out. Server did not respond.");
+  try {
+    return await serverStopPromise;
+  } finally {
+    serverStopPromise = null;
   }
 }
 
-function loadGame(url) {
-  console.log('Loading game from:', url);
+function loadGame(target) {
+  console.log('Loading game from:', target);
   sendStatus('Systems Nominal. Launching!', 100);
 
   setTimeout(() => {
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.loadURL(url);
+      if (/^https?:\/\//i.test(target)) {
+        mainWindow.loadURL(target);
+      } else {
+        mainWindow.loadFile(target);
+      }
     }
   }, 800);
 }
@@ -287,6 +572,7 @@ app.on('ready', () => {
 
 app.on('before-quit', () => {
   if (serverProcess) {
+    serverStopExpected = true;
     if (process.platform === 'win32') {
       // Force kill entire tree on Windows to avoid locks
       exec(`taskkill /F /PID ${serverProcess.pid} /T`, (err) => {

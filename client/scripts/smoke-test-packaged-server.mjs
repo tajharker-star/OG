@@ -105,6 +105,7 @@ for (const [index, platform] of smokeTargets.entries()) {
       ...process.env,
       NODE_ENV: "production",
       NODE_PATH: nodePath,
+      HOST: "127.0.0.1",
       PORT: String(port),
     },
     stdio: ["ignore", "pipe", "pipe"],

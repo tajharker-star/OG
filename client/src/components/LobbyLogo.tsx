@@ -8,9 +8,35 @@ type LobbyLogoProps = {
 };
 
 export function LobbyLogo({ className = '', performanceMode }: LobbyLogoProps) {
-    const isElectronRuntime = typeof navigator !== 'undefined' && /electron/i.test(navigator.userAgent);
-    const usePerformanceMode = performanceMode ?? isElectronRuntime;
-    const classes = ['lobby-logo', usePerformanceMode ? 'lobby-logo--performance' : '', className].filter(Boolean).join(' ');
+    const isElectronRuntime = Boolean((window as any).process?.versions?.electron)
+        || (typeof navigator !== 'undefined' && /electron/i.test(navigator.userAgent));
+    const usePerformanceMode = Boolean(performanceMode);
+    const useSafeDesktopMode = isElectronRuntime;
+    const classes = [
+        'lobby-logo',
+        usePerformanceMode ? 'lobby-logo--performance' : '',
+        useSafeDesktopMode ? 'lobby-logo--safe' : '',
+        className
+    ].filter(Boolean).join(' ');
+
+    if (useSafeDesktopMode) {
+        return (
+            <div
+                className={classes}
+                role="img"
+                aria-label="Conquerors: Domination"
+                style={{
+                    ['--lobby-logo-image' as string]: `url(${lobbyLogoUrl})`,
+                }}
+            >
+                <div className="lobby-logo__safe-halo" aria-hidden="true" />
+                <div className="lobby-logo__safe-media" aria-hidden="true">
+                    <img className="lobby-logo__image lobby-logo__image--safe" src={lobbyLogoUrl} alt="" />
+                    <div className="lobby-logo__safe-shine" />
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div

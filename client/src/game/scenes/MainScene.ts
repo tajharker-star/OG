@@ -73,6 +73,42 @@ type MotionTrailSegment = {
     growth: number;
 };
 
+type ServerTickHealth = {
+    serverNow?: number;
+    status?: 'waiting' | 'voting' | 'starting' | 'playing';
+    matchState?: 'LOBBY' | 'STARTING' | 'IN_MATCH' | 'ENDED';
+    loadFactor?: number;
+    smoothedTickMs?: number;
+    units?: number;
+    buildings?: number;
+    pendingProjectiles?: number;
+    botCount?: number;
+    gateActive?: boolean;
+};
+
+type LagDiagnosticDetail = {
+    id: string;
+    severity: 'warning' | 'critical';
+    reason: string;
+    reasons: string[];
+    recommendations: string[];
+    frameGapMs: number;
+    snapshotAgeMs: number;
+    fps: number;
+    autoPerformanceLevel: number;
+    unitCount: number;
+    buildingCount: number;
+    projectileBurst: number;
+    memoryMb: number | null;
+    serverLoadFactor?: number | null;
+    serverTickMs?: number | null;
+    serverHeartbeatAgeMs?: number | null;
+    serverGateActive?: boolean;
+    serverStatus?: string;
+    serverMatchState?: string;
+    emittedAt: number;
+};
+
 const CLIENT_DEFINITE_PLACEMENT_FAILURE_REASONS = new Set([
     'Map data still loading',
     'Connection not ready',
@@ -131,6 +167,12 @@ const WORLD_BUILDING_BASE_DEPTH = 3;
 const WORLD_OIL_SPOT_DEPTH = 10;
 const WORLD_OIL_RIG_DEPTH = WORLD_OIL_SPOT_DEPTH + 2;
 const WORLD_LASER_BEAM_DEPTH = 19;
+const AUTO_PERFORMANCE_MAX_LEVEL = 4;
+const CLIENT_FREEZE_FRAME_MS = 850;
+const CLIENT_FREEZE_CRITICAL_MS = 1700;
+const CLIENT_SNAPSHOT_STALL_MS = 3200;
+const CLIENT_SNAPSHOT_CRITICAL_MS = 5800;
+const LAG_DIAGNOSTIC_COOLDOWN_MS = 5000;
 
 const blendSceneColor = (from: number, to: number, amount: number): number => {
     const a = Phaser.Display.Color.ValueToColor(from);
@@ -201,6 +243,18 @@ export class MainScene extends Phaser.Scene {
 	    private lastMinimapDispatchView: { x: number; y: number; width: number; height: number } | null = null;
 	    private menuShakeSampleAccumulatorMs: number = 0;
 	    private latestMenuBassAverage: number = 0;
+      private autoPerformanceFpsSum: number = 0;
+      private autoPerformanceFpsSamples: number = 0;
+      private autoPerformanceSampleWindowMs: number = 0;
+      private autoPerformanceCooldownMs: number = 0;
+      private autoPerformanceLevel: number = 0;
+      private nextMapRenderAllowedAt: number = 0;
+      private lastLagDiagnosticAt: number = 0;
+      private lastUnitsSnapshotAt: number = 0;
+      private lastProjectileBurstAt: number = 0;
+      private lastProjectileBurstSize: number = 0;
+      private lastServerTickHealthAt: number = 0;
+      private lastServerTickHealth: ServerTickHealth | null = null;
 
     private cameraInitialized: boolean = false;
     private currentMap: GameMap | null = null;
@@ -248,13 +302,107 @@ export class MainScene extends Phaser.Scene {
     super('MainScene');
   }
 
-  private applyPerformanceProfile(settings: Settings) {
-    const lowQuality = !settings.graphics.highQuality;
-    const particlesEnabled = settings.graphics.showParticles;
+  private isAutoPerformanceEnabled() {
+    return this.cachedSettings.graphics.autoPerformanceMode !== false;
+  }
 
-    this.oilScannerIntervalMs = lowQuality ? 140 : 95;
-    this.rangeRingIntervalMs = lowQuality ? 100 : 70;
-    this.minimapDispatchIntervalMs = lowQuality ? 90 : 60;
+  private getAutoPerformanceAggression() {
+    return Math.max(1, Math.min(5, Math.round(this.cachedSettings.graphics.autoPerformanceAggression ?? 3)));
+  }
+
+  private getAutoPerformanceLevel() {
+    if (!this.isAutoPerformanceEnabled()) return 0;
+    return Math.max(0, Math.min(AUTO_PERFORMANCE_MAX_LEVEL, this.autoPerformanceLevel));
+  }
+
+  private getEffectiveParticleBudget(baseCount: number) {
+    const level = this.getAutoPerformanceLevel();
+    const multipliers = [1, 0.85, 0.62, 0.42, 0.25];
+    const budget = Math.round(baseCount * multipliers[level]);
+    return Math.max(16, budget);
+  }
+
+  private shouldRenderParticles() {
+    return this.cachedSettings.graphics.showParticles && this.getAutoPerformanceLevel() < AUTO_PERFORMANCE_MAX_LEVEL;
+  }
+
+  private shouldRenderWeather() {
+    return this.cachedSettings.graphics.showWeather && this.getAutoPerformanceLevel() <= 2;
+  }
+
+  private getAdaptiveMapRenderIntervalMs() {
+    const level = this.getAutoPerformanceLevel();
+    if (level <= 0) return 0;
+    if (level === 1) return 180;
+    if (level === 2) return 300;
+    if (level === 3) return 450;
+    return 650;
+  }
+
+  private updateAutoPerformance(delta: number) {
+    const autoEnabled = this.isAutoPerformanceEnabled();
+    if (!autoEnabled || this.isMenuMode) {
+      if (this.autoPerformanceLevel !== 0) {
+        this.autoPerformanceLevel = 0;
+        this.applyPerformanceProfile(this.cachedSettings);
+      }
+      this.autoPerformanceFpsSum = 0;
+      this.autoPerformanceFpsSamples = 0;
+      this.autoPerformanceSampleWindowMs = 0;
+      this.autoPerformanceCooldownMs = 0;
+      return;
+    }
+
+    const fps = this.game?.loop?.actualFps ?? this.cachedSettings.graphics.targetFps ?? 60;
+    if (!Number.isFinite(fps) || fps <= 0) return;
+
+    this.autoPerformanceFpsSum += fps;
+    this.autoPerformanceFpsSamples += 1;
+    this.autoPerformanceSampleWindowMs += delta;
+    this.autoPerformanceCooldownMs = Math.max(0, this.autoPerformanceCooldownMs - delta);
+
+    if (this.autoPerformanceSampleWindowMs < 1100) return;
+
+    const sampleAvg = this.autoPerformanceFpsSum / Math.max(1, this.autoPerformanceFpsSamples);
+    const targetFps = Math.max(30, this.cachedSettings.graphics.targetFps || 60);
+    const aggression = this.getAutoPerformanceAggression();
+    const degradeRatio = 0.62 + aggression * 0.04;
+    const recoverRatio = Math.min(0.96, degradeRatio + 0.16);
+    const degradeThreshold = targetFps * degradeRatio;
+    const recoverThreshold = targetFps * recoverRatio;
+
+    let nextLevel = this.autoPerformanceLevel;
+    if (this.autoPerformanceCooldownMs <= 0) {
+      if (sampleAvg < degradeThreshold && nextLevel < AUTO_PERFORMANCE_MAX_LEVEL) {
+        nextLevel += 1;
+      } else if (sampleAvg > recoverThreshold && nextLevel > 0) {
+        nextLevel -= 1;
+      }
+    }
+
+    this.autoPerformanceFpsSum = 0;
+    this.autoPerformanceFpsSamples = 0;
+    this.autoPerformanceSampleWindowMs = 0;
+
+    if (nextLevel !== this.autoPerformanceLevel) {
+      const previousLevel = this.autoPerformanceLevel;
+      this.autoPerformanceLevel = nextLevel;
+      this.autoPerformanceCooldownMs = nextLevel > previousLevel ? 700 : 2000;
+      this.applyPerformanceProfile(this.cachedSettings);
+      if (this.currentMap) {
+        this.renderMap(this.currentMap);
+      }
+    }
+  }
+
+  private applyPerformanceProfile(settings: Settings) {
+    const autoLevel = this.getAutoPerformanceLevel();
+    const lowQuality = !settings.graphics.highQuality || autoLevel >= 2;
+    const particlesEnabled = settings.graphics.showParticles && autoLevel < AUTO_PERFORMANCE_MAX_LEVEL;
+
+    this.oilScannerIntervalMs = lowQuality ? 150 + autoLevel * 18 : 95;
+    this.rangeRingIntervalMs = lowQuality ? 110 + autoLevel * 14 : 70;
+    this.minimapDispatchIntervalMs = lowQuality ? 100 + autoLevel * 12 : 60;
 
     if (!particlesEnabled && this.motionTrailSegments.length > 0) {
       this.motionTrailSegments.forEach((segment) => segment.sprite.destroy());
@@ -266,10 +414,151 @@ export class MainScene extends Phaser.Scene {
   private useLightweightCombatFx() {
     const graphics = this.cachedSettings.graphics;
     const measuredFps = this.game?.loop?.actualFps ?? graphics.targetFps ?? 60;
+    const autoLevel = this.getAutoPerformanceLevel();
 
-    if (!graphics.showParticles) return true;
-    if (!graphics.highQuality) return true;
+    if (!this.shouldRenderParticles()) return true;
+    if (!graphics.highQuality || autoLevel >= 1) return true;
     return measuredFps > 0 && measuredFps < 48;
+  }
+
+  private getApproximateBuildingCount(): number {
+    if (!this.currentMap) return 0;
+    const islandBuildings = this.currentMap.islands.reduce((count, island) => count + island.buildings.length, 0);
+    const waterBuildings = (this.currentMap.waterBuildings || []).filter(building => this.isWaterBuildingVisibleToLocalPlayer(building)).length;
+    return islandBuildings + waterBuildings;
+  }
+
+  private isWaterBuildingVisibleToLocalPlayer(building: Building) {
+    if (building.type === 'naval_mine' && building.ownerId !== socket.id) {
+      return false;
+    }
+    return true;
+  }
+
+  private emitLagDiagnostic(detail: LagDiagnosticDetail) {
+    window.dispatchEvent(new CustomEvent('freeze-diagnostic', { detail }));
+  }
+
+  private maybeEmitLagDiagnostic(delta: number) {
+    if (this.isMenuMode) return;
+
+    const now = Date.now();
+    const frameGapMs = Math.max(0, Math.round(delta));
+    const snapshotAgeMs = this.lastUnitsSnapshotAt > 0 ? Math.max(0, now - this.lastUnitsSnapshotAt) : 0;
+    const frameHitchDetected = frameGapMs >= CLIENT_FREEZE_FRAME_MS;
+    const snapshotStallDetected = this.lastUnitsSnapshotAt > 0 && snapshotAgeMs >= CLIENT_SNAPSHOT_STALL_MS && this.currentUnits.length > 0;
+    const serverHeartbeatAgeMs = this.lastServerTickHealthAt > 0 ? Math.max(0, now - this.lastServerTickHealthAt) : null;
+    const serverLoadFactor = this.lastServerTickHealth?.loadFactor ?? null;
+    const serverTickMs = this.lastServerTickHealth?.smoothedTickMs ?? null;
+    const serverGateActive = !!this.lastServerTickHealth?.gateActive;
+    const serverStatus = this.lastServerTickHealth?.status ?? null;
+    const serverMatchState = this.lastServerTickHealth?.matchState ?? null;
+    const serverHeartbeatFresh = serverHeartbeatAgeMs !== null && serverHeartbeatAgeMs <= 2200;
+    const snapshotLikelyGate = snapshotStallDetected && serverGateActive;
+    const snapshotLikelyNetworkStall =
+      snapshotStallDetected &&
+      !snapshotLikelyGate &&
+      serverHeartbeatFresh &&
+      serverLoadFactor !== null &&
+      serverLoadFactor < 0.76;
+
+    if (!frameHitchDetected && !snapshotStallDetected) {
+      return;
+    }
+
+    if (now - this.lastLagDiagnosticAt < LAG_DIAGNOSTIC_COOLDOWN_MS) {
+      return;
+    }
+
+    const fps = Math.round(this.game?.loop?.actualFps ?? 0);
+    const memoryInfo = (performance as any).memory;
+    const memoryMb = memoryInfo ? Math.round(memoryInfo.usedJSHeapSize / 1048576) : null;
+    const projectileBurst = now - this.lastProjectileBurstAt <= 2000 ? this.lastProjectileBurstSize : 0;
+    const unitCount = this.currentUnits.length;
+    const buildingCount = this.getApproximateBuildingCount();
+
+    const reasons: string[] = [];
+    if (frameHitchDetected) {
+      reasons.push(`Frame hitch detected (${frameGapMs}ms frame gap).`);
+    }
+    if (snapshotStallDetected) {
+      if (snapshotLikelyGate) {
+        reasons.push(`Match start gate is active (${snapshotAgeMs}ms without unit snapshots).`);
+      } else if (snapshotLikelyNetworkStall) {
+        reasons.push(`Unit snapshot stream stalled for ${snapshotAgeMs}ms while host tick stayed healthy.`);
+      } else if (serverHeartbeatAgeMs !== null && serverHeartbeatAgeMs >= CLIENT_SNAPSHOT_STALL_MS) {
+        reasons.push(`No recent server heartbeat (${serverHeartbeatAgeMs}ms); host thread may be stalled.`);
+      } else {
+        reasons.push(`No fresh unit snapshots for ${snapshotAgeMs}ms.`);
+      }
+    }
+    if (unitCount >= 650) {
+      reasons.push(`High unit count in match (${unitCount}).`);
+    }
+    if (projectileBurst >= 90) {
+      reasons.push(`Projectile burst spike (${projectileBurst} projectiles in latest batch).`);
+    }
+    if (this.autoPerformanceLevel >= 3) {
+      reasons.push(`Auto performance already engaged at level ${this.autoPerformanceLevel}.`);
+    }
+    if (this.motionTrailSegments.length >= 180) {
+      reasons.push(`Heavy trail FX load (${this.motionTrailSegments.length} active trail segments).`);
+    }
+    if (memoryMb !== null && memoryMb >= 1700) {
+      reasons.push(`High memory pressure detected (${memoryMb}MB heap).`);
+    }
+
+    if (reasons.length === 0) {
+      reasons.push('Frame timing became unstable.');
+    }
+
+    const recommendations: string[] = [];
+    if (unitCount >= 650) {
+      recommendations.push('Reduce bot count or large infantry swarms in this match.');
+    }
+    if (projectileBurst >= 90) {
+      recommendations.push('Lower SFX/particles or keep Auto Performance Mode enabled.');
+    }
+    if (snapshotLikelyGate) {
+      recommendations.push('This is expected during the ready gate. Wait for all players to finish loading.');
+    } else if (snapshotLikelyNetworkStall) {
+      recommendations.push('Snapshot stream stalled even though server health is good. Rejoin or restart host networking.');
+    } else if (snapshotStallDetected) {
+      recommendations.push('Host simulation is overloaded or stalled. Let load settle, reduce bots, or restart match host.');
+    }
+    if (recommendations.length === 0) {
+      recommendations.push('Auto Performance Mode is reducing visual load to recover FPS.');
+    }
+
+    const severity: 'warning' | 'critical' =
+      frameGapMs >= CLIENT_FREEZE_CRITICAL_MS || snapshotAgeMs >= CLIENT_SNAPSHOT_CRITICAL_MS
+        ? 'critical'
+        : 'warning';
+
+    this.emitLagDiagnostic({
+      id: `${now}-${Math.round(Math.random() * 1000)}`,
+      severity,
+      reason: reasons[0],
+      reasons,
+      recommendations,
+      frameGapMs,
+      snapshotAgeMs,
+      fps,
+      autoPerformanceLevel: this.autoPerformanceLevel,
+      unitCount,
+      buildingCount,
+      projectileBurst,
+      memoryMb,
+      serverLoadFactor,
+      serverTickMs,
+      serverHeartbeatAgeMs,
+      serverGateActive,
+      serverStatus: serverStatus || undefined,
+      serverMatchState: serverMatchState || undefined,
+      emittedAt: now,
+    });
+
+    this.lastLagDiagnosticAt = now;
   }
 
   private rebuildBuildingRangeIndex() {
@@ -1262,21 +1551,15 @@ export class MainScene extends Phaser.Scene {
       .flatMap(island =>
         island.buildings.map(building => {
           const queue = building.recruitmentQueue?.[0];
-          const queueState = queue
-            ? `${queue.unitType}:${Math.round(queue.progress)}:${Math.round(queue.totalTime)}:${building.recruitmentQueue?.length || 0}`
-            : 'none';
+          const queueState = queue ? `${queue.unitType}:${building.recruitmentQueue?.length || 0}` : 'none';
           return [
             island.id,
             building.id,
             building.type,
             building.ownerId ?? island.ownerId ?? '',
-            Math.round(building.health),
-            Math.round(building.maxHealth),
             building.isConstructing ? 1 : 0,
-            Math.round(building.constructionProgress ?? 0),
             building.hasTesla ? 1 : 0,
-            Math.round(building.radiationStacks ?? 0),
-            Math.round(building.radiationUntil ?? 0),
+            Math.round(building.level ?? 1),
             queueState
           ].join(':');
         })
@@ -1287,9 +1570,7 @@ export class MainScene extends Phaser.Scene {
       .map(spot => {
         const building = spot.building;
         const queue = building?.recruitmentQueue?.[0];
-        const queueState = queue
-          ? `${queue.unitType}:${Math.round(queue.progress)}:${Math.round(queue.totalTime)}:${building?.recruitmentQueue?.length || 0}`
-          : 'none';
+        const queueState = queue ? `${queue.unitType}:${building?.recruitmentQueue?.length || 0}` : 'none';
 
         return [
           spot.id,
@@ -1297,12 +1578,8 @@ export class MainScene extends Phaser.Scene {
           spot.ownerId ?? '',
           building?.id ?? '',
           building?.type ?? '',
-          Math.round(building?.health ?? 0),
-          Math.round(building?.maxHealth ?? 0),
           building?.isConstructing ? 1 : 0,
-          Math.round(building?.constructionProgress ?? 0),
-          Math.round(building?.radiationStacks ?? 0),
-          Math.round(building?.radiationUntil ?? 0),
+          Math.round(building?.level ?? 1),
           queueState
         ].join(':');
       })
@@ -1315,12 +1592,8 @@ export class MainScene extends Phaser.Scene {
         building.ownerId ?? '',
         Math.round(building.x ?? 0),
         Math.round(building.y ?? 0),
-        Math.round(building.health),
-        Math.round(building.maxHealth),
         building.isConstructing ? 1 : 0,
-        Math.round(building.constructionProgress ?? 0),
-        Math.round(building.radiationStacks ?? 0),
-        Math.round(building.radiationUntil ?? 0)
+        Math.round(building.level ?? 1)
       ].join(':'))
       .join('|');
 
@@ -1330,9 +1603,7 @@ export class MainScene extends Phaser.Scene {
         bridge.type,
         bridge.nodeAId,
         bridge.nodeBId,
-        bridge.ownerId ?? '',
-        Math.round(bridge.health ?? 0),
-        Math.round(bridge.maxHealth ?? 0)
+        bridge.ownerId ?? ''
       ].join(':'))
       .join('|');
 
@@ -2239,6 +2510,7 @@ export class MainScene extends Phaser.Scene {
         settingsManager.off('change', onSettingsChange);
         socket.off('buildingDamaged', this.handleBuildingDamage);
         socket.off('economyBurst');
+        socket.off('serverTickHealth');
     });
 
     this.input.mouse!.disableContextMenu();
@@ -2351,6 +2623,12 @@ export class MainScene extends Phaser.Scene {
         this.cameraInitialized = false; // Reset camera so it centers on new base
         this.currentMapVersion = null; // Force map re-render
         this.currentMapStateSignature = null;
+        this.nextMapRenderAllowedAt = 0;
+        this.lastUnitsSnapshotAt = 0;
+        this.lastProjectileBurstAt = 0;
+        this.lastProjectileBurstSize = 0;
+        this.lastServerTickHealthAt = 0;
+        this.lastServerTickHealth = null;
         this.knownBuildingAudioState.clear();
         this.buildingAudioPrimed = false;
         this.goldSparkles = [];
@@ -2366,6 +2644,12 @@ export class MainScene extends Phaser.Scene {
         // handleGameStartCleanup(); // DISABLED: Causing resets on reconnect/sync
     });
 
+    const handleServerTickHealth = (data: ServerTickHealth) => {
+        this.lastServerTickHealthAt = Date.now();
+        this.lastServerTickHealth = data;
+    };
+    socket.on('serverTickHealth', handleServerTickHealth);
+
     socket.on('playersData', (players: Player[]) => {
       this.players.clear();
       players.forEach(p => this.players.set(p.id, p));
@@ -2376,7 +2660,7 @@ export class MainScene extends Phaser.Scene {
       }
     });
 
-            socket.on('mapData', (mapData: GameMap) => {
+    socket.on('mapData', (mapData: GameMap) => {
             const mapStateSignature = this.getMapStateSignature(mapData);
             const mapVersion = mapData.version;
             if (
@@ -2391,10 +2675,25 @@ export class MainScene extends Phaser.Scene {
                 this.syncBuildingPlacementAudio(mapData);
             }
 
+            if (this.isMenuMode) {
+                this.currentMapVersion = mapVersion || null;
+                this.currentMapStateSignature = mapStateSignature;
+                this.currentMap = mapData;
+                return;
+            }
+            const nowMs = Date.now();
+            const mapRenderIntervalMs = this.getAdaptiveMapRenderIntervalMs();
+            if (
+                mapRenderIntervalMs > 0 &&
+                nowMs < this.nextMapRenderAllowedAt
+            ) {
+                this.currentMap = mapData;
+                return;
+            }
             this.currentMapVersion = mapVersion || null;
             this.currentMapStateSignature = mapStateSignature;
             this.currentMap = mapData;
-            if (this.isMenuMode) return;
+            this.nextMapRenderAllowedAt = nowMs + mapRenderIntervalMs;
             this.renderMap(mapData);
             if (this.placementMode) {
                 const pointer = this.input.activePointer;
@@ -2454,19 +2753,23 @@ export class MainScene extends Phaser.Scene {
         });
 
     socket.on('unitsData', (units: Unit[]) => {
+      this.lastUnitsSnapshotAt = Date.now();
       // Audio Logic: Compare old units vs new units
       if (!this.isMenuMode) {
           const oldUnitIds = new Set(this.currentUnits.map(u => u.id));
           const newUnitIds = new Set(units.map(u => u.id));
           const recruitVolume = soundEffectsManager.getEffectVolume('recruit', 0.4);
+          const deathExplosionCap = [120, 90, 64, 32, 16][this.getAutoPerformanceLevel()];
+          let deathExplosionsSpawned = 0;
 
           // Check for Deaths (in old but not in new)
           this.currentUnits.forEach(u => {
               if (!newUnitIds.has(u.id)) {
                   // Unit died - Play Explosion
-                  // Only play if on screen or close? For now, global if not too spammy.
-                  // Or use createExplosion which handles sound + visual
-                  this.createExplosion(u.x, u.y, u.ownerId === socket.id ? 0x00ff00 : 0xff0000);
+                  if (deathExplosionsSpawned < deathExplosionCap) {
+                      this.createExplosion(u.x, u.y, u.ownerId === socket.id ? 0x00ff00 : 0xff0000);
+                      deathExplosionsSpawned += 1;
+                  }
               }
           });
 
@@ -2495,19 +2798,26 @@ export class MainScene extends Phaser.Scene {
           }
           const history = this.unitUpdates.get(u.id)!;
           history.push({ x: u.x, y: u.y, time: now });
-          if (history.length > 20) history.shift();
+          const maxHistorySamples = this.getAutoPerformanceLevel() >= 3 ? 8 : this.getAutoPerformanceLevel() >= 2 ? 12 : 20;
+          if (history.length > maxHistorySamples) history.shift();
       });
 
       this.renderUnits(units);
     });
 
     socket.on('projectile', (data: { attackerId?: string, x1: number, y1: number, x2: number, y2: number, type: string, speed: number, radius?: number }) => {
+        this.lastProjectileBurstAt = Date.now();
+        this.lastProjectileBurstSize = 1;
         this.handleProjectileEvent(data);
     });
 
     socket.on('projectilesBatch', (projectiles: { attackerId?: string, x1: number, y1: number, x2: number, y2: number, type: string, speed: number, radius?: number }[]) => {
+        this.lastProjectileBurstAt = Date.now();
+        this.lastProjectileBurstSize = projectiles.length;
         const lightweightFx = this.useLightweightCombatFx();
-        const maxVisualProjectiles = lightweightFx ? 28 : 80;
+        const autoLevel = this.getAutoPerformanceLevel();
+        const adaptiveCaps = [80, 62, 46, 32, 18];
+        const maxVisualProjectiles = Math.max(12, Math.min(adaptiveCaps[autoLevel], lightweightFx ? 28 : adaptiveCaps[autoLevel]));
         if (projectiles.length <= maxVisualProjectiles) {
             projectiles.forEach((projectile) => this.handleProjectileEvent(projectile));
             return;
@@ -3393,6 +3703,8 @@ export class MainScene extends Phaser.Scene {
 
 	      const dt = delta / 16.66; // Normalize to ~60FPS
 	      const dtSec = delta / 1000;
+      this.updateAutoPerformance(delta);
+      this.maybeEmitLagDiagnostic(delta);
 
 	      this.oilScannerAccumulatorMs += delta;
 	      if (this.oilScannerAccumulatorMs >= this.oilScannerIntervalMs) {
@@ -3409,10 +3721,25 @@ export class MainScene extends Phaser.Scene {
 
     // Unit Interpolation
       const renderTime = Date.now() - 100; // 100ms interpolation delay
+      const autoLevel = this.getAutoPerformanceLevel();
+      const worldView = this.cameras.main.worldView;
+      const cullOffscreenUnitUpdates = autoLevel >= 2;
+      const cullMargin = cullOffscreenUnitUpdates ? 280 : 0;
+      const offscreenStride = autoLevel >= 4 ? 5 : autoLevel >= 3 ? 4 : 3;
       
       this.currentUnits.forEach(unit => {
           const container = this.unitContainers.get(unit.id);
           if (!container) return;
+          if (cullOffscreenUnitUpdates) {
+              const isInExtendedView =
+                  unit.x >= worldView.x - cullMargin &&
+                  unit.x <= worldView.right + cullMargin &&
+                  unit.y >= worldView.y - cullMargin &&
+                  unit.y <= worldView.bottom + cullMargin;
+              if (!isInExtendedView && this.game.loop.frame % offscreenStride !== 0) {
+                  return;
+              }
+          }
 
           // 1. Client-Side Prediction Logic
           if (this.predictedMoves.has(unit.id)) {
@@ -3557,7 +3884,9 @@ export class MainScene extends Phaser.Scene {
       });
 
 	      const canRenderSkinTrails =
-	          this.cachedSettings.graphics.showParticles && this.game.loop.actualFps >= 28;
+	          this.shouldRenderParticles() &&
+	          this.getAutoPerformanceLevel() <= 2 &&
+	          this.game.loop.actualFps >= 28;
 	      if (canRenderSkinTrails) {
 	          this.syncUnitSkinTrails(time, delta);
 	          this.updateMotionTrailVisuals(time);
@@ -3570,11 +3899,24 @@ export class MainScene extends Phaser.Scene {
       this.currentUnits.forEach(unit => {
           const container = this.unitContainers.get(unit.id);
           if (!container) return;
+          if (cullOffscreenUnitUpdates) {
+              const isInExtendedView =
+                  unit.x >= worldView.x - cullMargin &&
+                  unit.x <= worldView.right + cullMargin &&
+                  unit.y >= worldView.y - cullMargin &&
+                  unit.y <= worldView.bottom + cullMargin;
+              if (!isInExtendedView && this.game.loop.frame % offscreenStride !== 0) {
+                  return;
+              }
+          }
           this.rotateUnitArt(container, this.getDesiredFacingAngle(unit), dtSec);
       });
 
+      const shouldThrottleAmbientUpdates =
+          this.getAutoPerformanceLevel() >= 3 && (this.game.loop.frame % 2 !== 0);
+
       // Tumbleweeds
-      this.tumbleweeds.forEach(t => {
+      if (!shouldThrottleAmbientUpdates) this.tumbleweeds.forEach(t => {
           t.sprite.x += t.dx * dt;
           t.sprite.y += t.dy * dt;
           t.sprite.rotation += 0.05 * dt;
@@ -3612,7 +3954,7 @@ export class MainScene extends Phaser.Scene {
       });
 
       // Weather Particles (Rain)
-      this.weatherParticles.forEach(p => {
+      if (!shouldThrottleAmbientUpdates) this.weatherParticles.forEach(p => {
           p.sprite.x += p.dx * dt;
           p.sprite.y += p.dy * dt;
           
@@ -3650,7 +3992,7 @@ export class MainScene extends Phaser.Scene {
       // Oil Animations
       const cycleTime = 5000;
       const activeTime = 3000;
-      this.oilAnimations.forEach(anim => {
+      if (!shouldThrottleAmbientUpdates) this.oilAnimations.forEach(anim => {
           // Skip if hidden
           const visuals = this.oilSpotVisuals.get(anim.id);
           if (visuals && !visuals.main.visible) {
@@ -3673,7 +4015,7 @@ export class MainScene extends Phaser.Scene {
           }
       });
 
-      this.goldSparkles.forEach(sparkle => {
+      if (!shouldThrottleAmbientUpdates) this.goldSparkles.forEach(sparkle => {
           sparkle.timer += delta * sparkle.speed;
           sparkle.sprite.setAlpha(0.35 + Math.sin(sparkle.timer * 0.004) * 0.35);
           sparkle.sprite.setScale(0.7 + Math.sin(sparkle.timer * 0.005) * 0.18);
@@ -3747,6 +4089,7 @@ export class MainScene extends Phaser.Scene {
       // Update Path Lines
       this.pathGraphics.clear();
       // Optimization: Only draw paths for selected units to save performance
+	      const pathDotStride = this.getAutoPerformanceLevel() >= 2 ? 2 : 1;
 	      if (this.selectedUnitIds.size > 0) {
 	          this.pathGraphics.fillStyle(0x00FF00, 0.5);
 	          this.selectedUnitIds.forEach(id => {
@@ -3762,7 +4105,7 @@ export class MainScene extends Phaser.Scene {
                       const dx = (to.x - from.x) / points;
                       const dy = (to.y - from.y) / points;
 
-                      for (let i = 0; i < points; i++) {
+                      for (let i = 0; i < points; i += pathDotStride) {
                           this.pathGraphics.fillCircle(from.x + dx * i, from.y + dy * i, 2);
                       }
                   }
@@ -3847,7 +4190,7 @@ export class MainScene extends Phaser.Scene {
         });
 
       // Visual feedback (Circle at target)
-	      if (this.cachedSettings.graphics.showParticles) {
+	      if (this.shouldRenderParticles()) {
           const circle = this.add.circle(x, y, 5, 0x00FF00);
           this.tweens.add({
               targets: circle,
@@ -4640,13 +4983,13 @@ export class MainScene extends Phaser.Scene {
 	      const graphicsSettings = this.cachedSettings.graphics;
        let numDetails = 0;
 
-       if (graphicsSettings.showParticles) {
+       if (this.shouldRenderParticles()) {
            const density = 0.002; // Base density
            const area = bounds.width * bounds.height; 
            numDetails = Math.floor(area * density);
            
            // Limit total particles based on settings
-           const maxParticles = graphicsSettings.maxParticles || 500;
+           const maxParticles = this.getEffectiveParticleBudget(graphicsSettings.maxParticles || 500);
            numDetails = Math.min(numDetails, maxParticles);
        }
  
@@ -4714,8 +5057,8 @@ export class MainScene extends Phaser.Scene {
       }
 
       // Tumbleweeds (Desert only)
-      if (island.type === 'desert' && graphicsSettings.showWeather) {
-          const maxP = graphicsSettings.maxParticles || 1000;
+      if (island.type === 'desert' && this.shouldRenderWeather()) {
+          const maxP = this.getEffectiveParticleBudget(graphicsSettings.maxParticles || 1000);
           // Calculate density-based count, but cap by global setting roughly?
           // User wants "only have those amounts". Let's assume maxParticles is GLOBAL limit.
           // But here we are iterating islands. We need local limit.
@@ -4745,9 +5088,9 @@ export class MainScene extends Phaser.Scene {
                    });
               }
           }
-      } else if (graphicsSettings.showWeather) {
+      } else if (this.shouldRenderWeather()) {
           // Rain (Non-Desert)
-          const maxP = graphicsSettings.maxParticles || 1000;
+          const maxP = this.getEffectiveParticleBudget(graphicsSettings.maxParticles || 1000);
           
           // Rain density
           const numDrops = Math.floor(island.radius / 5 * (maxP / 500)); 
@@ -4857,18 +5200,23 @@ export class MainScene extends Phaser.Scene {
                 // We store 'ping' as well so we can toggle it
                 this.oilSpotVisuals.set(spot.id, { main: circle, pulse: pulse, ping: ping || undefined });
                 
-                // Interaction: If hidden, DISABLE interaction initially
+                // Interaction: If hidden or already occupied, the oil spot itself should not steal
+                // hover/clicks from the actual rig or well rendered on top of it.
                 if (isHiddenSpot && !isRevealed) {
+                    circle.disableInteractive();
+                } else if (spot.occupiedBy) {
                     circle.disableInteractive();
                 } else {
                     // Use LOCAL coordinates (0,0) for the hit area, not World coordinates
                     circle.setInteractive(new Phaser.Geom.Circle(0, 0, spot.radius), Phaser.Geom.Circle.Contains);
                 }
 
-                circle.on('pointerover', () => {
-                    window.dispatchEvent(new CustomEvent('game-hover', { detail: { title: "Oil Spot", type: "Resource" } }));
-                });
-                circle.on('pointerout', () => window.dispatchEvent(new CustomEvent('game-hover', { detail: null })));
+                if (!spot.occupiedBy) {
+                    circle.on('pointerover', () => {
+                        window.dispatchEvent(new CustomEvent('game-hover', { detail: { title: "Oil Spot", type: "Resource" } }));
+                    });
+                    circle.on('pointerout', () => window.dispatchEvent(new CustomEvent('game-hover', { detail: null })));
+                }
 
                 if (spot.occupiedBy) {
                         const b = (spot as any).building;
@@ -4904,6 +5252,7 @@ export class MainScene extends Phaser.Scene {
         }
 
         (mapData.waterBuildings || []).forEach(building => {
+            if (!this.isWaterBuildingVisibleToLocalPlayer(building)) return;
             const bx = building.x || 0;
             const by = building.y || 0;
             const owner = building.ownerId ? this.players.get(building.ownerId) : undefined;
@@ -4915,8 +5264,12 @@ export class MainScene extends Phaser.Scene {
             bContainer.setDepth(this.getBuildingWorldDepth(building.type));
             this.islandsGroup.add(bContainer);
             this.syncRadiationBadge(bContainer, building.radiationStacks, -34, 0.92);
-            bContainer.setSize(24, 24);
-            bContainer.setInteractive();
+            const waterBuildingHitRadius =
+                building.type === 'oil_rig' ? 30 :
+                building.type === 'bridge_node' ? 20 :
+                building.type === 'naval_mine' ? 18 : 16;
+            bContainer.setSize(waterBuildingHitRadius * 2, waterBuildingHitRadius * 2);
+            bContainer.setInteractive(new Phaser.Geom.Circle(0, 0, waterBuildingHitRadius), Phaser.Geom.Circle.Contains);
 
             const isSelected = this.selectedNodeIds.has(building.id) || this.selectedBuildingIds.has(building.id);
             if (isSelected) {
@@ -4988,6 +5341,9 @@ export class MainScene extends Phaser.Scene {
                 this.selectedUnitIds.clear();
                 this.selectedNodeIds.clear();
                 this.selectedBuildingIds.add(building.id);
+                window.dispatchEvent(new CustomEvent('game-selection', {
+                    detail: { islandId: null, buildingId: building.id, buildingType: building.type }
+                }));
                 window.dispatchEvent(new CustomEvent('building-selection-changed', {
                     detail: { buildingIds: Array.from(this.selectedBuildingIds) }
                 }));
@@ -5426,6 +5782,11 @@ export class MainScene extends Phaser.Scene {
 	      const menuExplosionDensity = this.isMenuMode
 	          ? Math.max(0, Math.min(2, this.cachedSettings.graphics.menuExplosionDensity ?? 1))
 	          : 1;
+        const autoLevel = this.getAutoPerformanceLevel();
+        const inGameFxScale = this.shouldRenderParticles()
+            ? [1, 0.86, 0.66, 0.48, 0.3][autoLevel]
+            : 0.24;
+        const explosionDensity = this.isMenuMode ? menuExplosionDensity : inGameFxScale;
 
       if (this.isMenuMode && menuExplosionDensity <= 0) {
           return;
@@ -5434,7 +5795,7 @@ export class MainScene extends Phaser.Scene {
       // Play explosion sound
       const volume = soundEffectsManager.getEffectVolume(
           'explosion',
-          0.5 * (this.isMenuMode ? menuExplosionDensity : 1)
+          0.5 * explosionDensity
       );
       if (volume > 0) {
           try {
@@ -5448,14 +5809,14 @@ export class MainScene extends Phaser.Scene {
       }
       
       // Screen shake
-      this.cameras.main.shake(100, 0.005 * (this.isMenuMode ? menuExplosionDensity : 1));
+      this.cameras.main.shake(100, 0.005 * explosionDensity);
 
-      const baseRadius = this.isMenuMode ? 14 + menuExplosionDensity * 16 : 30;
-      const baseLife = this.isMenuMode ? 0.22 + menuExplosionDensity * 0.18 : 0.5;
+      const baseRadius = this.isMenuMode ? 14 + menuExplosionDensity * 16 : 12 + 18 * explosionDensity;
+      const baseLife = this.isMenuMode ? 0.22 + menuExplosionDensity * 0.18 : 0.2 + 0.32 * explosionDensity;
       this.menuExplosions.push({x, y, life: baseLife, maxLife: baseLife, color, radius: baseRadius});
 
-      const particleCount = this.isMenuMode ? Math.round(8 * menuExplosionDensity) : 8;
-      const scatterRange = this.isMenuMode ? 12 + menuExplosionDensity * 18 : 30;
+      const particleCount = this.isMenuMode ? Math.round(8 * menuExplosionDensity) : Math.max(2, Math.round(8 * explosionDensity));
+      const scatterRange = this.isMenuMode ? 12 + menuExplosionDensity * 18 : 12 + 20 * explosionDensity;
       for(let i=0; i<particleCount; i++) {
            const sparkLife = this.isMenuMode
                ? 0.12 + Math.random() * (0.14 + menuExplosionDensity * 0.12)

@@ -195,6 +195,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose, mapData }
                                     checked={settings.graphics.showWeather} 
                                     onChange={(v) => settingsManager.setGraphics('showWeather', v)} 
                                 />
+                                <Checkbox
+                                    label="Auto Performance Mode (FPS Saver)"
+                                    checked={settings.graphics.autoPerformanceMode ?? true}
+                                    onChange={(v) => settingsManager.setGraphics('autoPerformanceMode', v)}
+                                />
                             </div>
 
                             <div className="settings-panel-card settings-panel-card--stack">
@@ -212,6 +217,27 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose, mapData }
                                     />
                                 </div>
 
+                                {(settings.graphics.autoPerformanceMode ?? true) && (
+                                    <div className="settings-sub-section">
+                                        <div className="slider-header">
+                                            <span>Auto Performance Strength</span>
+                                            <span>{Math.round(settings.graphics.autoPerformanceAggression ?? 3)} / 5</span>
+                                        </div>
+                                        <input
+                                            type="range"
+                                            min="1"
+                                            max="5"
+                                            step="1"
+                                            value={Math.max(1, Math.min(5, Math.round(settings.graphics.autoPerformanceAggression ?? 3)))}
+                                            onChange={(e) => settingsManager.setGraphics('autoPerformanceAggression', parseInt(e.target.value))}
+                                            className="settings-range"
+                                        />
+                                        <div className="settings-warning-text">
+                                            Higher values react faster to FPS drops and cut soldier/projectile visuals more.
+                                        </div>
+                                    </div>
+                                )}
+
                                 <div className="settings-sub-section">
                                     <div className="slider-header">
                                         <span>Main Menu Bullets</span>
@@ -228,6 +254,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose, mapData }
                                             May impact performance at very high values.
                                         </div>
                                     )}
+                                    <div className="settings-warning-text">
+                                        Controls the total amount of lobby bullets and rockets together.
+                                    </div>
+                                </div>
+
+                                <div className="settings-sub-section">
+                                    <div className="slider-header">
+                                        <span>Main Menu Rockets</span>
+                                        <span>{Math.round(Math.max(0, Math.min(10000, settings.graphics.menuRocketMultiplierPercent ?? 100)))}%</span>
+                                    </div>
+                                    <input
+                                        type="range" min="0" max="10000" step="10"
+                                        value={Math.max(0, Math.min(10000, settings.graphics.menuRocketMultiplierPercent ?? 100))}
+                                        onChange={(e) => settingsManager.setGraphics('menuRocketMultiplierPercent', Math.max(0, Math.min(10000, parseInt(e.target.value))))}
+                                        className="settings-range"
+                                    />
+                                    <div className="settings-warning-text">
+                                        Adds extra rockets on top of the shared bullet chaos slider.
+                                    </div>
                                 </div>
 
                                 <div className="settings-sub-section">
@@ -246,6 +291,61 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose, mapData }
                                             Main menu explosion visuals are disabled.
                                         </div>
                                     )}
+                                    <div className="settings-warning-text">
+                                        Controls lobby blast size and overall impact intensity.
+                                    </div>
+                                </div>
+
+                                <div className="settings-sub-section">
+                                    <div className="slider-header">
+                                        <span>Main Menu Colour Variety</span>
+                                        <span>{Math.round(Math.max(0, Math.min(100, (settings.graphics.menuProjectileColorVariety ?? 0.85) * 100)))}%</span>
+                                    </div>
+                                    <input
+                                        type="range" min="0" max="1" step="0.01"
+                                        value={Math.max(0, Math.min(1, settings.graphics.menuProjectileColorVariety ?? 0.85))}
+                                        onChange={(e) => settingsManager.setGraphics('menuProjectileColorVariety', Math.max(0, Math.min(1, parseFloat(e.target.value))))}
+                                        className="settings-range"
+                                    />
+                                </div>
+
+                                <div className="settings-sub-section">
+                                    <div className="slider-header">
+                                        <span>Main Menu Material Variety</span>
+                                        <span>{Math.round(Math.max(0, Math.min(100, (settings.graphics.menuProjectileMaterialVariety ?? 0.8) * 100)))}%</span>
+                                    </div>
+                                    <input
+                                        type="range" min="0" max="1" step="0.01"
+                                        value={Math.max(0, Math.min(1, settings.graphics.menuProjectileMaterialVariety ?? 0.8))}
+                                        onChange={(e) => settingsManager.setGraphics('menuProjectileMaterialVariety', Math.max(0, Math.min(1, parseFloat(e.target.value))))}
+                                        className="settings-range"
+                                    />
+                                </div>
+
+                                <div className="settings-sub-section">
+                                    <div className="slider-header">
+                                        <span>Main Menu Size Variety</span>
+                                        <span>{Math.round(Math.max(0, Math.min(200, (settings.graphics.menuProjectileSizeVariance ?? 0.7) * 100)))}%</span>
+                                    </div>
+                                    <input
+                                        type="range" min="0" max="2" step="0.05"
+                                        value={Math.max(0, Math.min(2, settings.graphics.menuProjectileSizeVariance ?? 0.7))}
+                                        onChange={(e) => settingsManager.setGraphics('menuProjectileSizeVariance', Math.max(0, Math.min(2, parseFloat(e.target.value))))}
+                                        className="settings-range"
+                                    />
+                                </div>
+
+                                <div className="settings-sub-section">
+                                    <div className="slider-header">
+                                        <span>Main Menu Rocket Turn</span>
+                                        <span>{Math.round(Math.max(0, Math.min(250, (settings.graphics.menuRocketTurnStrength ?? 1.1) * 100)))}%</span>
+                                    </div>
+                                    <input
+                                        type="range" min="0" max="2.5" step="0.05"
+                                        value={Math.max(0, Math.min(2.5, settings.graphics.menuRocketTurnStrength ?? 1.1))}
+                                        onChange={(e) => settingsManager.setGraphics('menuRocketTurnStrength', Math.max(0, Math.min(2.5, parseFloat(e.target.value))))}
+                                        className="settings-range"
+                                    />
                                 </div>
 
                                 <div className="settings-sub-section">

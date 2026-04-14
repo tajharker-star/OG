@@ -1,8 +1,8 @@
 {
   "name": "conquerors-dominion-desktop",
   "version": "1.0.0",
-  "description": "Desktop wrapper for Conquerors: Dominion",
-  "main": "main.js",
+  "description": "Desktop wrapper for Conquerors: Domination",
+  "main": "main.cjs",
   "scripts": {
     "start": "electron .",
     "pack": "electron-builder --dir",
@@ -13,12 +13,14 @@
   "build": {
     "appId": "com.codyharker.conquerors",
     "mac": {
-      "category": "public.app-category.games"
+      "category": "public.app-category.games",
+      "icon": "build/icon.icns"
     },
     "directories": {
       "output": "dist"
     },
     "files": [
+      "main.cjs",
       "main.js",
       "preload.js",
       "loading.html",

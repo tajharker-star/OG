@@ -172,11 +172,21 @@ export function getUnitWeaponMuzzleOffset(type: RenderableUnitType | string) {
 
 const UNIT_ART_CACHE_VERSION = 64;
 
-const CACHED_HUMANOID_TEXTURE_TYPES = new Set<RenderableUnitType>([
+const CACHED_TEXTURE_TYPES = new Set<RenderableUnitType>([
   'soldier',
   'sniper',
   'rocketeer',
-  'builder'
+  'builder',
+  'tank',
+  'humvee',
+  'oil_seeker',
+  'missile_launcher',
+  'destroyer',
+  'pirate_ship',
+  'construction_ship',
+  'ferry',
+  'light_plane',
+  'heavy_plane',
 ]);
 
 const OUTLINE = 0x09131b;
@@ -547,7 +557,7 @@ export function createUnitArt(
 ): Phaser.GameObjects.Container {
   const renderMode = options.renderMode ?? 'full';
   if (
-    CACHED_HUMANOID_TEXTURE_TYPES.has(type as RenderableUnitType)
+    CACHED_TEXTURE_TYPES.has(type as RenderableUnitType)
   ) {
     return createCachedUnitArt(
       scene,

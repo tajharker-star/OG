@@ -85,6 +85,7 @@ const emitLobbySettingsToRoom = (roomId: string, gs: GameState) => {
 };
 
 const PORT = process.env.PORT || 3001;
+const HOST = process.env.HOST || '0.0.0.0';
 const ENABLE_HEARTBEAT_LOGS = process.env.ENABLE_HEARTBEAT_LOGS === '1';
 
 // Heartbeat / Connection Logging
@@ -479,7 +480,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('createCustomGame', (data: {
+    type CustomGameCreatePayload = {
         mapType: string;
         botCount: number;
         difficulty: number;
@@ -487,9 +488,14 @@ io.on('connection', (socket) => {
             gold?: number;
             oil?: number;
         };
-    }) => {
-        console.log('[Server] createCustomGame request:', data);
+        internalSingleplayer?: boolean;
+        source?: 'campaign' | 'custom' | 'singleplayer';
+    };
+
+    const createConfiguredGame = (data: CustomGameCreatePayload, sourceLabel: string) => {
+        console.log(`[Server] ${sourceLabel} request:`, data);
         const roomId = `custom_${socket.id}_${Date.now()}`;
+        const internalSingleplayer = Boolean(data.internalSingleplayer);
 
         // Create room with specific map type
         const requestedMapType = data.mapType || 'random';
@@ -497,6 +503,7 @@ io.on('connection', (socket) => {
         // PRE-CREATE room in a non-playing state so the host does not get an HQ
         // on the temporary placeholder map before the real match map is generated.
         const gs = getOrCreateRoom(roomId, requestedMapType);
+        gs.setRuntimeMode(internalSingleplayer ? 'internal_singleplayer' : 'networked');
         gs.status = 'starting';
         gs.requiredPlayers = 1;
 
@@ -576,7 +583,7 @@ io.on('connection', (socket) => {
             gs.armHumanReadyBotStartGate();
 
             // Broadcast Start
-            console.log(`[CustomGame] Broadcast Start to ${roomId}`);
+            console.log(`[CustomGame] Broadcast Start to ${roomId} (${internalSingleplayer ? 'internal_singleplayer' : 'networked'})`);
             // Explicitly emit to the socket FIRST to ensure it gets it regardless of join status
             socket.emit('gameStatus', 'playing');
             socket.emit('joinedRoom', roomId);
@@ -592,6 +599,18 @@ io.on('connection', (socket) => {
             io.to(roomId).emit('playersData', gs.getPlayersSnapshot(true));
             gs.emitHumanHqStatuses(io);
         }
+    };
+
+    socket.on('createCustomGame', (data: CustomGameCreatePayload) => {
+        createConfiguredGame(data, 'createCustomGame');
+    });
+
+    socket.on('createSoloGame', (data: CustomGameCreatePayload) => {
+        createConfiguredGame({
+            ...data,
+            internalSingleplayer: true,
+            source: data.source || 'singleplayer',
+        }, 'createSoloGame');
     });
 
     socket.on('useAbility', (data: { unitId: string, ability: string }) => {
@@ -927,6 +946,6 @@ io.on('connection', (socket) => {
     });
 });
 
-httpServer.listen(Number(PORT), '0.0.0.0', () => {
+httpServer.listen(Number(PORT), HOST, () => {
     runtimeLog(`Server is running on port ${PORT}`);
 });

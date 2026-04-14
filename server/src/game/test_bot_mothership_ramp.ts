@@ -36,6 +36,25 @@ function addBuilding(island: Island, type: string, ownerId: string, x: number, y
     } as any);
 }
 
+function addUnit(gameState: GameState, ownerId: string, type: string, x: number, y: number, id: string) {
+    gameState.units.push({
+        id,
+        ownerId,
+        type,
+        x,
+        y,
+        health: 1000,
+        maxHealth: 1000,
+        speed: 0,
+        damage: 0,
+        range: 0,
+        fireRate: 1000,
+        status: 'idle',
+        cargo: [],
+        recruitmentQueue: []
+    } as any);
+}
+
 function buildScenario(botLevel: number, airBaseCount: number, phaseStartOffsetMs: number) {
     const playerId = `bot_${botLevel}`;
     const island = createIsland(`island_${botLevel}`, 640, 420, 220, playerId);
@@ -85,6 +104,12 @@ function buildScenario(botLevel: number, airBaseCount: number, phaseStartOffsetM
 function countQueuedType(island: Island, type: string): number {
     return island.buildings.reduce((count, building) => {
         return count + (building.recruitmentQueue || []).filter(entry => entry.unitType === type).length;
+    }, 0);
+}
+
+function countUnitQueueType(gameState: GameState, type: string): number {
+    return gameState.units.reduce((count, unit: any) => {
+        return count + ((unit.recruitmentQueue || []).filter((entry: any) => entry.unitType === type).length);
     }, 0);
 }
 
@@ -168,6 +193,62 @@ function main() {
     assert(level10QueuedMotherships >= 2, 'level 10 bots should queue multiple motherships once mid-game oil production is online');
     assert(airBasesWithMothershipQueue >= 2, 'level 10 bots should spread mothership production across dedicated air bases');
 
+    const priorityLevel9 = buildScenario(9, 2, 4 * 60 * 1000);
+    const level9Islands = priorityLevel9.gameState.map.islands.filter(island => island.ownerId === priorityLevel9.playerId);
+    const level9Units = priorityLevel9.gameState.units.filter(unit => unit.ownerId === priorityLevel9.playerId);
+    priorityLevel9.bot.manageAirStrategy(
+        priorityLevel9.gameState,
+        priorityLevel9.gameState.players.get(priorityLevel9.playerId)!,
+        level9Islands,
+        level9Units
+    );
+
+    const level9QueuedMotherships = countQueuedType(priorityLevel9.island, 'mothership');
+    const level9QueuedLightPlanes = countQueuedType(priorityLevel9.island, 'light_plane');
+    const level9QueuedHeavyPlanes = countQueuedType(priorityLevel9.island, 'heavy_plane');
+    const level9QueuedCarriers = countQueuedType(priorityLevel9.island, 'aircraft_carrier');
+    assert(level9QueuedMotherships >= 1, 'level 9 bots should queue motherships as a mid-game priority once oil and air are online');
+    assert(level9QueuedLightPlanes === 0, 'level 9 bots should preserve oil instead of queueing light planes while motherships are still below target');
+    assert(level9QueuedHeavyPlanes === 0, 'level 9 bots should preserve oil instead of queueing heavy planes while motherships are still below target');
+    assert(level9QueuedCarriers === 0, 'level 9 bots should not queue carriers ahead of their first mothership');
+    assert(priorityLevel9.bot.debugState.airStrategy.highTierMothershipPriorityMode === true, 'level 9 air strategy should report high-tier mothership priority mode');
+
+    const priorityLevel10 = buildScenario(10, 3, 4 * 60 * 1000);
+    const level10PriorityIslands = priorityLevel10.gameState.map.islands.filter(island => island.ownerId === priorityLevel10.playerId);
+    const level10PriorityUnits = priorityLevel10.gameState.units.filter(unit => unit.ownerId === priorityLevel10.playerId);
+    priorityLevel10.bot.manageAirStrategy(
+        priorityLevel10.gameState,
+        priorityLevel10.gameState.players.get(priorityLevel10.playerId)!,
+        level10PriorityIslands,
+        level10PriorityUnits
+    );
+
+    const level10QueuedLightPlanes = countQueuedType(priorityLevel10.island, 'light_plane');
+    const level10QueuedHeavyPlanes = countQueuedType(priorityLevel10.island, 'heavy_plane');
+    const level10QueuedCarriers = countQueuedType(priorityLevel10.island, 'aircraft_carrier');
+    assert(level10QueuedLightPlanes === 0, 'level 10 bots should not leak oil into light planes while chasing mothership targets');
+    assert(level10QueuedHeavyPlanes === 0, 'level 10 bots should not leak oil into heavy planes while chasing mothership targets');
+    assert(level10QueuedCarriers === 0, 'level 10 bots should not queue carriers before their first mothership is established');
+    assert(priorityLevel10.bot.debugState.airStrategy.highTierMothershipPriorityMode === true, 'level 10 air strategy should report high-tier mothership priority mode');
+
+    const overflowScenario = buildScenario(10, 3, 8 * 60 * 1000);
+    addUnit(overflowScenario.gameState, overflowScenario.playerId, 'mothership', 620, 420, 'overflow_ms_1');
+    addUnit(overflowScenario.gameState, overflowScenario.playerId, 'mothership', 680, 420, 'overflow_ms_2');
+    addUnit(overflowScenario.gameState, overflowScenario.playerId, 'mothership', 650, 470, 'overflow_ms_3');
+    overflowScenario.gameState.players.get(overflowScenario.playerId)!.resources = { gold: 30000, oil: 6000 };
+    const overflowIslands = overflowScenario.gameState.map.islands.filter(island => island.ownerId === overflowScenario.playerId);
+    const overflowUnits = overflowScenario.gameState.units.filter(unit => unit.ownerId === overflowScenario.playerId);
+    overflowScenario.bot.manageAirStrategy(
+        overflowScenario.gameState,
+        overflowScenario.gameState.players.get(overflowScenario.playerId)!,
+        overflowIslands,
+        overflowUnits
+    );
+
+    const queuedAlienScouts = countUnitQueueType(overflowScenario.gameState, 'alien_scout');
+    const queuedHeavyAliens = countUnitQueueType(overflowScenario.gameState, 'heavy_alien');
+    assert(queuedAlienScouts + queuedHeavyAliens >= 1, 'high-tier bots with 3 motherships and >1k oil should spend overflow on alien offspring air units');
+
     console.log(JSON.stringify({
         savingsIntervals,
         allLevelsLate,
@@ -180,6 +261,25 @@ function main() {
         level10: {
             queuedMothershipsMid: level10QueuedMotherships,
             airBasesWithMothershipQueue
+        },
+        priorityFocus: {
+            level9: {
+                queuedMotherships: level9QueuedMotherships,
+                queuedLightPlanes: level9QueuedLightPlanes,
+                queuedHeavyPlanes: level9QueuedHeavyPlanes,
+                queuedCarriers: level9QueuedCarriers,
+                highTierMothershipPriorityMode: priorityLevel9.bot.debugState.airStrategy.highTierMothershipPriorityMode
+            },
+            level10: {
+                queuedLightPlanes: level10QueuedLightPlanes,
+                queuedHeavyPlanes: level10QueuedHeavyPlanes,
+                queuedCarriers: level10QueuedCarriers,
+                highTierMothershipPriorityMode: priorityLevel10.bot.debugState.airStrategy.highTierMothershipPriorityMode
+            }
+        },
+        overflowSpend: {
+            queuedAlienScouts,
+            queuedHeavyAliens
         }
     }, null, 2));
 }

@@ -50,6 +50,33 @@ type PerfProfileSample = {
     connectionState: ConnectionState;
 };
 
+type LagDiagnosticDetail = {
+    id: string;
+    severity: 'warning' | 'critical';
+    reason: string;
+    reasons: string[];
+    recommendations: string[];
+    frameGapMs: number;
+    snapshotAgeMs: number;
+    fps: number;
+    autoPerformanceLevel: number;
+    unitCount: number;
+    buildingCount: number;
+    projectileBurst: number;
+    memoryMb: number | null;
+    serverLoadFactor?: number | null;
+    serverTickMs?: number | null;
+    serverHeartbeatAgeMs?: number | null;
+    serverGateActive?: boolean;
+    serverStatus?: string;
+    serverMatchState?: string;
+    emittedAt: number;
+};
+
+type LagDiagnosticToast = LagDiagnosticDetail & {
+    pingMs: number;
+};
+
 type LobbyInvitePanelKey = 'steam' | 'access' | 'diagnostics';
 
 interface ChatMessage {
@@ -620,6 +647,11 @@ export const GameUI: React.FC<GameUIProps> = ({
     const [ping, setPing] = useState(0);
     const [fps, setFps] = useState(60);
     const [memory, setMemory] = useState(0);
+    const [lagDiagnosticToast, setLagDiagnosticToast] = useState<LagDiagnosticToast | null>(null);
+    const lagDiagnosticDismissTimeoutRef = useRef<number | null>(null);
+    const pingRef = useRef(0);
+    const fpsRef = useRef(60);
+    const memoryRef = useRef(0);
 
     // Multiplayer Lobby State
     const [gameStatus, setGameStatus] = useState<'waiting' | 'voting' | 'playing'>(initialGameStatus || 'waiting');
@@ -675,6 +707,46 @@ export const GameUI: React.FC<GameUIProps> = ({
     useEffect(() => {
         window.dispatchEvent(new CustomEvent('toggle-debug-view', { detail: { show: showDebug } }));
     }, [showDebug]);
+
+    useEffect(() => {
+        pingRef.current = ping;
+        fpsRef.current = fps;
+        memoryRef.current = memory;
+    }, [ping, fps, memory]);
+
+    useEffect(() => {
+        const handleLagDiagnostic = (event: Event) => {
+            const customEvent = event as CustomEvent<LagDiagnosticDetail>;
+            const detail = customEvent.detail;
+            if (!detail) return;
+
+            const toast: LagDiagnosticToast = {
+                ...detail,
+                pingMs: pingRef.current > 0 ? pingRef.current : 0,
+                fps: detail.fps > 0 ? detail.fps : fpsRef.current,
+                memoryMb: detail.memoryMb ?? (memoryRef.current > 0 ? memoryRef.current : null),
+            };
+            setLagDiagnosticToast(toast);
+
+            if (lagDiagnosticDismissTimeoutRef.current !== null) {
+                window.clearTimeout(lagDiagnosticDismissTimeoutRef.current);
+            }
+            lagDiagnosticDismissTimeoutRef.current = window.setTimeout(() => {
+                setLagDiagnosticToast(null);
+                lagDiagnosticDismissTimeoutRef.current = null;
+            }, 12000);
+        };
+
+        window.addEventListener('freeze-diagnostic', handleLagDiagnostic as EventListener);
+
+        return () => {
+            window.removeEventListener('freeze-diagnostic', handleLagDiagnostic as EventListener);
+            if (lagDiagnosticDismissTimeoutRef.current !== null) {
+                window.clearTimeout(lagDiagnosticDismissTimeoutRef.current);
+                lagDiagnosticDismissTimeoutRef.current = null;
+            }
+        };
+    }, []);
 
     useEffect(() => {
         const handleCapturedKeyDown = (event: KeyboardEvent) => {
@@ -1166,7 +1238,7 @@ export const GameUI: React.FC<GameUIProps> = ({
                 player: false,
                 baseVisible: false,
                 hqConfirmed: false,
-                ping: false,
+                ping: isLocalMode,
                 fps: false
             });
             matchLoadStartedAtRef.current = Date.now();
@@ -1193,7 +1265,7 @@ export const GameUI: React.FC<GameUIProps> = ({
             setLobbyLoadChecks({
                 connection: lobbyConnectionReady,
                 players: playersReady,
-                ping: false,
+                ping: isLocalMode,
                 fps: false
             });
             lobbyLoadStartedAtRef.current = Date.now();
@@ -1276,6 +1348,17 @@ export const GameUI: React.FC<GameUIProps> = ({
 
     useEffect(() => {
         if (ping <= 0) return;
+        if (isLocalMode) {
+            if (isLobbyLoading) {
+                setLobbyLoadChecks(prev => (prev.ping ? prev : { ...prev, ping: true }));
+            }
+
+            if (isMatchLoading) {
+                setMatchLoadChecks(prev => (prev.ping ? prev : { ...prev, ping: true }));
+            }
+            return;
+        }
+
         const updated = [...pingSamplesRef.current.slice(-(PERF_SAMPLE_LIMIT - 1)), ping];
         pingSamplesRef.current = updated;
         const pingReady = isPingStable(updated);
@@ -1293,7 +1376,7 @@ export const GameUI: React.FC<GameUIProps> = ({
                 return { ...prev, ping: pingReady };
             });
         }
-    }, [isLobbyLoading, isMatchLoading, ping]);
+    }, [isLobbyLoading, isLocalMode, isMatchLoading, ping]);
 
     useEffect(() => {
         if (fps <= 0) return;
@@ -1320,14 +1403,18 @@ export const GameUI: React.FC<GameUIProps> = ({
         if (!isLobbyLoading) return;
         const timer = window.setInterval(() => {
             const elapsed = Date.now() - lobbyLoadStartedAtRef.current;
-            const ready = lobbyLoadChecks.connection && lobbyLoadChecks.players && lobbyLoadChecks.ping && lobbyLoadChecks.fps;
+            const ready =
+                lobbyLoadChecks.connection &&
+                lobbyLoadChecks.players &&
+                (isLocalMode || lobbyLoadChecks.ping) &&
+                lobbyLoadChecks.fps;
             if ((ready && elapsed >= LOBBY_MIN_WARMUP_MS) || elapsed >= LOBBY_MAX_WARMUP_MS) {
                 setIsLobbyLoading(false);
             }
         }, 120);
 
         return () => window.clearInterval(timer);
-    }, [isLobbyLoading, lobbyLoadChecks]);
+    }, [isLobbyLoading, isLocalMode, lobbyLoadChecks]);
 
     useEffect(() => {
         if (!isMatchLoading) return;
@@ -1335,7 +1422,7 @@ export const GameUI: React.FC<GameUIProps> = ({
             const elapsed = Date.now() - matchLoadStartedAtRef.current;
             const ready =
                 isMatchCoreReady &&
-                matchLoadChecks.ping &&
+                (isLocalMode || matchLoadChecks.ping) &&
                 matchLoadChecks.fps;
             if (ready && elapsed >= MATCH_MIN_WARMUP_MS) {
                 setIsMatchLoading(false);
@@ -1351,7 +1438,7 @@ export const GameUI: React.FC<GameUIProps> = ({
         }, 120);
 
         return () => window.clearInterval(timer);
-    }, [isMatchCoreReady, isMatchLoading, matchLoadChecks]);
+    }, [isLocalMode, isMatchCoreReady, isMatchLoading, matchLoadChecks]);
 
     useEffect(() => {
         if (gameStatus !== 'playing' || !socket.connected || !isMatchCoreReady) return;
@@ -2416,15 +2503,43 @@ export const GameUI: React.FC<GameUIProps> = ({
         return null;
     }, [selectedUnitIds, units]);
 
-    const selectedBuildingItem = React.useMemo(() => {
-        if (selectedBuildingIds.length === 1 && mapData) {
-            for (const island of mapData.islands) {
-                const b = island.buildings.find(b => b.id === selectedBuildingIds[0]);
-                if (b) return { ...b, islandId: island.id };
+    const findBuildingById = React.useCallback((buildingId: string) => {
+        if (!mapData) return null;
+
+        for (const island of mapData.islands) {
+            const building = island.buildings.find(candidate => candidate.id === buildingId);
+            if (building) {
+                return { ...building, islandId: island.id, isWaterBuilding: false };
             }
         }
+
+        for (const building of mapData.waterBuildings || []) {
+            if (building.id === buildingId) {
+                return { ...building, islandId: null, isWaterBuilding: true };
+            }
+        }
+
+        for (const spot of mapData.oilSpots || []) {
+            const oilBuilding = (spot as any).building;
+            if (oilBuilding?.id === buildingId) {
+                return {
+                    ...oilBuilding,
+                    islandId: null,
+                    isWaterBuilding: oilBuilding.type === 'oil_rig',
+                    oilSpotId: spot.id
+                };
+            }
+        }
+
         return null;
-    }, [selectedBuildingIds, mapData]);
+    }, [mapData]);
+
+    const selectedBuildingItem = React.useMemo(() => {
+        if (selectedBuildingIds.length === 1 && mapData) {
+            return findBuildingById(selectedBuildingIds[0]);
+        }
+        return null;
+    }, [selectedBuildingIds, mapData, findBuildingById]);
 
     const selectedItems = React.useMemo(() => {
         const items: any[] = [];
@@ -2434,14 +2549,12 @@ export const GameUI: React.FC<GameUIProps> = ({
         });
         if (mapData) {
             selectedBuildingIds.forEach(id => {
-                for (const island of mapData.islands) {
-                    const b = island.buildings.find(b => b.id === id);
-                    if (b) { items.push({ ...b, category: 'building' }); break; }
-                }
+                const building = findBuildingById(id);
+                if (building) items.push({ ...building, category: 'building' });
             });
         }
         return items;
-    }, [selectedUnitIds, selectedBuildingIds, units, mapData]);
+    }, [selectedUnitIds, selectedBuildingIds, units, mapData, findBuildingById]);
 
     const isBuildingMine = selectedBuildingItem?.ownerId === socket.id;
     const isUnitMine = selectedUnitItem?.ownerId === socket.id;
@@ -3408,6 +3521,55 @@ export const GameUI: React.FC<GameUIProps> = ({
                     transition: 'box-shadow 0.1s linear'
                 }}
             />
+
+            {lagDiagnosticToast && (
+                <aside className={`lag-diagnostic-toast ${lagDiagnosticToast.severity === 'critical' ? 'is-critical' : ''}`}>
+                    <button
+                        type="button"
+                        className="lag-diagnostic-toast__close"
+                        onClick={() => {
+                            if (lagDiagnosticDismissTimeoutRef.current !== null) {
+                                window.clearTimeout(lagDiagnosticDismissTimeoutRef.current);
+                                lagDiagnosticDismissTimeoutRef.current = null;
+                            }
+                            setLagDiagnosticToast(null);
+                        }}
+                        aria-label="Dismiss lag diagnostic"
+                    >
+                        ×
+                    </button>
+                    <div className="lag-diagnostic-toast__label">
+                        {lagDiagnosticToast.severity === 'critical' ? 'Critical Freeze Diagnostic' : 'Lag Diagnostic'}
+                    </div>
+                    <div className="lag-diagnostic-toast__reason">{lagDiagnosticToast.reason}</div>
+                    <div className="lag-diagnostic-toast__metrics">
+                        <span>Frame {lagDiagnosticToast.frameGapMs}ms</span>
+                        {lagDiagnosticToast.snapshotAgeMs > 0 && <span>Snapshot {lagDiagnosticToast.snapshotAgeMs}ms</span>}
+                        <span>FPS {lagDiagnosticToast.fps}</span>
+                        <span>Ping {lagDiagnosticToast.pingMs > 0 ? `${lagDiagnosticToast.pingMs}ms` : '--'}</span>
+                        <span>Units {lagDiagnosticToast.unitCount}</span>
+                        <span>Buildings {lagDiagnosticToast.buildingCount}</span>
+                        <span>Auto L{lagDiagnosticToast.autoPerformanceLevel}</span>
+                        {typeof lagDiagnosticToast.serverLoadFactor === 'number' && (
+                            <span>Server Load {Math.round(lagDiagnosticToast.serverLoadFactor * 100)}%</span>
+                        )}
+                        {typeof lagDiagnosticToast.serverTickMs === 'number' && (
+                            <span>Server Tick {lagDiagnosticToast.serverTickMs}ms</span>
+                        )}
+                        {typeof lagDiagnosticToast.serverHeartbeatAgeMs === 'number' && (
+                            <span>Heartbeat {lagDiagnosticToast.serverHeartbeatAgeMs}ms</span>
+                        )}
+                        {lagDiagnosticToast.serverGateActive && (
+                            <span>Start Gate Active</span>
+                        )}
+                    </div>
+                    <div className="lag-diagnostic-toast__recommendations">
+                        {lagDiagnosticToast.recommendations.slice(0, 2).map((recommendation, index) => (
+                            <div key={`${lagDiagnosticToast.id}-recommendation-${index}`}>• {recommendation}</div>
+                        ))}
+                    </div>
+                </aside>
+            )}
 
             {/* Top Bar: Stats & Menu */}
             <div className="hud-top-bar">

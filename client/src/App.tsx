@@ -1,14 +1,7 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
-import { GameCanvas } from './components/GameCanvas';
-import { GameUI } from './components/GameUI';
-import { SettingsModal } from './components/SettingsModal';
+import { useState, useEffect, useMemo, useRef, lazy, Suspense } from 'react';
 import { Modal } from './components/Modal';
-import { ConnectionLostOverlay } from './components/ConnectionLostOverlay';
 import { LobbyLogo } from './components/LobbyLogo';
-import { PatchNotesModal } from './components/PatchNotesModal';
-import { StatisticsPanel } from './components/StatisticsPanel';
-import { SkinsPanel } from './components/SkinsPanel';
-import { LeaderboardsPanel } from './components/LeaderboardsPanel';
+import { LobbyBackdrop } from './components/LobbyBackdrop';
 import { socket, connectToServer, connectionManager } from './services/socket';
 import { steamService } from './services/steam';
 import { soundEffectsManager } from './audio/soundEffects';
@@ -37,21 +30,57 @@ import {
     TUTORIAL_MAP_OPTIONS,
     type TutorialMapType,
 } from './data/tutorialGuide';
-import {
-    createDefaultPlayerSkinProfile,
-    getUnlockedSkinIds,
-    normalizePlayerSkinProfile,
-    sanitizeSkinProfile,
-    type PlayerSkinProfile,
-    type SkinId,
-    type SkinTarget,
-} from './utils/playerSkins';
 import { buildLeaderboardUploadCandidates } from './utils/steamLeaderboards';
 import {
     createDefaultSteamMultiplayerDiagnostics,
     type SteamMultiplayerDiagnostics,
 } from './types/steamDiagnostics';
+import type {
+    PlayerSkinProfile,
+    SkinId,
+    SkinTarget,
+} from './utils/playerSkins';
 import './App.css';
+
+const LazyGameCanvas = lazy(async () => {
+    const module = await import('./components/GameCanvas');
+    return { default: module.GameCanvas };
+});
+
+const LazyGameUI = lazy(async () => {
+    const module = await import('./components/GameUI');
+    return { default: module.GameUI };
+});
+
+const LazySettingsModal = lazy(async () => {
+    const module = await import('./components/SettingsModal');
+    return { default: module.SettingsModal };
+});
+
+const LazyPatchNotesModal = lazy(async () => {
+    const module = await import('./components/PatchNotesModal');
+    return { default: module.PatchNotesModal };
+});
+
+const LazyStatisticsPanel = lazy(async () => {
+    const module = await import('./components/StatisticsPanel');
+    return { default: module.StatisticsPanel };
+});
+
+const LazyLeaderboardsPanel = lazy(async () => {
+    const module = await import('./components/LeaderboardsPanel');
+    return { default: module.LeaderboardsPanel };
+});
+
+const LazyConnectionLostOverlay = lazy(async () => {
+    const module = await import('./components/ConnectionLostOverlay');
+    return { default: module.ConnectionLostOverlay };
+});
+
+const LazySkinsPanel = lazy(async () => {
+    const module = await import('./components/SkinsPanel');
+    return { default: module.SkinsPanel };
+});
 
 const LOCAL_STATISTICS_BACKUP_KEY = 'ag_statistics_backup_v1';
 const LOCAL_ENGINE_CONNECT_ATTEMPT_TIMEOUT_MS = 20000;
@@ -67,6 +96,53 @@ const DEFAULT_TUTORIAL_MAP: TutorialMapType = 'desert';
 const DEVELOPER_SKIN_ALLOWED_NAMES = new Set(['cody harker', 'thecoadstar1234567890']);
 const DEVELOPER_SKIN_ALLOWED_OS_USERS = new Set(['codyharker']);
 const RANKED_QUICK_QUEUE_TYPE = 'ranked_quick_match';
+const DEFAULT_SKIN_PROFILE: PlayerSkinProfile = {
+    version: 1,
+    loadout: {
+        unitSkinId: 'default',
+        buildingSkinId: 'default',
+    },
+    earnedSeasonRewards: [],
+};
+const VALID_SKIN_IDS = new Set<SkinId>([
+    'default',
+    'ruby',
+    'gold',
+    'platinum',
+    'topaz',
+    'diamond',
+    'obsidian',
+    'godly',
+    'developer',
+]);
+const RANKED_SKIN_ID_SET = new Set<SkinId>([
+    'gold',
+    'platinum',
+    'topaz',
+    'diamond',
+    'obsidian',
+    'godly',
+]);
+const LEGACY_SKIN_ID_MAP: Record<string, SkinId> = {
+    gold_1: 'gold',
+    gold_2: 'gold',
+    gold_3: 'gold',
+    platinum_1: 'platinum',
+    platinum_2: 'platinum',
+    platinum_3: 'platinum',
+    topaz_1: 'topaz',
+    topaz_2: 'topaz',
+    topaz_3: 'topaz',
+    diamond_1: 'diamond',
+    diamond_2: 'diamond',
+    diamond_3: 'diamond',
+    obsidian_1: 'obsidian',
+    obsidian_2: 'obsidian',
+    obsidian_3: 'obsidian',
+    godly_1: 'godly',
+    godly_2: 'godly',
+    godly_3: 'godly',
+};
 
 type PendingSteamLobbyConfig = {
     lobbyVisibility: 'private' | 'friends' | 'public' | 'invisible';
@@ -105,6 +181,89 @@ const canUseDeveloperSkin = (steamIdentity?: { name?: string | null; steamId?: s
     const osUsername = getCurrentOsUsername();
     return !!osUsername && DEVELOPER_SKIN_ALLOWED_OS_USERS.has(osUsername);
 };
+
+const createDefaultPlayerSkinProfile = (): PlayerSkinProfile => ({
+    version: DEFAULT_SKIN_PROFILE.version,
+    loadout: { ...DEFAULT_SKIN_PROFILE.loadout },
+    earnedSeasonRewards: [],
+});
+
+const canonicalizeSkinId = (value: unknown): SkinId | null => {
+    if (typeof value !== 'string') {
+        return null;
+    }
+
+    const normalized = LEGACY_SKIN_ID_MAP[value] || value;
+    return VALID_SKIN_IDS.has(normalized as SkinId) ? (normalized as SkinId) : null;
+};
+
+const normalizePlayerSkinProfile = (value: unknown): PlayerSkinProfile => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return createDefaultPlayerSkinProfile();
+    }
+
+    const profile = value as Record<string, unknown>;
+    const rawLoadout = profile.loadout && typeof profile.loadout === 'object' && !Array.isArray(profile.loadout)
+        ? profile.loadout as Record<string, unknown>
+        : {};
+    const rawRewards = Array.isArray(profile.earnedSeasonRewards) ? profile.earnedSeasonRewards : [];
+
+    return {
+        version: typeof profile.version === 'number' && Number.isFinite(profile.version)
+            ? profile.version
+            : DEFAULT_SKIN_PROFILE.version,
+        loadout: {
+            unitSkinId: canonicalizeSkinId(rawLoadout.unitSkinId) || DEFAULT_SKIN_PROFILE.loadout.unitSkinId,
+            buildingSkinId: canonicalizeSkinId(rawLoadout.buildingSkinId) || DEFAULT_SKIN_PROFILE.loadout.buildingSkinId,
+        },
+        earnedSeasonRewards: Array.from(new Set(
+            rawRewards
+                .map((entry) => canonicalizeSkinId(entry))
+                .filter((entry): entry is SkinId => entry !== null && RANKED_SKIN_ID_SET.has(entry))
+        )),
+    };
+};
+
+const getUnlockedSkinIds = (
+    profile: PlayerSkinProfile,
+    unlockedAchievementCount: number,
+    totalAchievementCount: number,
+    hasDeveloperAccess: boolean,
+): Set<SkinId> => {
+    const unlocked = new Set<SkinId>(['default']);
+
+    if (hasDeveloperAccess) {
+        unlocked.add('developer');
+    }
+
+    profile.earnedSeasonRewards.forEach((skinId) => {
+        if (RANKED_SKIN_ID_SET.has(skinId)) {
+            unlocked.add(skinId);
+        }
+    });
+
+    if (totalAchievementCount > 0 && unlockedAchievementCount >= totalAchievementCount) {
+        unlocked.add('ruby');
+    }
+
+    return unlocked;
+};
+
+const sanitizeSkinProfile = (
+    profile: PlayerSkinProfile,
+    unlockedSkinIds: Set<SkinId>,
+): PlayerSkinProfile => ({
+    ...profile,
+    loadout: {
+        unitSkinId: unlockedSkinIds.has(profile.loadout.unitSkinId) ? profile.loadout.unitSkinId : 'default',
+        buildingSkinId: unlockedSkinIds.has(profile.loadout.buildingSkinId) ? profile.loadout.buildingSkinId : 'default',
+    },
+    earnedSeasonRewards: Array.from(new Set(
+        profile.earnedSeasonRewards
+            .map((skinId) => canonicalizeSkinId(skinId))
+            .filter((skinId): skinId is SkinId => skinId !== null && RANKED_SKIN_ID_SET.has(skinId))
+    )),
+});
 
 const getDefaultSettingsButtonPosition = () => ({
     x: SETTINGS_FLOAT_BUTTON_MARGIN,
@@ -428,7 +587,13 @@ const getCampaignCompletionHeading = (levelIndex: number) => {
 function App() {
     const [isPlaying, setIsPlaying] = useState(false);
     const [joinCode, setJoinCode] = useState('');
-    const ipc = (window as any).require ? (window as any).require('electron').ipcRenderer : null;
+    const electronRequire = typeof window !== 'undefined' ? (window as any).require : null;
+    const ipc = electronRequire ? electronRequire('electron').ipcRenderer : null;
+    const isElectronRuntime = Boolean((window as any).process?.versions?.electron)
+        || (
+            typeof navigator !== 'undefined' && /electron/i.test(navigator.userAgent)
+        )
+        || Boolean((window as any).api);
     const [lastJoinedRoom, setLastJoinedRoom] = useState<string | null>(null);
     const [gameStatus, setGameStatus] = useState<string>('waiting');
 
@@ -480,8 +645,9 @@ function App() {
     const [isDevBypass, setIsDevBypass] = useState(false);
     const localEngineUrlRef = useRef<string>('http://127.0.0.1:3001');
     const bootSplashReleasedRef = useRef(false);
+    const localEngineBootSequenceRef = useRef(0);
     const [isLocalEngineReady, setIsLocalEngineReady] = useState(false);
-    const [isLocalEngineBooting, setIsLocalEngineBooting] = useState(true);
+    const [isLocalEngineBooting, setIsLocalEngineBooting] = useState(false);
     const [localEngineBootError, setLocalEngineBootError] = useState<string | null>(null);
     const [steamError, setSteamError] = useState<string | null>(null);
     const [steamUser, setSteamUser] = useState<{ name: string, steamId: string } | null>(null);
@@ -628,6 +794,46 @@ function App() {
             // Keep the runtime position even if persistence is unavailable.
         }
     }, [settingsButtonPos]);
+
+    const requestLocalServerStart = async () => {
+        if (!ipc?.invoke) {
+            return true;
+        }
+
+        try {
+            const status = await ipc.invoke('local-server-start');
+            if (status?.port) {
+                localEngineUrlRef.current = `http://127.0.0.1:${status.port}`;
+            }
+
+            if (status?.success && status?.ready) {
+                return true;
+            }
+
+            console.warn('[App] Electron local-server-start returned a non-ready state.', status);
+            setLocalEngineBootError(status?.error || 'Local game engine failed to start.');
+            return false;
+        } catch (error) {
+            console.warn('[App] Failed to request local server start.', error);
+            setLocalEngineBootError(getErrorMessage(error));
+            return false;
+        }
+    };
+
+    const requestLocalServerStop = async () => {
+        if (!ipc?.invoke) {
+            return;
+        }
+
+        try {
+            const status = await ipc.invoke('local-server-stop');
+            if (status?.error) {
+                console.warn('[App] Electron local-server-stop returned a warning.', status);
+            }
+        } catch (error) {
+            console.warn('[App] Failed to request local server stop.', error);
+        }
+    };
 
     const waitForLocalServerReachability = async (maxWaitMs: number): Promise<boolean> => {
         const localEngineUrl = normalizeNetworkEndpoint(localEngineUrlRef.current);
@@ -2163,8 +2369,15 @@ function App() {
         delayMs: number = 750,
         maxWaitMs: number = INTERACTIVE_LOCAL_ENGINE_BOOT_BUDGET_MS
     ) => {
+        const bootSequence = localEngineBootSequenceRef.current + 1;
+        localEngineBootSequenceRef.current = bootSequence;
+
         if (isReadyOnEndpoint(localEngineUrlRef.current)) {
+            if (localEngineBootSequenceRef.current !== bootSequence) {
+                return false;
+            }
             setIsLocalEngineReady(true);
+            setIsLocalEngineBooting(false);
             setLocalEngineBootError(null);
             return true;
         }
@@ -2172,7 +2385,20 @@ function App() {
         setIsLocalEngineBooting(true);
         setLocalEngineBootError(null);
 
+        const started = await requestLocalServerStart();
+        if (!started) {
+            if (localEngineBootSequenceRef.current === bootSequence) {
+                setIsLocalEngineReady(false);
+                setIsLocalEngineBooting(false);
+            }
+            return false;
+        }
+
         const ready = await ensureLocalEngineReady(retries, delayMs, maxWaitMs);
+
+        if (localEngineBootSequenceRef.current !== bootSequence) {
+            return false;
+        }
 
         setIsLocalEngineReady(ready);
         setIsLocalEngineBooting(false);
@@ -2186,43 +2412,54 @@ function App() {
         return ready;
     };
 
+    const shutdownLocalEngine = () => {
+        localEngineBootSequenceRef.current += 1;
+
+        const localEngineUrl = normalizeNetworkEndpoint(localEngineUrlRef.current);
+        const connectionState = connectionManager.getState();
+        const connectionUrl = normalizeNetworkEndpoint(connectionState.url);
+        const socketUrl = normalizeNetworkEndpoint((socket as any).io?.uri);
+        const shouldDropConnection = Boolean(
+            localEngineUrl && (connectionUrl === localEngineUrl || socketUrl === localEngineUrl)
+        );
+
+        if (shouldDropConnection || connectionState.phase === 'CONNECTING' || connectionState.phase === 'HANDSHAKING') {
+            connectionManager.idle('Local engine parked while menu is idle.');
+        }
+
+        setIsLocalEngineBooting(false);
+        setIsLocalEngineReady(false);
+        setLocalEngineBootError(null);
+        void requestLocalServerStop();
+    };
+
     useEffect(() => {
-        let cancelled = false;
-
-        const prewarm = async () => {
-            setIsLocalEngineBooting(true);
-            setLocalEngineBootError(null);
-            emitBootStatus(
-                'Starting local command server...',
-                'Creating the local battlefield and stabilising multiplayer services.'
-            );
-
-            const ready = await ensureLocalEngineReady(8, 500, INITIAL_LOCAL_ENGINE_BOOT_BUDGET_MS);
-            if (cancelled) return;
-
-            setIsLocalEngineReady(ready);
-            setIsLocalEngineBooting(false);
-
-            if (!ready) {
-                setLocalEngineBootError('Local game engine failed to start during launch.');
-                emitBootStatus(
-                    'Startup completed with warnings.',
-                    'The menu will open now. You can retry the local engine from inside the game.'
-                );
-                releaseBootSplash(520);
-                return;
-            }
-
-            emitBootStatus(
-                'Command deck online.',
-                'Loading the menu and warming up the simulation.'
-            );
-            releaseBootSplash(420);
-        };
-
-        prewarm();
-        return () => { cancelled = true; };
+        emitBootStatus(
+            'Command deck online.',
+            'Main menu ready. Match services now load only when you open Campaign or Multiplayer.'
+        );
+        releaseBootSplash(260);
     }, []);
+
+    const shouldPrepareLocalEngine = menuView === 'campaign'
+        || menuView === 'multiplayer'
+        || menuView === 'host_public';
+
+    useEffect(() => {
+        if (!shouldPrepareLocalEngine || isLocalEngineReady || isLocalEngineBooting) {
+            return;
+        }
+
+        void bootstrapLocalEngine(8, 500, INITIAL_LOCAL_ENGINE_BOOT_BUDGET_MS);
+    }, [shouldPrepareLocalEngine, isLocalEngineReady, isLocalEngineBooting]);
+
+    useEffect(() => {
+        if (isPlaying || shouldPrepareLocalEngine) {
+            return;
+        }
+
+        shutdownLocalEngine();
+    }, [isPlaying, shouldPrepareLocalEngine]);
 
     const startCampaignLevel = async (levelIndex: number, tutorialMapOverride?: TutorialMapType) => {
         const level = CAMPAIGN_LEVELS[levelIndex];
@@ -2240,6 +2477,9 @@ function App() {
         }
         setCampaignLevel(levelIndex);
         setMatchStatsSource('campaign');
+
+        await leaveActiveSteamLobby();
+
         // Ensure the embedded local engine is ready.
         if (!(await bootstrapLocalEngine())) {
             alert("Failed to start the local game engine. Please restart the game.");
@@ -2254,11 +2494,12 @@ function App() {
         // Trigger Save
         triggerSave({ campaignLevel: levelIndex });
 
-        socket.emit('createCustomGame', {
+        socket.emit('createSoloGame', {
             mapType: selectedMapType,
             botCount: level.botCount,
             difficulty: level.difficulty,
-            startingResources: level.startingResources
+            startingResources: level.startingResources,
+            source: 'campaign',
         });
         setIsPlaying(true);
         matchStartedAtRef.current = Date.now();
@@ -2276,6 +2517,8 @@ function App() {
     };
 
     const startCustomGame = async () => {
+        await leaveActiveSteamLobby();
+
         // Optimistically set playing status to avoid lobby flash
         setGameStatus('playing');
         setIsCampaignMode(false);
@@ -2291,7 +2534,10 @@ function App() {
             return;
         }
 
-        socket.emit('createCustomGame', customConfig);
+        socket.emit('createSoloGame', {
+            ...customConfig,
+            source: 'custom',
+        });
         setIsPlaying(true);
         matchStartedAtRef.current = Date.now();
     };
@@ -2399,11 +2645,19 @@ function App() {
         || steamDiagnostics.events.length > 0
         || steamDiagnostics.route !== 'idle'
         || steamDiagnostics.flow !== 'idle';
+    const shouldRenderGameCanvas = !isElectronRuntime || isPlaying;
 
     return (
-        <div className="App">
-            <GameCanvas />
-            {/* GameCanvas always rendered in background */}
+        <div className={`App${isElectronRuntime ? ' App--electron' : ''}`}>
+            {shouldRenderGameCanvas && (
+                <Suspense fallback={null}>
+                    <LazyGameCanvas />
+                </Suspense>
+            )}
+
+            {isUIVisible && !isPlaying && !shouldRenderGameCanvas && (
+                <LobbyBackdrop electronSafe={isElectronRuntime} />
+            )}
 
             {/* Main Menu Layer */}
             {isUIVisible && !isPlaying && (!steamError || isDevBypass) && (
@@ -2437,17 +2691,17 @@ function App() {
                     </button>
 
                     <div className={`menu ${menuView === 'statistics' ? 'menu--statistics' : ''} ${menuView === 'skins' ? 'menu--skins' : ''} ${(menuView === 'multiplayer' || menuView === 'host_public') ? 'menu--multiplayer' : ''} ${menuView === 'leaderboards' ? 'menu--leaderboards' : ''}`}>
-                        <h1 className="menu-title-accessible">Conquerors: Dominion</h1>
-                        <LobbyLogo />
+                        <h1 className="menu-title-accessible">Conquerors: Domination</h1>
+                        <LobbyLogo performanceMode={isElectronRuntime} />
 
-                        {/* Prewarm the local engine before campaign/custom can start */}
-                        {isLocalEngineBooting && (
+                        {/* Match systems now spin up only after the player opens a mode that needs them. */}
+                        {shouldPrepareLocalEngine && isLocalEngineBooting && (
                             <div className="local-engine-loading" style={{ position: 'absolute', top: '10px', left: '50%', transform: 'translateX(-50%)', background: 'rgba(0,0,0,0.8)', padding: '10px 20px', borderRadius: '8px', border: '1px solid #444', zIndex: 1000, display: 'flex', alignItems: 'center', gap: '10px' }}>
                                 <div className="spinner" style={{ width: '20px', height: '20px', border: '2px solid rgba(255,255,255,0.3)', borderTopColor: '#fff', borderRadius: '50%', animation: 'spin 1s linear infinite' }}></div>
                                 <p style={{ margin: 0, fontSize: '14px', color: '#fff' }}>Preparing Local Game Engine...</p>
                             </div>
                         )}
-                        {!isLocalEngineBooting && !isLocalEngineReady && localEngineBootError && (
+                        {shouldPrepareLocalEngine && !isLocalEngineBooting && !isLocalEngineReady && localEngineBootError && (
                             <div style={{ marginTop: '10px', padding: '10px 12px', borderRadius: '8px', border: '1px solid #664', background: 'rgba(0,0,0,0.5)', color: '#f1d9aa', fontSize: '14px', textAlign: 'center' }}>
                                 <div style={{ marginBottom: '8px' }}>{localEngineBootError}</div>
                                 <button onClick={() => bootstrapLocalEngine(14, 750)} className="menu-btn small">Retry Engine Start</button>
@@ -2457,7 +2711,7 @@ function App() {
                     {menuView === 'main' && (
                         <div className="menu-column menu-main-actions">
                             <button onClick={() => setMenuView('multiplayer')} className="menu-btn menu-btn-main">Multiplayer</button>
-                            <button onClick={() => setMenuView('campaign')} className="menu-btn menu-btn-main" disabled={!isLocalEngineReady}>Campaign & Custom</button>
+                            <button onClick={() => setMenuView('campaign')} className="menu-btn menu-btn-main">Campaign & Custom</button>
                             <button onClick={() => setMenuView('skins')} className="menu-btn menu-btn-main">Skins</button>
                             <button onClick={() => setMenuView('statistics')} className="menu-btn menu-btn-main">Stats & Achievements</button>
                             <button onClick={() => setMenuView('leaderboards')} className="menu-btn menu-btn-main">Leaderboards</button>
@@ -2896,14 +3150,16 @@ function App() {
                     {menuView === 'statistics' && (
                         <div className="menu-column menu-column--statistics">
                             <h3 className="menu-section-title">Stats & Achievements</h3>
-                            <StatisticsPanel
-                                statistics={statistics}
-                                achievements={evaluatedAchievements}
-                                campaignLevel={campaignLevel}
-                                totalCampaignStages={STANDARD_CAMPAIGN_STAGE_COUNT}
-                                campaignProgressLabel={getCampaignProgressLabel(campaignLevel)}
-                                steamConnected={steamService.isInitialized}
-                            />
+                            <Suspense fallback={<div className="menu-panel-loading">Loading stats...</div>}>
+                                <LazyStatisticsPanel
+                                    statistics={statistics}
+                                    achievements={evaluatedAchievements}
+                                    campaignLevel={campaignLevel}
+                                    totalCampaignStages={STANDARD_CAMPAIGN_STAGE_COUNT}
+                                    campaignProgressLabel={getCampaignProgressLabel(campaignLevel)}
+                                    steamConnected={steamService.isInitialized}
+                                />
+                            </Suspense>
                             <button onClick={() => setMenuView('main')} className="menu-btn secondary">Back</button>
                         </div>
                     )}
@@ -2911,14 +3167,16 @@ function App() {
                     {menuView === 'skins' && (
                         <div className="menu-column menu-column--skins">
                             <h3 className="menu-section-title">Skins</h3>
-                            <SkinsPanel
-                                profile={skinsProfile}
-                                unlockedSkinIds={unlockedSkinIds}
-                                unlockedAchievementCount={unlockedAchievementCount}
-                                totalAchievementCount={totalAchievementCount}
-                                showDeveloperSkin={hasDeveloperSkinAccess}
-                                onEquip={handleEquipSkin}
-                            />
+                            <Suspense fallback={<div className="menu-panel-loading">Loading skins...</div>}>
+                                <LazySkinsPanel
+                                    profile={skinsProfile}
+                                    unlockedSkinIds={unlockedSkinIds}
+                                    unlockedAchievementCount={unlockedAchievementCount}
+                                    totalAchievementCount={totalAchievementCount}
+                                    showDeveloperSkin={hasDeveloperSkinAccess}
+                                    onEquip={handleEquipSkin}
+                                />
+                            </Suspense>
                             <button onClick={() => setMenuView('main')} className="menu-btn secondary">Back</button>
                         </div>
                     )}
@@ -2929,10 +3187,12 @@ function App() {
                             <p className="menu-section-copy">
                                 Live Steam-backed top 10 rankings plus your personal placement for each tracked mode.
                             </p>
-                            <LeaderboardsPanel
-                                steamConnected={Boolean(steamUser && steamService.isInitialized)}
-                                steamPersonaName={steamUser?.name}
-                            />
+                            <Suspense fallback={<div className="menu-panel-loading">Loading leaderboards...</div>}>
+                                <LazyLeaderboardsPanel
+                                    steamConnected={Boolean(steamUser && steamService.isInitialized)}
+                                    steamPersonaName={steamUser?.name}
+                                />
+                            </Suspense>
                             <button onClick={() => setMenuView('main')} className="menu-btn secondary">Back</button>
                         </div>
                     )}
@@ -3000,30 +3260,38 @@ function App() {
                 </div>
             </Modal>
 
-            <PatchNotesModal
-                isOpen={showPatchNotes}
-                onClose={() => setShowPatchNotes(false)}
-            />
+            {showPatchNotes && (
+                <Suspense fallback={null}>
+                    <LazyPatchNotesModal
+                        isOpen={showPatchNotes}
+                        onClose={() => setShowPatchNotes(false)}
+                    />
+                </Suspense>
+            )}
 
             {/* In-Game UI Layer - Keep mounted to preserve state, but hide if toggled/blocked */}
             <div style={{ display: (isUIVisible && isPlaying && (!steamError || isDevBypass)) ? 'block' : 'none' }}>
-                <GameUI
-                    onLeave={handleLeaveToMenu}
-                    roomId={lastJoinedRoom}
-                    initialGameStatus={gameStatus as 'waiting' | 'voting' | 'playing'}
-                    isLocalMode={isLocalMode}
-                    isDevBypass={isDevBypass}
-                    tutorialMode={isTutorialMode}
-                    tutorialMapType={selectedTutorialMap}
-                    onTutorialObjectivesCompleted={handleTutorialObjectivesCompleted}
-                    matchStatsSource={matchStatsSource}
-                    rankedMatch={isRankedMatch}
-                    currentRankedPoints={statistics.rankedProgress.points}
-                    steamLobbyId={steamLobbyId}
-                    steamLobbyRole={steamLobbyRole}
-                    steamMultiplayerDiagnostics={steamDiagnostics}
-                    onMatchResolved={handleMatchResolved}
-                />
+                {isPlaying && (
+                    <Suspense fallback={null}>
+                        <LazyGameUI
+                            onLeave={handleLeaveToMenu}
+                            roomId={lastJoinedRoom}
+                            initialGameStatus={gameStatus as 'waiting' | 'voting' | 'playing'}
+                            isLocalMode={isLocalMode}
+                            isDevBypass={isDevBypass}
+                            tutorialMode={isTutorialMode}
+                            tutorialMapType={selectedTutorialMap}
+                            onTutorialObjectivesCompleted={handleTutorialObjectivesCompleted}
+                            matchStatsSource={matchStatsSource}
+                            rankedMatch={isRankedMatch}
+                            currentRankedPoints={statistics.rankedProgress.points}
+                            steamLobbyId={steamLobbyId}
+                            steamLobbyRole={steamLobbyRole}
+                            steamMultiplayerDiagnostics={steamDiagnostics}
+                            onMatchResolved={handleMatchResolved}
+                        />
+                    </Suspense>
+                )}
 
                 {showCampaignModal && (
                     <Modal
@@ -3110,16 +3378,18 @@ function App() {
 
             {/* Connection Lost Overlay - Only block if we are actually in-game AND not in local mode */}
             {isUIVisible && isPlaying && !isLocalMode && !isDevBypass && (
-                <ConnectionLostOverlay
-                    onRetry={() => connectionManager.retry()}
-                    onMainMenu={() => {
-                        connectionManager.cancel();
-                        setIsPlaying(false);
-                        setMenuView('main');
-                        // Local storage skip if we want it to persist through reload
-                        window.location.reload();
-                    }}
-                />
+                <Suspense fallback={null}>
+                    <LazyConnectionLostOverlay
+                        onRetry={() => connectionManager.retry()}
+                        onMainMenu={() => {
+                            connectionManager.cancel();
+                            setIsPlaying(false);
+                            setMenuView('main');
+                            // Local storage skip if we want it to persist through reload
+                            window.location.reload();
+                        }}
+                    />
+                </Suspense>
             )}
 
             {/* Global Settings Button - Always in bottom left if UI is on */}
@@ -3136,7 +3406,9 @@ function App() {
                     </button>
 
                     {showSettings && (
-                        <SettingsModal onClose={() => setShowSettings(false)} mapData={null} />
+                        <Suspense fallback={null}>
+                            <LazySettingsModal onClose={() => setShowSettings(false)} mapData={null} />
+                        </Suspense>
                     )}
                 </>
             )}

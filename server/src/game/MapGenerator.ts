@@ -652,6 +652,15 @@ export class MapGenerator {
     }
 
     public static isPointInPolygon(x: number, y: number, points: { x: number, y: number }[]): boolean {
+        for (let i = 0; i < points.length; i++) {
+            const p1 = points[i];
+            const p2 = points[(i + 1) % points.length];
+            const closest = this.getClosestPointOnSegment(x, y, p1.x, p1.y, p2.x, p2.y);
+            if (Math.hypot(x - closest.x, y - closest.y) <= 1.5) {
+                return true;
+            }
+        }
+
         let inside = false;
         for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
             const xi = points[i].x, yi = points[i].y;

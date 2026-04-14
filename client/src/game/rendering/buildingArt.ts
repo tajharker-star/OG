@@ -40,6 +40,19 @@ export const BUILDING_PREVIEW_LABELS: Record<Building['type'], string> = {
   naval_mine: 'Naval Mine'
 };
 
+const BUILDING_ART_CACHE_VERSION = 1;
+
+function shouldCacheBuildingArt(type: Building['type'] | string, data?: Building) {
+  if (data?.isConstructing) return false;
+  if ((data?.recruitmentQueue?.length || 0) > 0) return false;
+  if (type === 'base' && data?.hasTesla) return false;
+  return !['repair_dock', 'oil_rig', 'naval_mine', 'oil_well'].includes(type);
+}
+
+function getBuildingTextureKey(type: Building['type'] | string, color: number) {
+  return `building-art:v${BUILDING_ART_CACHE_VERSION}:${type}:${color.toString(16)}`;
+}
+
 function mixColor(base: number, target: number, t: number) {
   const baseColor = Phaser.Display.Color.ValueToColor(base);
   const targetColor = Phaser.Display.Color.ValueToColor(target);
@@ -395,7 +408,7 @@ function addRecruitmentEffect(scene: Phaser.Scene, container: Phaser.GameObjects
   }
 }
 
-export function createBuildingArt(
+function createVectorBuildingArt(
   scene: Phaser.Scene,
   x: number,
   y: number,
@@ -591,19 +604,37 @@ export function createBuildingArt(
       repeat: -1
     });
   } else if (type === 'naval_mine') {
-    const wake = scene.add.ellipse(0, 8, 26, 10, 0x23415a, 0.45);
-    const buoy = scene.add.circle(0, 0, 9, hull);
-    const cap = scene.add.circle(0, -6, 4, accent);
-    const spike1 = scene.add.line(0, 0, 0, -11, 0, 11, trim);
-    const spike2 = scene.add.line(0, 0, -11, 0, 11, 0, trim);
-    const pulse = scene.add.circle(0, 0, 4, lighten(accent, 0.35), 0.7);
-    container.add([wake, buoy, cap, spike1, spike2, pulse]);
+    const wake = scene.add.ellipse(0, 11, 30, 12, 0x163247, 0.34);
+    const shadow = scene.add.ellipse(0, 6, 20, 8, 0x08131d, 0.42);
+    const shellOuter = scene.add.circle(0, 0, 11, darken(hull, 0.08));
+    const shellInner = scene.add.circle(0, 0, 8, hull);
+    const core = scene.add.circle(0, 0, 4.5, accent);
+    const spokes: Phaser.GameObjects.GameObject[] = [];
+    for (let index = 0; index < 8; index += 1) {
+      const angle = (Math.PI * 2 * index) / 8;
+      const spikeLength = index % 2 === 0 ? 8.5 : 6.5;
+      const spikeWidth = index % 2 === 0 ? 3.8 : 3;
+      const spike = scene.add.triangle(
+        Math.cos(angle) * 11.8,
+        Math.sin(angle) * 11.8,
+        -spikeLength, 0,
+        spikeLength * 0.15, -spikeWidth,
+        spikeLength * 0.15, spikeWidth,
+        trim,
+        0.96
+      );
+      spike.setRotation(angle);
+      spokes.push(spike);
+    }
+    const highlight = scene.add.ellipse(-3, -3, 7, 5, lighten(accent, 0.4), 0.82);
+    const pulse = scene.add.circle(0, 0, 5.5, lighten(accent, 0.35), 0.54);
+    container.add([wake, shadow, ...spokes, shellOuter, shellInner, core, highlight, pulse]);
     scene.tweens.add({
       targets: pulse,
-      alpha: 0.2,
-      scaleX: 1.5,
-      scaleY: 1.5,
-      duration: 700,
+      alpha: 0.12,
+      scaleX: 1.65,
+      scaleY: 1.65,
+      duration: 760,
       yoyo: true,
       repeat: -1
     });
@@ -701,4 +732,51 @@ export function createBuildingArt(
   addRecruitmentEffect(scene, container, type as Building['type'], accent, data);
 
   return container;
+}
+
+function createCachedBuildingArt(
+  scene: Phaser.Scene,
+  x: number,
+  y: number,
+  type: Building['type'] | string,
+  color: number
+) {
+  const key = getBuildingTextureKey(type, color);
+  if (!scene.textures.exists(key)) {
+    const tempContainer = createVectorBuildingArt(scene, 0, 0, type, color);
+    const bounds = tempContainer.getBounds();
+    const padding = 10;
+    const width = Math.max(40, Math.ceil(bounds.width + padding * 2));
+    const height = Math.max(40, Math.ceil(bounds.height + padding * 2));
+    const renderTexture = scene.make.renderTexture({ width, height }, false);
+    const drawX = width * 0.5 - bounds.centerX;
+    const drawY = height * 0.5 - bounds.centerY;
+
+    renderTexture.draw(tempContainer, drawX, drawY);
+    renderTexture.saveTexture(key);
+    renderTexture.destroy();
+    tempContainer.destroy();
+  }
+
+  const container = scene.add.container(x, y);
+  container.setData('buildingArtType', type);
+  const sprite = scene.add.image(0, 0, key);
+  sprite.setOrigin(0.5, 0.5);
+  container.add(sprite);
+  return container;
+}
+
+export function createBuildingArt(
+  scene: Phaser.Scene,
+  x: number,
+  y: number,
+  type: Building['type'] | string,
+  color: number,
+  data?: Building
+) {
+  if (shouldCacheBuildingArt(type, data)) {
+    return createCachedBuildingArt(scene, x, y, type, color);
+  }
+
+  return createVectorBuildingArt(scene, x, y, type, color, data);
 }

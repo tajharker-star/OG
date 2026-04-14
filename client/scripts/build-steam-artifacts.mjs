@@ -34,7 +34,12 @@ for (const dir of ["mac", "win-unpacked", "linux-unpacked"]) {
 for (const target of buildTargets) {
   console.log(`Building ${target.label} unpacked artifact...`);
 
-  const result = spawnSync(electronBuilderBin, target.args, {
+  const targetArgs =
+    target.expectedKey === "windows" && process.platform !== "win32"
+      ? [...target.args, "-c.win.signAndEditExecutable=false"]
+      : target.args;
+
+  const result = spawnSync(electronBuilderBin, targetArgs, {
     cwd: clientDir,
     env: process.env,
     stdio: "inherit",
