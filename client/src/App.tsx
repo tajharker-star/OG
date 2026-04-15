@@ -144,6 +144,317 @@ const LEGACY_SKIN_ID_MAP: Record<string, SkinId> = {
     godly_3: 'godly',
 };
 
+type LocalServerStatus = {
+    success?: boolean;
+    ready?: boolean;
+    stopped?: boolean;
+    managed?: boolean;
+    port?: number;
+    error?: string;
+    reason?: string;
+};
+
+type RendererManagedLocalServerState = {
+    process: any | null;
+    startPromise: Promise<LocalServerStatus> | null;
+    stopPromise: Promise<LocalServerStatus> | null;
+};
+
+const RENDERER_LOCAL_SERVER_PORT = 3001;
+const RENDERER_LOCAL_SERVER_STATE_KEY = '__agRendererLocalServerState';
+
+const getRendererRequire = () => {
+    if (typeof window === 'undefined') return null;
+    return (window as any).require ?? null;
+};
+
+const getRendererLocalServerState = (): RendererManagedLocalServerState | null => {
+    if (typeof window === 'undefined') return null;
+    const hostWindow = window as any;
+    if (!hostWindow[RENDERER_LOCAL_SERVER_STATE_KEY]) {
+        hostWindow[RENDERER_LOCAL_SERVER_STATE_KEY] = {
+            process: null,
+            startPromise: null,
+            stopPromise: null,
+        } satisfies RendererManagedLocalServerState;
+    }
+    return hostWindow[RENDERER_LOCAL_SERVER_STATE_KEY] as RendererManagedLocalServerState;
+};
+
+const isMissingIpcHandlerError = (error: unknown, channel: string) => {
+    const message = getErrorMessage(error);
+    return message.includes(`No handler registered for '${channel}'`);
+};
+
+const checkRendererLocalServerPort = async (port: number = RENDERER_LOCAL_SERVER_PORT): Promise<boolean> => {
+    const electronRequire = getRendererRequire();
+    if (!electronRequire) return false;
+
+    try {
+        const http = electronRequire('http');
+        return await new Promise<boolean>((resolve) => {
+            let settled = false;
+            const finish = (value: boolean) => {
+                if (settled) return;
+                settled = true;
+                resolve(value);
+            };
+
+            const request = http.get(`http://127.0.0.1:${port}`, (response: any) => {
+                response.resume?.();
+                finish(true);
+            });
+
+            request.setTimeout?.(900, () => {
+                request.destroy?.();
+                finish(false);
+            });
+            request.on('error', () => finish(false));
+        });
+    } catch {
+        return false;
+    }
+};
+
+const resolveRendererServerLaunchConfig = () => {
+    const electronRequire = getRendererRequire();
+    if (!electronRequire) {
+        return null;
+    }
+
+    try {
+        const fs = electronRequire('fs');
+        const path = electronRequire('path');
+        const resourcesPath = (window as any)?.process?.resourcesPath ?? '';
+        const cwd = (window as any)?.process?.cwd?.() ?? '';
+        const candidateServerPaths = [
+            path.join(resourcesPath, 'app', 'server', 'dist', 'index.js'),
+            path.join(resourcesPath, 'server', 'dist', 'index.js'),
+            path.join(cwd, 'server', 'dist', 'index.js'),
+            path.join(cwd, '..', 'server', 'dist', 'index.js'),
+        ];
+        const candidateClientDistDirs = [
+            path.join(resourcesPath, 'app', 'client', 'dist'),
+            path.join(resourcesPath, 'client', 'dist'),
+            path.join(cwd, 'client', 'dist'),
+            path.join(cwd, '..', 'client', 'dist'),
+        ];
+
+        const serverPath = candidateServerPaths.find((candidate: string) => fs.existsSync(candidate));
+        if (!serverPath) {
+            return null;
+        }
+
+        const clientDistDir = candidateClientDistDirs.find((candidate: string) => fs.existsSync(candidate)) ?? path.join(path.dirname(path.dirname(serverPath)), 'client', 'dist');
+        return {
+            serverPath,
+            cwd: path.dirname(path.dirname(serverPath)),
+            clientDistDir,
+        };
+    } catch {
+        return null;
+    }
+};
+
+const ensureRendererManagedLocalServerRunning = async (): Promise<LocalServerStatus> => {
+    const state = getRendererLocalServerState();
+    const electronRequire = getRendererRequire();
+    if (!state || !electronRequire) {
+        return {
+            success: false,
+            ready: false,
+            port: RENDERER_LOCAL_SERVER_PORT,
+            error: 'Renderer local-server fallback is unavailable in this environment.',
+        };
+    }
+
+    if (await checkRendererLocalServerPort(RENDERER_LOCAL_SERVER_PORT)) {
+        return {
+            success: true,
+            ready: true,
+            port: RENDERER_LOCAL_SERVER_PORT,
+            managed: Boolean(state.process && !state.process.killed),
+        };
+    }
+
+    if (state.startPromise) {
+        return state.startPromise;
+    }
+
+    state.startPromise = (async () => {
+        const config = resolveRendererServerLaunchConfig();
+        if (!config) {
+            return {
+                success: false,
+                ready: false,
+                port: RENDERER_LOCAL_SERVER_PORT,
+                error: 'Could not locate the local match engine files from the renderer fallback.',
+            };
+        }
+
+        try {
+            const { fork } = electronRequire('child_process');
+            const child = fork(config.serverPath, [], {
+                stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+                cwd: config.cwd,
+                env: {
+                    ...((window as any)?.process?.env ?? {}),
+                    PORT: String(RENDERER_LOCAL_SERVER_PORT),
+                    HEADLESS: 'true',
+                    CLIENT_DIST_DIR: config.clientDistDir,
+                },
+            });
+
+            state.process = child;
+            child.stdout?.on?.('data', (data: any) => console.log(`[Renderer Local Server]: ${String(data).trim()}`));
+            child.stderr?.on?.('data', (data: any) => console.error(`[Renderer Local Server Error]: ${String(data).trim()}`));
+            child.on?.('exit', () => {
+                if (state.process === child) {
+                    state.process = null;
+                }
+            });
+        } catch (error) {
+            return {
+                success: false,
+                ready: false,
+                port: RENDERER_LOCAL_SERVER_PORT,
+                error: getErrorMessage(error),
+            };
+        }
+
+        const startedAt = Date.now();
+        while ((Date.now() - startedAt) < 20000) {
+            if (await checkRendererLocalServerPort(RENDERER_LOCAL_SERVER_PORT)) {
+                return {
+                    success: true,
+                    ready: true,
+                    port: RENDERER_LOCAL_SERVER_PORT,
+                    managed: true,
+                };
+            }
+            await new Promise((resolve) => window.setTimeout(resolve, 250));
+        }
+
+        return {
+            success: false,
+            ready: false,
+            port: RENDERER_LOCAL_SERVER_PORT,
+            error: 'Renderer fallback started the local match engine, but it never became reachable.',
+        };
+    })();
+
+    try {
+        return await state.startPromise;
+    } finally {
+        state.startPromise = null;
+    }
+};
+
+const stopRendererManagedLocalServer = async (): Promise<LocalServerStatus> => {
+    const state = getRendererLocalServerState();
+    if (!state) {
+        return {
+            success: true,
+            stopped: false,
+            port: RENDERER_LOCAL_SERVER_PORT,
+            reason: 'Renderer local-server fallback is unavailable.',
+        };
+    }
+
+    if (state.startPromise) {
+        try {
+            await state.startPromise;
+        } catch {
+            // Ignore and continue stopping.
+        }
+    }
+
+    if (!state.process || state.process.killed) {
+        return {
+            success: true,
+            stopped: false,
+            port: RENDERER_LOCAL_SERVER_PORT,
+            reason: 'No renderer-managed local server process was running.',
+        };
+    }
+
+    if (state.stopPromise) {
+        return state.stopPromise;
+    }
+
+    const processToStop = state.process;
+    state.stopPromise = new Promise<LocalServerStatus>((resolve) => {
+        let settled = false;
+        const finish = (result: LocalServerStatus) => {
+            if (settled) return;
+            settled = true;
+            resolve(result);
+        };
+
+        const timeoutId = window.setTimeout(() => {
+            try {
+                processToStop.kill?.('SIGKILL');
+            } catch {
+                // Ignore kill failure here and return timeout.
+            }
+            if (state.process === processToStop) {
+                state.process = null;
+            }
+            finish({
+                success: false,
+                stopped: false,
+                port: RENDERER_LOCAL_SERVER_PORT,
+                error: 'Timed out while stopping the renderer-managed local match engine.',
+            });
+        }, 4000);
+
+        processToStop.once?.('exit', () => {
+            window.clearTimeout(timeoutId);
+            if (state.process === processToStop) {
+                state.process = null;
+            }
+            finish({
+                success: true,
+                stopped: true,
+                port: RENDERER_LOCAL_SERVER_PORT,
+                managed: false,
+            });
+        });
+
+        try {
+            processToStop.kill?.('SIGTERM');
+        } catch (error) {
+            window.clearTimeout(timeoutId);
+            if (state.process === processToStop) {
+                state.process = null;
+            }
+            finish({
+                success: false,
+                stopped: false,
+                port: RENDERER_LOCAL_SERVER_PORT,
+                error: getErrorMessage(error),
+            });
+        }
+    });
+
+    try {
+        return await state.stopPromise;
+    } finally {
+        state.stopPromise = null;
+    }
+};
+
+const getRendererManagedLocalServerStatus = async (): Promise<LocalServerStatus> => {
+    const state = getRendererLocalServerState();
+    const ready = await checkRendererLocalServerPort(RENDERER_LOCAL_SERVER_PORT);
+    return {
+        success: true,
+        ready,
+        port: RENDERER_LOCAL_SERVER_PORT,
+        managed: Boolean(state?.process && !state.process.killed),
+    };
+};
+
 type PendingSteamLobbyConfig = {
     lobbyVisibility: 'private' | 'friends' | 'public' | 'invisible';
     maxMembers: number;
@@ -797,7 +1108,15 @@ function App() {
 
     const requestLocalServerStart = async () => {
         if (!ipc?.invoke) {
-            return true;
+            const fallbackStatus = await ensureRendererManagedLocalServerRunning();
+            if (fallbackStatus?.port) {
+                localEngineUrlRef.current = `http://127.0.0.1:${fallbackStatus.port}`;
+            }
+            if (fallbackStatus?.success && fallbackStatus?.ready) {
+                return true;
+            }
+            setLocalEngineBootError(fallbackStatus?.error || 'Local game engine failed to start.');
+            return false;
         }
 
         try {
@@ -814,6 +1133,18 @@ function App() {
             setLocalEngineBootError(status?.error || 'Local game engine failed to start.');
             return false;
         } catch (error) {
+            if (isMissingIpcHandlerError(error, 'local-server-start')) {
+                console.warn('[App] local-server-start IPC handler missing. Falling back to renderer-managed local server.');
+                const fallbackStatus = await ensureRendererManagedLocalServerRunning();
+                if (fallbackStatus?.port) {
+                    localEngineUrlRef.current = `http://127.0.0.1:${fallbackStatus.port}`;
+                }
+                if (fallbackStatus?.success && fallbackStatus?.ready) {
+                    return true;
+                }
+                setLocalEngineBootError(fallbackStatus?.error || 'Local game engine failed to start.');
+                return false;
+            }
             console.warn('[App] Failed to request local server start.', error);
             setLocalEngineBootError(getErrorMessage(error));
             return false;
@@ -822,6 +1153,7 @@ function App() {
 
     const requestLocalServerStop = async () => {
         if (!ipc?.invoke) {
+            await stopRendererManagedLocalServer();
             return;
         }
 
@@ -831,6 +1163,11 @@ function App() {
                 console.warn('[App] Electron local-server-stop returned a warning.', status);
             }
         } catch (error) {
+            if (isMissingIpcHandlerError(error, 'local-server-stop')) {
+                console.warn('[App] local-server-stop IPC handler missing. Falling back to renderer-managed local server shutdown.');
+                await stopRendererManagedLocalServer();
+                return;
+            }
             console.warn('[App] Failed to request local server stop.', error);
         }
     };
@@ -845,14 +1182,27 @@ function App() {
         }
 
         if (!ipc?.invoke) {
-            return true;
+            const status = await getRendererManagedLocalServerStatus();
+            if (status?.port) {
+                localEngineUrlRef.current = `http://127.0.0.1:${status.port}`;
+            }
+            return Boolean(status?.ready);
         }
 
         const startedAt = Date.now();
 
         while ((Date.now() - startedAt) < maxWaitMs) {
             try {
-                const status = await ipc.invoke('local-server-status');
+                let status: LocalServerStatus;
+                try {
+                    status = await ipc.invoke('local-server-status');
+                } catch (error) {
+                    if (!isMissingIpcHandlerError(error, 'local-server-status')) {
+                        throw error;
+                    }
+                    console.warn('[App] local-server-status IPC handler missing. Falling back to renderer-managed local server status.');
+                    status = await getRendererManagedLocalServerStatus();
+                }
                 if (status?.port) {
                     localEngineUrlRef.current = `http://127.0.0.1:${status.port}`;
                 }

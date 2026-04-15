@@ -567,6 +567,7 @@ function loadGame(target) {
 }
 
 app.on('ready', () => {
+  registerDesktopIpcHandlers();
   createWindow();
 });
 
