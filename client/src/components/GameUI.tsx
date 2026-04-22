@@ -6,12 +6,15 @@ import type { SteamMultiplayerDiagnostics } from '../types/steamDiagnostics';
 import type { ConnectionState } from '../services/socket';
 import type { Player, GameMap, Unit } from '../types/game';
 import {
+    getRankedProgressBarState,
     getRankedPointsDelta,
     RANKED_QUICK_MATCH_PLAYER_COUNT,
     type MatchResult,
     type MatchSource,
     type MatchStatisticsSummary,
+    type PlayerStatistics,
 } from '../utils/playerStatistics';
+import { RankBadgeIcon, getBadgeVariantForLeaderboardRank, getBadgeVariantForRankedPoints, type RankBadgeVariant } from './RankBadgeIcon';
 import type { TutorialMapType } from '../data/tutorialGuide';
 import { SettingsModal } from './SettingsModal';
 import { ActionGuidePanel } from './ActionGuidePanel';
@@ -433,6 +436,8 @@ interface GameUIProps {
     matchStatsSource?: MatchSource;
     rankedMatch?: boolean;
     currentRankedPoints?: number;
+    currentPlayerStatistics?: PlayerStatistics;
+    steamPersonaName?: string | null;
     onMatchResolved?: (summary: MatchStatisticsSummary) => void;
 }
 
@@ -547,6 +552,74 @@ const getIconForType = (type: string) => {
     }
 };
 
+type PlayerProfileSnapshot = {
+    player: Player;
+    displayName: string;
+    position: number;
+    badgeVariant: RankBadgeVariant;
+    units: number;
+    buildings: number;
+    bases: number;
+    gold: number;
+    oil: number;
+    powerScore: number;
+    rankedPoints: number;
+    rankedTier: number;
+};
+
+const countOwnedBuildings = (mapData: GameMap | null, playerId: string): { buildings: number; bases: number } => {
+    if (!mapData) {
+        return { buildings: 0, bases: 0 };
+    }
+
+    let buildings = 0;
+    let bases = 0;
+    mapData.islands.forEach((island) => {
+        island.buildings.forEach((building) => {
+            if (building.ownerId !== playerId) return;
+            buildings += 1;
+            if (building.type === 'base') bases += 1;
+        });
+    });
+
+    (mapData.waterBuildings || []).forEach((building) => {
+        if (building.ownerId !== playerId) return;
+        buildings += 1;
+        if (building.type === 'base') bases += 1;
+    });
+
+    mapData.bridges.forEach((bridge) => {
+        if (bridge.ownerId === playerId) {
+            buildings += 1;
+        }
+    });
+
+    return { buildings, bases };
+};
+
+const formatRatio = (wins: number, losses: number): string => {
+    if (losses <= 0) {
+        return wins > 0 ? `${wins.toFixed(1)}` : '0.0';
+    }
+
+    return (wins / losses).toFixed(2);
+};
+
+const getProfileBadgeVariant = (snapshot: Pick<PlayerProfileSnapshot, 'position' | 'rankedPoints' | 'player'>): RankBadgeVariant => {
+    if (snapshot.position <= 3) {
+        return getBadgeVariantForLeaderboardRank(snapshot.position);
+    }
+
+    if (snapshot.player.isBot) {
+        if ((snapshot.player.difficulty || 0) >= 10) return 'obsidian';
+        if ((snapshot.player.difficulty || 0) >= 8) return 'diamond';
+        if ((snapshot.player.difficulty || 0) >= 6) return 'topaz';
+        return 'gold';
+    }
+
+    return getBadgeVariantForRankedPoints(snapshot.rankedPoints);
+};
+
 export const GameUI: React.FC<GameUIProps> = ({
     onLeave,
     roomId,
@@ -562,6 +635,8 @@ export const GameUI: React.FC<GameUIProps> = ({
     matchStatsSource = 'lan',
     rankedMatch = false,
     currentRankedPoints = 0,
+    currentPlayerStatistics,
+    steamPersonaName = null,
     onMatchResolved,
 }) => {
     const perfProfilingEnabled = React.useMemo(() => {
@@ -617,6 +692,9 @@ export const GameUI: React.FC<GameUIProps> = ({
     const [allPlayers, setAllPlayers] = useState<Map<string, Player>>(new Map());
     const [mapData, setMapData] = useState<GameMap | null>(null);
 	    const [units, setUnits] = useState<Unit[]>([]);
+    const [isPlayerProfilesOpen, setIsPlayerProfilesOpen] = useState(false);
+    const [hoveredProfilePlayerId, setHoveredProfilePlayerId] = useState<string | null>(null);
+    const [reportedPlayerIds, setReportedPlayerIds] = useState<Set<string>>(new Set());
 	    const [minimapPos, setMinimapPos] = useState({ x: window.innerWidth - 220, y: 60 });
 	    const [isDraggingMinimap, setIsDraggingMinimap] = useState(false);
 	    const [viewRect, setViewRect] = useState<{ x: number, y: number, width: number, height: number } | null>(null);
@@ -752,6 +830,27 @@ export const GameUI: React.FC<GameUIProps> = ({
         const handleCapturedKeyDown = (event: KeyboardEvent) => {
             if (event.key === 'Tab' && !isKeyboardEditableTarget(event.target)) {
                 event.preventDefault();
+                if (!event.repeat) {
+                    setIsPlayerProfilesOpen((current) => {
+                        if (current) {
+                            setHoveredProfilePlayerId(null);
+                        }
+                        return !current;
+                    });
+                }
+                return;
+            }
+
+            if (event.key === 'Escape' && isPlayerProfilesOpen) {
+                event.preventDefault();
+                setIsPlayerProfilesOpen(false);
+                setHoveredProfilePlayerId(null);
+            }
+        };
+
+        const handleCapturedKeyUp = (event: KeyboardEvent) => {
+            if (event.key === 'Tab') {
+                event.preventDefault();
             }
         };
 
@@ -770,13 +869,15 @@ export const GameUI: React.FC<GameUIProps> = ({
         };
 
         window.addEventListener('keydown', handleCapturedKeyDown, { capture: true });
+        window.addEventListener('keyup', handleCapturedKeyUp, { capture: true });
         window.addEventListener('focusin', handleFocusIn);
 
         return () => {
             window.removeEventListener('keydown', handleCapturedKeyDown, { capture: true });
+            window.removeEventListener('keyup', handleCapturedKeyUp, { capture: true });
             window.removeEventListener('focusin', handleFocusIn);
         };
-    }, []);
+    }, [isPlayerProfilesOpen]);
 
     useEffect(() => {
         if (initialGameStatus) {
@@ -989,6 +1090,113 @@ export const GameUI: React.FC<GameUIProps> = ({
             copy: 'Live Steam route, socket phase, and recent events.',
         },
     ] as const).filter((panel) => !(isRankedQuickMatchLobby && panel.key === 'access'));
+
+    const playerProfileSnapshots = React.useMemo<PlayerProfileSnapshot[]>(() => {
+        const unitCounts = units.reduce<Map<string, number>>((counts, unit) => {
+            counts.set(unit.ownerId, (counts.get(unit.ownerId) || 0) + 1);
+            return counts;
+        }, new Map());
+
+        const localSocketId = socket.id || '';
+        const snapshots = Array.from(allPlayers.values()).map((candidate) => {
+            const ownedStructures = countOwnedBuildings(mapData, candidate.id);
+            const isLocalHuman = candidate.id === localSocketId && !candidate.isBot;
+            const rankedPoints = isLocalHuman
+                ? (currentPlayerStatistics?.rankedProgress.points ?? currentRankedPoints)
+                : (candidate.isBot ? Math.max(0, (candidate.difficulty || 1) * 45) : 0);
+            const rankedProgress = getRankedProgressBarState(rankedPoints);
+            const unitsOwned = unitCounts.get(candidate.id) || 0;
+            const gold = Math.max(0, Math.floor(candidate.resources?.gold || 0));
+            const oil = Math.max(0, Math.floor(candidate.resources?.oil || 0));
+            const powerScore =
+                gold +
+                oil * 2 +
+                unitsOwned * 35 +
+                ownedStructures.buildings * 55 +
+                ownedStructures.bases * 250 +
+                rankedPoints;
+            const fallbackName = candidate.isBot
+                ? `Bot ${candidate.difficulty || '?'}`
+                : (candidate.id === localSocketId ? 'You' : 'Commander');
+            const displayName = candidate.id === localSocketId && steamPersonaName
+                ? steamPersonaName
+                : (candidate.name || fallbackName);
+
+            return {
+                player: candidate,
+                displayName,
+                position: 0,
+                badgeVariant: 'default' as RankBadgeVariant,
+                units: unitsOwned,
+                buildings: ownedStructures.buildings,
+                bases: ownedStructures.bases,
+                gold,
+                oil,
+                powerScore,
+                rankedPoints,
+                rankedTier: rankedProgress.tier,
+            };
+        });
+
+        return snapshots
+            .sort((left, right) => {
+                const leftActive = left.player.status !== 'eliminated';
+                const rightActive = right.player.status !== 'eliminated';
+                if (leftActive !== rightActive) {
+                    return leftActive ? -1 : 1;
+                }
+                if (right.powerScore !== left.powerScore) {
+                    return right.powerScore - left.powerScore;
+                }
+                return left.displayName.localeCompare(right.displayName);
+            })
+            .map((snapshot, index) => {
+                const position = index + 1;
+                return {
+                    ...snapshot,
+                    position,
+                    badgeVariant: getProfileBadgeVariant({ ...snapshot, position }),
+                };
+            });
+    }, [
+        allPlayers,
+        currentPlayerStatistics?.rankedProgress.points,
+        currentRankedPoints,
+        mapData,
+        steamPersonaName,
+        units,
+    ]);
+
+    const selectedPlayerProfile = React.useMemo(() => {
+        if (playerProfileSnapshots.length === 0) {
+            return null;
+        }
+
+        return playerProfileSnapshots.find(snapshot => snapshot.player.id === hoveredProfilePlayerId)
+            || playerProfileSnapshots.find(snapshot => snapshot.player.id === socket.id)
+            || playerProfileSnapshots[0];
+    }, [hoveredProfilePlayerId, playerProfileSnapshots]);
+
+    const handleReportPlayer = React.useCallback((snapshot: PlayerProfileSnapshot) => {
+        if (snapshot.player.id === socket.id) {
+            return;
+        }
+
+        setReportedPlayerIds((current) => {
+            const next = new Set(current);
+            next.add(snapshot.player.id);
+            return next;
+        });
+
+        socket.emit('report_player', {
+            roomId,
+            reportedPlayerId: snapshot.player.id,
+            reportedPlayerName: snapshot.displayName,
+            reportedPlayerIsBot: Boolean(snapshot.player.isBot),
+            reason: 'profile_overlay_report',
+            createdAt: new Date().toISOString(),
+        });
+    }, [roomId]);
 
     useEffect(() => {
         if (isRankedQuickMatchLobby && activeLobbyInvitePanel === 'access') {
@@ -3398,6 +3606,11 @@ export const GameUI: React.FC<GameUIProps> = ({
         setEndGameState(null);
     };
 
+    const selectedProfileStats = selectedPlayerProfile?.player.id === socket.id ? currentPlayerStatistics : null;
+    const selectedProfileLifetime = selectedProfileStats?.lifetime;
+    const selectedProfileRanked = selectedProfileStats?.ranked;
+    const selectedProfileCoop = selectedProfileStats?.coop;
+
     if (endGameState) {
         return (
             <EndGameOverlay
@@ -3567,6 +3780,143 @@ export const GameUI: React.FC<GameUIProps> = ({
                         {lagDiagnosticToast.recommendations.slice(0, 2).map((recommendation, index) => (
                             <div key={`${lagDiagnosticToast.id}-recommendation-${index}`}>• {recommendation}</div>
                         ))}
+                    </div>
+                </aside>
+            )}
+
+            {isPlayerProfilesOpen && selectedPlayerProfile && (
+                <aside className="player-profiles-overlay" aria-label="In-game player profiles">
+                    <div className="player-profiles-overlay__shell">
+                        <header className="player-profiles-overlay__header">
+                            <div>
+                                <span className="player-profiles-overlay__eyebrow">Command Roster</span>
+                                <h2>Player Profiles</h2>
+                            </div>
+                            <span className="player-profiles-overlay__hint">Tab toggles • hover a commander • Esc closes</span>
+                        </header>
+
+                        <div className="player-profiles-overlay__body">
+                            <div className="player-profiles-list" role="list">
+                                {playerProfileSnapshots.map((profile) => {
+                                    const isSelected = profile.player.id === selectedPlayerProfile.player.id;
+                                    const isLocal = profile.player.id === socket.id;
+                                    return (
+                                        <button
+                                            key={profile.player.id}
+                                            type="button"
+                                            className={`player-profiles-list__row ${isSelected ? 'is-selected' : ''} ${profile.player.status === 'eliminated' ? 'is-eliminated' : ''}`}
+                                            onMouseEnter={() => setHoveredProfilePlayerId(profile.player.id)}
+                                            onFocus={() => setHoveredProfilePlayerId(profile.player.id)}
+                                        >
+                                            <RankBadgeIcon
+                                                variant={profile.badgeVariant}
+                                                size="small"
+                                                title={`${profile.displayName} rank badge`}
+                                            />
+                                            <span className="player-profiles-list__copy">
+                                                <strong>{profile.displayName}{isLocal ? ' (You)' : ''}</strong>
+                                                <span>
+                                                    {profile.player.isBot
+                                                        ? `Bot level ${profile.player.difficulty || '?'}`
+                                                        : `Rank tier ${profile.rankedTier} • ${profile.rankedPoints} RP`}
+                                                </span>
+                                            </span>
+                                            <span className="player-profiles-list__position">#{profile.position}</span>
+                                        </button>
+                                    );
+                                })}
+                            </div>
+
+                            <section className="player-profile-card">
+                                <div className="player-profile-card__banner">
+                                    <RankBadgeIcon
+                                        variant={selectedPlayerProfile.badgeVariant}
+                                        size="large"
+                                        title={`${selectedPlayerProfile.displayName} profile badge`}
+                                    />
+                                    <div className="player-profile-card__identity">
+                                        <span className="player-profile-card__kicker">
+                                            {selectedPlayerProfile.player.isBot
+                                                ? `AI Commander • Level ${selectedPlayerProfile.player.difficulty || '?'}`
+                                                : selectedPlayerProfile.player.id === socket.id
+                                                    ? 'Steam Commander'
+                                                    : 'Human Commander'}
+                                        </span>
+                                        <h3>{selectedPlayerProfile.displayName}</h3>
+                                        <span className={`player-profile-card__status ${selectedPlayerProfile.player.status === 'eliminated' ? 'is-eliminated' : ''}`}>
+                                            {selectedPlayerProfile.player.status === 'eliminated' ? 'Eliminated' : 'Active'}
+                                        </span>
+                                    </div>
+                                </div>
+
+                                <div className="player-profile-card__metrics">
+                                    <div>
+                                        <span>Profile Position</span>
+                                        <strong>#{selectedPlayerProfile.position}</strong>
+                                    </div>
+                                    <div>
+                                        <span>Power Score</span>
+                                        <strong>{Math.round(selectedPlayerProfile.powerScore).toLocaleString()}</strong>
+                                    </div>
+                                    <div>
+                                        <span>Units</span>
+                                        <strong>{selectedPlayerProfile.units}</strong>
+                                    </div>
+                                    <div>
+                                        <span>Structures</span>
+                                        <strong>{selectedPlayerProfile.buildings}</strong>
+                                    </div>
+                                    <div>
+                                        <span>Gold / Oil</span>
+                                        <strong>{selectedPlayerProfile.gold.toLocaleString()} / {selectedPlayerProfile.oil.toLocaleString()}</strong>
+                                    </div>
+                                    <div>
+                                        <span>Bases Alive</span>
+                                        <strong>{selectedPlayerProfile.bases}</strong>
+                                    </div>
+                                </div>
+
+                                <div className="player-profile-card__statline">
+                                    <h4>Overall Stats</h4>
+                                    {selectedProfileStats ? (
+                                        <div className="player-profile-card__statgrid">
+                                            <span>Lifetime W/L</span>
+                                            <strong>{selectedProfileLifetime?.wins || 0}-{selectedProfileLifetime?.losses || 0}</strong>
+                                            <span>Win Ratio</span>
+                                            <strong>{formatRatio(selectedProfileLifetime?.wins || 0, selectedProfileLifetime?.losses || 0)}</strong>
+                                            <span>Best Streak</span>
+                                            <strong>{selectedProfileLifetime?.bestWinStreak || 0}</strong>
+                                            <span>Co-op W/L</span>
+                                            <strong>{selectedProfileCoop?.wins || 0}-{selectedProfileCoop?.losses || 0}</strong>
+                                            <span>Ranked W/L</span>
+                                            <strong>{selectedProfileRanked?.wins || 0}-{selectedProfileRanked?.losses || 0}</strong>
+                                            <span>Ranked RP</span>
+                                            <strong>{selectedProfileStats.rankedProgress.points}</strong>
+                                        </div>
+                                    ) : (
+                                        <p>
+                                            Live match profile is available here. Steam lifetime stats for other players will populate once their published Steam stat snapshot is available to the lobby.
+                                        </p>
+                                    )}
+                                </div>
+
+                                <button
+                                    type="button"
+                                    className="player-profile-card__report"
+                                    disabled={
+                                        selectedPlayerProfile.player.id === socket.id
+                                        || reportedPlayerIds.has(selectedPlayerProfile.player.id)
+                                    }
+                                    onClick={() => handleReportPlayer(selectedPlayerProfile)}
+                                >
+                                    {selectedPlayerProfile.player.id === socket.id
+                                        ? 'Your Profile'
+                                        : reportedPlayerIds.has(selectedPlayerProfile.player.id)
+                                            ? 'Report Sent'
+                                            : 'Report Player'}
+                                </button>
+                            </section>
+                        </div>
                     </div>
                 </aside>
             )}

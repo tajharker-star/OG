@@ -1,5 +1,6 @@
 import type { MatchStatisticsSummary, PlayerStatistics } from './playerStatistics';
 import type { SteamLeaderboardDisplayType, SteamLeaderboardSortMethod } from '../services/steam';
+import type { SkinId } from './playerSkins';
 
 export type LeaderboardMetricId =
     | 'lifetime_wins'
@@ -75,6 +76,16 @@ export const STEAM_LEADERBOARD_BY_ID = STEAM_LEADERBOARD_DEFINITIONS.reduce<Reco
     acc[definition.id] = definition;
     return acc;
 }, {} as Record<LeaderboardMetricId, SteamLeaderboardDefinition>);
+
+export const getLeaderboardSkinRewardForRank = (rank: number | null | undefined): SkinId | null => {
+    if (!Number.isFinite(rank || NaN)) return null;
+    const normalizedRank = Math.floor(Number(rank));
+    if (normalizedRank === 1) return 'leaderboard_first';
+    if (normalizedRank === 2) return 'leaderboard_second';
+    if (normalizedRank === 3) return 'leaderboard_third';
+    if (normalizedRank >= 4 && normalizedRank <= 10) return 'leaderboard_top10';
+    return null;
+};
 
 const formatMilliseconds = (milliseconds: number): string => {
     const clamped = Math.max(0, Math.trunc(milliseconds));

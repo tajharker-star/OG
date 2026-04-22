@@ -633,7 +633,15 @@ button:active {
     padding: 10px 14px 10px 12px;
   }
 
-  .wishlist-float-btn__text {
+  .request-changes-float-btn {
+    top: 76px;
+    right: 16px;
+    min-height: 48px;
+    padding: 9px 14px 9px 12px;
+  }
+
+  .wishlist-float-btn__text,
+  .request-changes-float-btn__text {
     font-size: 0.92rem;
   }
 }
@@ -1097,11 +1105,18 @@ input[type=range]::-webkit-slider-thumb:hover {
     transform: scale(1.04);
 }
 
-.patch-notes-float-btn {
+.top-left-actions {
     position: fixed;
     top: 24px;
     left: 24px;
     z-index: 1000;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.patch-notes-float-btn,
+.profile-float-btn {
     min-height: 48px;
     padding: 12px 18px;
     border-radius: 999px;
@@ -1117,18 +1132,73 @@ input[type=range]::-webkit-slider-thumb:hover {
     -webkit-backdrop-filter: blur(10px);
 }
 
+.top-left-actions .patch-notes-float-btn,
+.top-left-actions .profile-float-btn {
+    position: static;
+}
+
+.profile-float-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    border-color: rgba(255, 224, 122, 0.28);
+    background:
+        radial-gradient(circle at 22% 30%, rgba(255, 235, 155, 0.2), transparent 40%),
+        linear-gradient(180deg, rgba(255, 194, 71, 0.19), rgba(188, 67, 17, 0.12)),
+        rgba(8, 12, 20, 0.78);
+}
+
+.profile-float-btn__star {
+    color: #ffe27a;
+    text-shadow:
+        0 0 7px rgba(255, 210, 74, 0.72),
+        0 1px 0 rgba(0, 0, 0, 0.72);
+    transform-origin: 50% 55%;
+    animation: profileStarPulse 1.8s ease-in-out infinite;
+}
+
 .App--electron .patch-notes-float-btn,
-.App--electron .wishlist-float-btn {
+.App--electron .profile-float-btn,
+.App--electron .wishlist-float-btn,
+.App--electron .request-changes-float-btn {
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
 }
 
-.patch-notes-float-btn:hover {
+.patch-notes-float-btn:hover,
+.profile-float-btn:hover {
     background:
         linear-gradient(180deg, rgba(255, 214, 102, 0.24), rgba(255, 153, 51, 0.12)),
         rgba(10, 15, 24, 0.84);
     border-color: rgba(255, 226, 140, 0.34);
     color: #fff8e4;
+}
+
+@keyframes profileStarPulse {
+    0%, 100% {
+        transform: scale(1) rotate(0deg);
+        filter: brightness(1);
+    }
+    50% {
+        transform: scale(1.16) rotate(9deg);
+        filter: brightness(1.22);
+    }
+}
+
+@media (max-width: 520px) {
+    .top-left-actions {
+        top: 16px;
+        left: 16px;
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .top-left-actions .patch-notes-float-btn,
+    .top-left-actions .profile-float-btn {
+        min-height: 44px;
+        padding: 10px 14px;
+        font-size: 0.95rem;
+    }
 }
 
 .wishlist-float-btn {
@@ -1151,6 +1221,33 @@ input[type=range]::-webkit-slider-thumb:hover {
     -webkit-backdrop-filter: blur(10px);
 }
 
+.request-changes-float-btn {
+    position: fixed;
+    top: 92px;
+    right: 24px;
+    z-index: 1000;
+    min-height: 52px;
+    padding: 10px 18px 10px 12px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 192, 76, 0.32);
+    background:
+        linear-gradient(180deg, rgba(255, 197, 75, 0.24), rgba(132, 46, 13, 0.9)),
+        rgba(12, 12, 18, 0.86);
+    color: #fff4d7;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.08),
+        0 14px 30px rgba(0, 0, 0, 0.28);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+}
+
+.wishlist-float-btn,
+.request-changes-float-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+}
+
 .wishlist-float-btn:hover {
     background:
         linear-gradient(180deg, rgba(123, 206, 255, 0.32), rgba(35, 82, 120, 0.96)),
@@ -1159,7 +1256,16 @@ input[type=range]::-webkit-slider-thumb:hover {
     color: #ffffff;
 }
 
-.wishlist-float-btn__icon {
+.request-changes-float-btn:hover {
+    background:
+        linear-gradient(180deg, rgba(255, 216, 107, 0.34), rgba(157, 55, 15, 0.96)),
+        rgba(14, 13, 19, 0.92);
+    border-color: rgba(255, 226, 144, 0.52);
+    color: #fffaf0;
+}
+
+.wishlist-float-btn__icon,
+.request-changes-float-btn__icon {
     width: 34px;
     height: 34px;
     display: inline-flex;
@@ -1175,7 +1281,15 @@ input[type=range]::-webkit-slider-thumb:hover {
     animation-duration: 2.4s;
 }
 
-.wishlist-float-btn__icon-svg {
+.request-changes-float-btn__icon {
+    background:
+        radial-gradient(circle at 50% 35%, rgba(255, 238, 178, 0.22), rgba(255, 99, 19, 0.08)),
+        rgba(255, 255, 255, 0.08);
+    animation: wishlistIconPulse 2.2s ease-in-out infinite;
+}
+
+.wishlist-float-btn__icon-svg,
+.request-changes-float-btn__icon-svg {
     width: 22px;
     height: 22px;
     fill: rgba(255, 255, 255, 0.12);
@@ -1183,25 +1297,39 @@ input[type=range]::-webkit-slider-thumb:hover {
     stroke-width: 3;
 }
 
+.request-changes-float-btn__icon-svg {
+    fill: rgba(255, 220, 150, 0.18);
+    stroke: #fff1bf;
+}
+
 .wishlist-float-btn__icon-detail {
     fill: #eef8ff;
     stroke: none;
 }
 
-.wishlist-float-btn__icon-path {
+.wishlist-float-btn__icon-path,
+.request-changes-float-btn__icon-lines,
+.request-changes-float-btn__icon-plus {
     fill: none;
     stroke-linecap: round;
     stroke-linejoin: round;
 }
 
-.wishlist-float-btn__label {
+.request-changes-float-btn__icon-plus {
+    stroke: #ffe177;
+    stroke-width: 4;
+}
+
+.wishlist-float-btn__label,
+.request-changes-float-btn__label {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
     gap: 2px;
 }
 
-.wishlist-float-btn__eyebrow {
+.wishlist-float-btn__eyebrow,
+.request-changes-float-btn__eyebrow {
     font-size: 0.68rem;
     font-weight: 700;
     letter-spacing: 0.14em;
@@ -1209,10 +1337,19 @@ input[type=range]::-webkit-slider-thumb:hover {
     color: #bfe7ff;
 }
 
-.wishlist-float-btn__text {
+.request-changes-float-btn__eyebrow {
+    color: #ffd991;
+}
+
+.wishlist-float-btn__text,
+.request-changes-float-btn__text {
     font-size: 1rem;
     font-weight: 700;
     color: #f4fbff;
+}
+
+.request-changes-float-btn__text {
+    color: #fff4d7;
 }
 
 @keyframes wishlistIconPulse {

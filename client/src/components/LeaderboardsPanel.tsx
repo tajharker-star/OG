@@ -3,14 +3,23 @@ import { steamService, type SteamLeaderboardSnapshotResult } from '../services/s
 import {
     STEAM_LEADERBOARD_DEFINITIONS,
     formatLeaderboardScore,
+    getLeaderboardSkinRewardForRank,
     type LeaderboardMetricId,
     type SteamLeaderboardDefinition,
 } from '../utils/steamLeaderboards';
+import { SKIN_DEFINITIONS_BY_ID, type SkinId } from '../utils/playerSkins';
+import { RankBadgeIcon } from './RankBadgeIcon';
 import './LeaderboardsPanel.css';
 
 type LeaderboardsPanelProps = {
     steamConnected: boolean;
     steamPersonaName?: string | null;
+    onLeaderboardRewardEligible?: (reward: {
+        leaderboardId: LeaderboardMetricId;
+        leaderboardTitle: string;
+        rewardSkinId: SkinId;
+        rank: number;
+    }) => void;
 };
 
 const AUTO_REFRESH_MS = 12000;
@@ -65,7 +74,10 @@ const LeaderboardTable: React.FC<{
                         role="row"
                         key={`${definition.id}_${entry.rank}_${entry.steamId}`}
                     >
-                        <span role="cell">#{entry.rank}</span>
+                        <span role="cell" className="leaderboards-rank-cell">
+                            <RankBadgeIcon leaderboardRank={entry.rank} size="mini" title={`Rank ${entry.rank} badge`} />
+                            #{entry.rank}
+                        </span>
                         <span role="cell" title={entry.steamId}>{entry.name || entry.steamId}</span>
                         <span role="cell">{formatLeaderboardScore(entry.score, definition.displayType)}</span>
                     </div>
@@ -75,7 +87,7 @@ const LeaderboardTable: React.FC<{
     );
 };
 
-export function LeaderboardsPanel({ steamConnected, steamPersonaName }: LeaderboardsPanelProps) {
+export function LeaderboardsPanel({ steamConnected, steamPersonaName, onLeaderboardRewardEligible }: LeaderboardsPanelProps) {
     const [activeLeaderboardId, setActiveLeaderboardId] = useState<LeaderboardMetricId>('lifetime_wins');
     const [snapshotById, setSnapshotById] = useState<SnapshotById>({});
     const [isLoading, setIsLoading] = useState(false);
@@ -88,6 +100,8 @@ export function LeaderboardsPanel({ steamConnected, steamPersonaName }: Leaderbo
     );
 
     const activeSnapshot = snapshotById[activeDefinition.id];
+    const activeRewardSkinId = getLeaderboardSkinRewardForRank(activeSnapshot?.playerEntry?.rank);
+    const activeRewardDefinition = activeRewardSkinId ? SKIN_DEFINITIONS_BY_ID[activeRewardSkinId] : null;
 
     const loadLeaderboard = useCallback(async (leaderboard: SteamLeaderboardDefinition) => {
         if (!steamConnected || !steamService.isInitialized) {
@@ -132,6 +146,21 @@ export function LeaderboardsPanel({ steamConnected, steamPersonaName }: Leaderbo
             window.clearInterval(timer);
         };
     }, [activeDefinition, loadLeaderboard, steamConnected]);
+
+    useEffect(() => {
+        const rank = activeSnapshot?.playerEntry?.rank;
+        const rewardSkinId = getLeaderboardSkinRewardForRank(rank);
+        if (!rewardSkinId || !rank || !onLeaderboardRewardEligible) {
+            return;
+        }
+
+        onLeaderboardRewardEligible({
+            leaderboardId: activeDefinition.id,
+            leaderboardTitle: activeDefinition.title,
+            rewardSkinId,
+            rank,
+        });
+    }, [activeDefinition.id, activeDefinition.title, activeSnapshot?.playerEntry?.rank, onLeaderboardRewardEligible]);
 
     if (!steamConnected || !steamService.isInitialized) {
         return (
@@ -215,6 +244,19 @@ export function LeaderboardsPanel({ steamConnected, steamPersonaName }: Leaderbo
                         <span>Total Entries</span>
                         <strong>{activeSnapshot?.totalEntries ?? 0}</strong>
                     </div>
+                </div>
+
+                <div className={`leaderboards-reward-strip ${activeRewardDefinition ? 'is-earned' : ''}`}>
+                    <RankBadgeIcon leaderboardRank={playerEntry?.rank ?? null} size="small" className="leaderboards-reward-strip__badge" />
+                    <div>
+                        <span>Leaderboard Skin Reward</span>
+                        <strong>{activeRewardDefinition ? activeRewardDefinition.title : 'Top 10 required'}</strong>
+                    </div>
+                    <p>
+                        {activeRewardDefinition
+                            ? `Your #${playerEntry?.rank} placement unlocks a Steam-linked skin copy for this leaderboard.`
+                            : 'Place #1, #2, #3, or #4-#10 to claim a leaderboard skin copy.'}
+                    </p>
                 </div>
             </div>
 

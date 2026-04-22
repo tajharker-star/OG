@@ -30,16 +30,28 @@ import {
     TUTORIAL_MAP_OPTIONS,
     type TutorialMapType,
 } from './data/tutorialGuide';
-import { buildLeaderboardUploadCandidates } from './utils/steamLeaderboards';
+import { buildLeaderboardUploadCandidates, type LeaderboardMetricId } from './utils/steamLeaderboards';
 import {
     createDefaultSteamMultiplayerDiagnostics,
     type SteamMultiplayerDiagnostics,
 } from './types/steamDiagnostics';
-import type {
-    PlayerSkinProfile,
-    SkinId,
-    SkinTarget,
+import {
+    STEAM_SKIN_ITEM_DEFS,
+    type PlayerSkinProfile,
+    type SkinId,
+    type SkinTarget,
 } from './utils/playerSkins';
+import {
+    ACHIEVEMENT_STAR_REWARD,
+    awardStars,
+    createDefaultCommanderProfile,
+    getMatchStarReward,
+    normalizeCommanderProfile,
+    readProfileBackup,
+    spendStarsOnNameChange,
+    writeProfileBackup,
+    type CommanderProfile,
+} from './utils/playerProfile';
 import './App.css';
 
 const LazyGameCanvas = lazy(async () => {
@@ -60,6 +72,11 @@ const LazySettingsModal = lazy(async () => {
 const LazyPatchNotesModal = lazy(async () => {
     const module = await import('./components/PatchNotesModal');
     return { default: module.PatchNotesModal };
+});
+
+const LazyProfileModal = lazy(async () => {
+    const module = await import('./components/ProfileModal');
+    return { default: module.ProfileModal };
 });
 
 const LazyStatisticsPanel = lazy(async () => {
@@ -89,20 +106,23 @@ const INTERACTIVE_LOCAL_ENGINE_BOOT_BUDGET_MS = 30000;
 const MAIN_GAME_STEAM_APP_ID = '4432210';
 const MAIN_GAME_STEAM_STORE_URL = `https://store.steampowered.com/app/${MAIN_GAME_STEAM_APP_ID}/`;
 const MAIN_GAME_STEAM_DEEP_LINK = `steam://store/${MAIN_GAME_STEAM_APP_ID}`;
+const REQUEST_CHANGES_DISCUSSION_URL = 'https://steamcommunity.com/app/4432210/discussions/0/797840128955390334/';
 const SETTINGS_FLOAT_BUTTON_SIZE = 56;
 const SETTINGS_FLOAT_BUTTON_MARGIN = 24;
 const SETTINGS_FLOAT_BUTTON_STORAGE_KEY = 'ag_settings_float_button_position_v1';
 const DEFAULT_TUTORIAL_MAP: TutorialMapType = 'desert';
-const DEVELOPER_SKIN_ALLOWED_NAMES = new Set(['cody harker', 'thecoadstar1234567890']);
-const DEVELOPER_SKIN_ALLOWED_OS_USERS = new Set(['codyharker']);
+const DEVELOPER_SKIN_ALLOWED_NAMES = new Set(['thecoadstar']);
+const DEVELOPER_SKIN_ALLOWED_OS_USERS = new Set<string>();
 const RANKED_QUICK_QUEUE_TYPE = 'ranked_quick_match';
 const DEFAULT_SKIN_PROFILE: PlayerSkinProfile = {
-    version: 1,
+    version: 2,
     loadout: {
         unitSkinId: 'default',
         buildingSkinId: 'default',
     },
     earnedSeasonRewards: [],
+    skinItemCounts: {},
+    claimedLeaderboardRewards: {},
 };
 const VALID_SKIN_IDS = new Set<SkinId>([
     'default',
@@ -113,6 +133,10 @@ const VALID_SKIN_IDS = new Set<SkinId>([
     'diamond',
     'obsidian',
     'godly',
+    'leaderboard_first',
+    'leaderboard_second',
+    'leaderboard_third',
+    'leaderboard_top10',
     'developer',
 ]);
 const RANKED_SKIN_ID_SET = new Set<SkinId>([
@@ -122,6 +146,12 @@ const RANKED_SKIN_ID_SET = new Set<SkinId>([
     'diamond',
     'obsidian',
     'godly',
+]);
+const LEADERBOARD_REWARD_SKIN_ID_SET = new Set<SkinId>([
+    'leaderboard_first',
+    'leaderboard_second',
+    'leaderboard_third',
+    'leaderboard_top10',
 ]);
 const LEGACY_SKIN_ID_MAP: Record<string, SkinId> = {
     gold_1: 'gold',
@@ -497,6 +527,8 @@ const createDefaultPlayerSkinProfile = (): PlayerSkinProfile => ({
     version: DEFAULT_SKIN_PROFILE.version,
     loadout: { ...DEFAULT_SKIN_PROFILE.loadout },
     earnedSeasonRewards: [],
+    skinItemCounts: {},
+    claimedLeaderboardRewards: {},
 });
 
 const canonicalizeSkinId = (value: unknown): SkinId | null => {
@@ -518,6 +550,31 @@ const normalizePlayerSkinProfile = (value: unknown): PlayerSkinProfile => {
         ? profile.loadout as Record<string, unknown>
         : {};
     const rawRewards = Array.isArray(profile.earnedSeasonRewards) ? profile.earnedSeasonRewards : [];
+    const rawSkinItemCounts = profile.skinItemCounts && typeof profile.skinItemCounts === 'object' && !Array.isArray(profile.skinItemCounts)
+        ? profile.skinItemCounts as Record<string, unknown>
+        : {};
+    const rawClaimedLeaderboardRewards = profile.claimedLeaderboardRewards && typeof profile.claimedLeaderboardRewards === 'object' && !Array.isArray(profile.claimedLeaderboardRewards)
+        ? profile.claimedLeaderboardRewards as Record<string, unknown>
+        : {};
+    const skinItemCounts: Partial<Record<SkinId, number>> = {};
+    const earnedSeasonRewards = Array.from(new Set(
+        rawRewards
+            .map((entry) => canonicalizeSkinId(entry))
+            .filter((entry): entry is SkinId => entry !== null && RANKED_SKIN_ID_SET.has(entry))
+    ));
+
+    Object.entries(rawSkinItemCounts).forEach(([key, rawCount]) => {
+        const skinId = canonicalizeSkinId(key);
+        if (!skinId || skinId === 'default') return;
+        const count = typeof rawCount === 'number' ? rawCount : Number(rawCount);
+        if (Number.isFinite(count) && count > 0) {
+            skinItemCounts[skinId] = Math.max(1, Math.floor(count));
+        }
+    });
+
+    earnedSeasonRewards.forEach((skinId) => {
+        skinItemCounts[skinId] = Math.max(1, skinItemCounts[skinId] || 0);
+    });
 
     return {
         version: typeof profile.version === 'number' && Number.isFinite(profile.version)
@@ -526,14 +583,37 @@ const normalizePlayerSkinProfile = (value: unknown): PlayerSkinProfile => {
         loadout: {
             unitSkinId: canonicalizeSkinId(rawLoadout.unitSkinId) || DEFAULT_SKIN_PROFILE.loadout.unitSkinId,
             buildingSkinId: canonicalizeSkinId(rawLoadout.buildingSkinId) || DEFAULT_SKIN_PROFILE.loadout.buildingSkinId,
+            unitEnhancementLevel: typeof rawLoadout.unitEnhancementLevel === 'number' ? Math.max(0, Math.floor(rawLoadout.unitEnhancementLevel)) : 0,
+            buildingEnhancementLevel: typeof rawLoadout.buildingEnhancementLevel === 'number' ? Math.max(0, Math.floor(rawLoadout.buildingEnhancementLevel)) : 0,
         },
-        earnedSeasonRewards: Array.from(new Set(
-            rawRewards
-                .map((entry) => canonicalizeSkinId(entry))
-                .filter((entry): entry is SkinId => entry !== null && RANKED_SKIN_ID_SET.has(entry))
-        )),
+        earnedSeasonRewards,
+        skinItemCounts,
+        claimedLeaderboardRewards: Object.fromEntries(
+            Object.entries(rawClaimedLeaderboardRewards)
+                .filter(([key, entry]) => key.length > 0 && typeof entry === 'string')
+                .map(([key, entry]) => [key, entry as string])
+        ) as Record<string, string>,
     };
 };
+
+const getSkinEnhancementLevelFromCopies = (copyCount: number): number => {
+    if (copyCount < 3) return 0;
+    return Math.max(0, Math.floor(copyCount / 3));
+};
+
+const getSkinCopyCount = (profile: PlayerSkinProfile, skinId: SkinId): number => {
+    if (skinId === 'default') return 1;
+    return Math.max(0, Math.floor(profile.skinItemCounts?.[skinId] || 0));
+};
+
+const withSkinLoadoutEnhancements = (profile: PlayerSkinProfile): PlayerSkinProfile => ({
+    ...profile,
+    loadout: {
+        ...profile.loadout,
+        unitEnhancementLevel: getSkinEnhancementLevelFromCopies(getSkinCopyCount(profile, profile.loadout.unitSkinId)),
+        buildingEnhancementLevel: getSkinEnhancementLevelFromCopies(getSkinCopyCount(profile, profile.loadout.buildingSkinId)),
+    },
+});
 
 const getUnlockedSkinIds = (
     profile: PlayerSkinProfile,
@@ -553,6 +633,14 @@ const getUnlockedSkinIds = (
         }
     });
 
+    Object.entries(profile.skinItemCounts || {}).forEach(([rawSkinId, rawCount]) => {
+        const skinId = canonicalizeSkinId(rawSkinId);
+        if (!skinId || skinId === 'default' || skinId === 'developer') return;
+        if ((rawCount || 0) > 0) {
+            unlocked.add(skinId);
+        }
+    });
+
     if (totalAchievementCount > 0 && unlockedAchievementCount >= totalAchievementCount) {
         unlocked.add('ruby');
     }
@@ -563,18 +651,32 @@ const getUnlockedSkinIds = (
 const sanitizeSkinProfile = (
     profile: PlayerSkinProfile,
     unlockedSkinIds: Set<SkinId>,
-): PlayerSkinProfile => ({
-    ...profile,
-    loadout: {
-        unitSkinId: unlockedSkinIds.has(profile.loadout.unitSkinId) ? profile.loadout.unitSkinId : 'default',
-        buildingSkinId: unlockedSkinIds.has(profile.loadout.buildingSkinId) ? profile.loadout.buildingSkinId : 'default',
-    },
-    earnedSeasonRewards: Array.from(new Set(
-        profile.earnedSeasonRewards
-            .map((skinId) => canonicalizeSkinId(skinId))
-            .filter((skinId): skinId is SkinId => skinId !== null && RANKED_SKIN_ID_SET.has(skinId))
-    )),
-});
+): PlayerSkinProfile => {
+    const skinItemCounts: Partial<Record<SkinId, number>> = {};
+    Object.entries(profile.skinItemCounts || {}).forEach(([rawSkinId, rawCount]) => {
+        const skinId = canonicalizeSkinId(rawSkinId);
+        if (!skinId || skinId === 'default') return;
+        const count = Math.floor(Number(rawCount));
+        if (Number.isFinite(count) && count > 0) {
+            skinItemCounts[skinId] = count;
+        }
+    });
+
+    return withSkinLoadoutEnhancements({
+        ...profile,
+        loadout: {
+            unitSkinId: unlockedSkinIds.has(profile.loadout.unitSkinId) ? profile.loadout.unitSkinId : 'default',
+            buildingSkinId: unlockedSkinIds.has(profile.loadout.buildingSkinId) ? profile.loadout.buildingSkinId : 'default',
+        },
+        earnedSeasonRewards: Array.from(new Set(
+            profile.earnedSeasonRewards
+                .map((skinId) => canonicalizeSkinId(skinId))
+                .filter((skinId): skinId is SkinId => skinId !== null && RANKED_SKIN_ID_SET.has(skinId))
+        )),
+        skinItemCounts,
+        claimedLeaderboardRewards: { ...(profile.claimedLeaderboardRewards || {}) },
+    });
+};
 
 const getDefaultSettingsButtonPosition = () => ({
     x: SETTINGS_FLOAT_BUTTON_MARGIN,
@@ -923,6 +1025,8 @@ function App() {
     const achievementUnlocksRef = useRef<AchievementUnlockState>(createDefaultAchievementUnlockState());
     const [skinsProfile, setSkinsProfile] = useState<PlayerSkinProfile>(createDefaultPlayerSkinProfile);
     const skinsProfileRef = useRef<PlayerSkinProfile>(createDefaultPlayerSkinProfile());
+    const [commanderProfile, setCommanderProfile] = useState<CommanderProfile>(createDefaultCommanderProfile);
+    const commanderProfileRef = useRef<CommanderProfile>(createDefaultCommanderProfile());
     const [didLoadSave, setDidLoadSave] = useState(false);
     const [matchStatsSource, setMatchStatsSource] = useState<MatchSource>('lan');
     const [isRankedMatch, setIsRankedMatch] = useState(false);
@@ -930,6 +1034,7 @@ function App() {
     // New Menu States
     const [menuView, setMenuView] = useState<'main' | 'campaign' | 'multiplayer' | 'host_public' | 'statistics' | 'skins' | 'leaderboards'>('main');
     const [showPatchNotes, setShowPatchNotes] = useState(false);
+    const [showProfileModal, setShowProfileModal] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
     const [settingsButtonPos, setSettingsButtonPos] = useState(readSavedSettingsButtonPosition);
     const [isDraggingSettingsButton, setIsDraggingSettingsButton] = useState(false);
@@ -1229,19 +1334,23 @@ function App() {
         void openExternalUrl(MAIN_GAME_STEAM_DEEP_LINK, MAIN_GAME_STEAM_STORE_URL);
     };
 
+    const handleRequestChangesClick = () => {
+        void openExternalUrl(REQUEST_CHANGES_DISCUSSION_URL);
+    };
+
     const handleEquipSkin = (target: SkinTarget, skinId: SkinId) => {
         if (!unlockedSkinIds.has(skinId)) {
             return;
         }
 
-        const nextProfile: PlayerSkinProfile = {
+        const nextProfile: PlayerSkinProfile = withSkinLoadoutEnhancements({
             ...skinsProfileRef.current,
             loadout: {
                 ...skinsProfileRef.current.loadout,
                 unitSkinId: target === 'unit' ? skinId : skinsProfileRef.current.loadout.unitSkinId,
                 buildingSkinId: target === 'building' ? skinId : skinsProfileRef.current.loadout.buildingSkinId,
             },
-        };
+        });
 
         void commitSkinsProfile(nextProfile);
     };
@@ -1277,6 +1386,8 @@ function App() {
             });
         }
 
+        await grantProfileStars(idsToUnlock.length * ACHIEVEMENT_STAR_REWARD, unlockedAt);
+
         return idsToUnlock;
     };
 
@@ -1304,10 +1415,45 @@ function App() {
     };
 
     const commitSkinsProfile = async (nextSkinsProfile: PlayerSkinProfile) => {
-        skinsProfileRef.current = nextSkinsProfile;
-        setSkinsProfile(nextSkinsProfile);
-        await triggerSave({ skins: nextSkinsProfile });
-        return nextSkinsProfile;
+        const normalizedSkinsProfile = withSkinLoadoutEnhancements(nextSkinsProfile);
+        skinsProfileRef.current = normalizedSkinsProfile;
+        setSkinsProfile(normalizedSkinsProfile);
+        await triggerSave({ skins: normalizedSkinsProfile });
+        return normalizedSkinsProfile;
+    };
+
+    const commitCommanderProfile = async (nextCommanderProfile: CommanderProfile) => {
+        const normalizedCommanderProfile = normalizeCommanderProfile(nextCommanderProfile);
+        commanderProfileRef.current = normalizedCommanderProfile;
+        setCommanderProfile(normalizedCommanderProfile);
+        writeProfileBackup(normalizedCommanderProfile);
+        await triggerSave({ profile: normalizedCommanderProfile });
+        return normalizedCommanderProfile;
+    };
+
+    const grantProfileStars = async (
+        amount: number,
+        timestamp: string = new Date().toISOString()
+    ) => {
+        if (amount <= 0) {
+            return commanderProfileRef.current;
+        }
+
+        return commitCommanderProfile(awardStars(commanderProfileRef.current, amount, timestamp));
+    };
+
+    const handleChangeDisplayName = async (nextName: string) => {
+        const result = spendStarsOnNameChange(commanderProfileRef.current, nextName);
+        if (!result.success || !result.profile) {
+            return { success: false, error: result.error || 'Unable to update commander name.' };
+        }
+
+        const savedProfile = await commitCommanderProfile(result.profile);
+        if (savedProfile.displayName) {
+            socket.emit('set_player_name', savedProfile.displayName);
+        }
+
+        return { success: true };
     };
 
     const pushStatisticsToSteam = async (baseStatistics: PlayerStatistics) => {
@@ -1368,9 +1514,52 @@ function App() {
         }));
     };
 
+    const handleLeaderboardRewardEligible = async (reward: {
+        leaderboardId: LeaderboardMetricId;
+        leaderboardTitle: string;
+        rewardSkinId: SkinId;
+        rank: number;
+    }) => {
+        if (!LEADERBOARD_REWARD_SKIN_ID_SET.has(reward.rewardSkinId)) {
+            return;
+        }
+
+        const claimKey = `${reward.leaderboardId}:${reward.rewardSkinId}`;
+        const currentProfile = skinsProfileRef.current;
+        if (currentProfile.claimedLeaderboardRewards?.[claimKey]) {
+            return;
+        }
+
+        const nextProfile = withSkinLoadoutEnhancements({
+            ...currentProfile,
+            skinItemCounts: {
+                ...(currentProfile.skinItemCounts || {}),
+                [reward.rewardSkinId]: getSkinCopyCount(currentProfile, reward.rewardSkinId) + 1,
+            },
+            claimedLeaderboardRewards: {
+                ...(currentProfile.claimedLeaderboardRewards || {}),
+                [claimKey]: `Rank #${reward.rank} on ${reward.leaderboardTitle} at ${new Date().toISOString()}`,
+            },
+        });
+
+        await commitSkinsProfile(nextProfile);
+
+        const steamItem = STEAM_SKIN_ITEM_DEFS[reward.rewardSkinId];
+        if (steamItem && steamService.isInitialized) {
+            const result = await steamService.requestInventoryItemGrant([steamItem.itemDefId]);
+            if (!result.success) {
+                console.warn('[Steam] Skin item grant queued locally but Steam Inventory did not confirm:', result.error);
+            }
+        }
+    };
+
     const evaluatedAchievements = evaluateAchievements(
         { statistics },
         achievementUnlocks
+    );
+    const commanderDisplayName = useMemo(
+        () => commanderProfile.displayName || steamUser?.name || 'Commander',
+        [commanderProfile.displayName, steamUser?.name]
     );
 
     const unlockedAchievementCount = useMemo(
@@ -1746,10 +1935,16 @@ function App() {
         // Load initial save data
         const loadSave = async () => {
             const backupStatistics = readStatisticsBackup();
+            const backupProfile = readProfileBackup();
             if (!ipc) {
                 if (backupStatistics) {
                     statisticsRef.current = backupStatistics;
                     setStatistics(backupStatistics);
+                }
+                if (backupProfile) {
+                    commanderProfileRef.current = backupProfile;
+                    setCommanderProfile(backupProfile);
+                    writeProfileBackup(backupProfile);
                 }
                 setDidLoadSave(true);
                 return;
@@ -1783,10 +1978,27 @@ function App() {
                         skinsProfileRef.current = loadedSkinsProfile;
                         setSkinsProfile(loadedSkinsProfile);
                     }
-                } else if (backupStatistics) {
-                    statisticsRef.current = backupStatistics;
-                    setStatistics(backupStatistics);
-                    writeStatisticsBackup(backupStatistics);
+                    if (res.data.profile !== undefined) {
+                        const loadedProfile = normalizeCommanderProfile(res.data.profile);
+                        commanderProfileRef.current = loadedProfile;
+                        setCommanderProfile(loadedProfile);
+                        writeProfileBackup(loadedProfile);
+                    } else if (backupProfile) {
+                        commanderProfileRef.current = backupProfile;
+                        setCommanderProfile(backupProfile);
+                        writeProfileBackup(backupProfile);
+                    }
+                } else {
+                    if (backupStatistics) {
+                        statisticsRef.current = backupStatistics;
+                        setStatistics(backupStatistics);
+                        writeStatisticsBackup(backupStatistics);
+                    }
+                    if (backupProfile) {
+                        commanderProfileRef.current = backupProfile;
+                        setCommanderProfile(backupProfile);
+                        writeProfileBackup(backupProfile);
+                    }
                 }
             } finally {
                 setDidLoadSave(true);
@@ -1819,9 +2031,16 @@ function App() {
     }, [achievementUnlocks]);
 
     useEffect(() => {
-        skinsProfileRef.current = skinsProfile;
-        (window as Window & { agSkinLoadout?: PlayerSkinProfile['loadout'] }).agSkinLoadout = skinsProfile.loadout;
-        window.dispatchEvent(new CustomEvent('ag:skin-loadout-changed', { detail: skinsProfile.loadout }));
+        const normalizedProfile = normalizeCommanderProfile(commanderProfile);
+        commanderProfileRef.current = normalizedProfile;
+        writeProfileBackup(normalizedProfile);
+    }, [commanderProfile]);
+
+    useEffect(() => {
+        const enhancedProfile = withSkinLoadoutEnhancements(skinsProfile);
+        skinsProfileRef.current = enhancedProfile;
+        (window as Window & { agSkinLoadout?: PlayerSkinProfile['loadout'] }).agSkinLoadout = enhancedProfile.loadout;
+        window.dispatchEvent(new CustomEvent('ag:skin-loadout-changed', { detail: enhancedProfile.loadout }));
     }, [skinsProfile]);
 
     useEffect(() => {
@@ -1839,6 +2058,14 @@ function App() {
 
         void commitSkinsProfile(sanitizedProfile);
     }, [didLoadSave, unlockedSkinIds]);
+
+    useEffect(() => {
+        if (!commanderDisplayName.trim()) {
+            return;
+        }
+
+        socket.emit('set_player_name', commanderDisplayName);
+    }, [commanderDisplayName]);
 
     useEffect(() => {
         creatingSteamLobbyRef.current = creatingSteamLobby;
@@ -2466,7 +2693,10 @@ function App() {
             return;
         }
 
-        void commitAchievementUnlocks(nextState);
+        void (async () => {
+            await commitAchievementUnlocks(nextState);
+            await grantProfileStars(newlyUnlocked.length * ACHIEVEMENT_STAR_REWARD, unlockedAt);
+        })();
 
         if (steamService.isInitialized) {
             newlyUnlocked.forEach(achievementId => {
@@ -2559,6 +2789,7 @@ function App() {
             forceNew,
             queueType: options?.queueType,
             requiredPlayers: options?.requiredPlayers,
+            playerName: commanderDisplayName,
         });
         setIsPlaying(true);
     };
@@ -2574,6 +2805,7 @@ function App() {
                 setMatchStatsSource('lan');
                 setIsRankedMatch(false);
                 setSteamLobbyRole(null);
+                socket.emit('set_player_name', commanderDisplayName);
                 setIsPlaying(true);
                 setLastJoinedRoom(code);
             } else {
@@ -2587,6 +2819,7 @@ function App() {
             setMatchStatsSource('lan');
             setIsRankedMatch(false);
             setSteamLobbyRole(null);
+            socket.emit('set_player_name', commanderDisplayName);
             socket.emit('joinByCode', code);
             setIsPlaying(true);
             setLastJoinedRoom(code);
@@ -2609,7 +2842,8 @@ function App() {
 
         socket.emit('quickJoin', {
             mapType: 'random',
-            tunnelUrl: generatedJoinCode || undefined
+            tunnelUrl: generatedJoinCode || undefined,
+            playerName: commanderDisplayName,
         });
     };
 
@@ -2850,6 +3084,7 @@ function App() {
             difficulty: level.difficulty,
             startingResources: level.startingResources,
             source: 'campaign',
+            playerName: commanderDisplayName,
         });
         setIsPlaying(true);
         matchStartedAtRef.current = Date.now();
@@ -2887,6 +3122,7 @@ function App() {
         socket.emit('createSoloGame', {
             ...customConfig,
             source: 'custom',
+            playerName: commanderDisplayName,
         });
         setIsPlaying(true);
         matchStartedAtRef.current = Date.now();
@@ -2901,6 +3137,7 @@ function App() {
         matchStartedAtRef.current = null;
         const nextStatistics = recordMatchResult(statisticsRef.current, summary, playedAt);
         const committed = await commitStatistics(nextStatistics);
+        await grantProfileStars(getMatchStarReward(summary), playedAt);
 
         if (steamService.isInitialized) {
             const syncedStatistics = await pushStatisticsToSteam(committed);
@@ -3012,13 +3249,23 @@ function App() {
             {/* Main Menu Layer */}
             {isUIVisible && !isPlaying && (!steamError || isDevBypass) && (
                 <>
-                    <button
-                        type="button"
-                        className="patch-notes-float-btn"
-                        onClick={() => setShowPatchNotes(true)}
-                    >
-                        Patch Notes
-                    </button>
+                    <div className="top-left-actions">
+                        <button
+                            type="button"
+                            className="patch-notes-float-btn"
+                            onClick={() => setShowPatchNotes(true)}
+                        >
+                            Patch Notes
+                        </button>
+                        <button
+                            type="button"
+                            className="profile-float-btn"
+                            onClick={() => setShowProfileModal(true)}
+                        >
+                            <span className="profile-float-btn__star" aria-hidden="true">★</span>
+                            Profile
+                        </button>
+                    </div>
 
                     <button
                         type="button"
@@ -3037,6 +3284,24 @@ function App() {
                         <span className="wishlist-float-btn__label">
                             <span className="wishlist-float-btn__eyebrow">Steam</span>
                             <span className="wishlist-float-btn__text">Wishlist on Steam</span>
+                        </span>
+                    </button>
+
+                    <button
+                        type="button"
+                        className="request-changes-float-btn"
+                        onClick={handleRequestChangesClick}
+                    >
+                        <span className="request-changes-float-btn__icon" aria-hidden="true">
+                            <svg viewBox="0 0 64 64" className="request-changes-float-btn__icon-svg">
+                                <path d="M10 16c0-5 4-9 9-9h26c5 0 9 4 9 9v19c0 5-4 9-9 9H31L18 56v-12c-5-.4-8-4.2-8-9Z" />
+                                <path d="M21 24h22M21 34h14" className="request-changes-float-btn__icon-lines" />
+                                <path d="M44 43v12M38 49h12" className="request-changes-float-btn__icon-plus" />
+                            </svg>
+                        </span>
+                        <span className="request-changes-float-btn__label">
+                            <span className="request-changes-float-btn__eyebrow">Steam Forum</span>
+                            <span className="request-changes-float-btn__text">Request Changes</span>
                         </span>
                     </button>
 
@@ -3541,6 +3806,7 @@ function App() {
                                 <LazyLeaderboardsPanel
                                     steamConnected={Boolean(steamUser && steamService.isInitialized)}
                                     steamPersonaName={steamUser?.name}
+                                    onLeaderboardRewardEligible={handleLeaderboardRewardEligible}
                                 />
                             </Suspense>
                             <button onClick={() => setMenuView('main')} className="menu-btn secondary">Back</button>
@@ -3619,6 +3885,21 @@ function App() {
                 </Suspense>
             )}
 
+            {showProfileModal && (
+                <Suspense fallback={null}>
+                    <LazyProfileModal
+                        isOpen={showProfileModal}
+                        onClose={() => setShowProfileModal(false)}
+                        commanderProfile={commanderProfile}
+                        steamPersonaName={steamUser?.name}
+                        statistics={statistics}
+                        achievements={evaluatedAchievements}
+                        steamConnected={Boolean(steamUser && steamService.isInitialized)}
+                        onChangeDisplayName={handleChangeDisplayName}
+                    />
+                </Suspense>
+            )}
+
             {/* In-Game UI Layer - Keep mounted to preserve state, but hide if toggled/blocked */}
             <div style={{ display: (isUIVisible && isPlaying && (!steamError || isDevBypass)) ? 'block' : 'none' }}>
                 {isPlaying && (
@@ -3635,6 +3916,8 @@ function App() {
                             matchStatsSource={matchStatsSource}
                             rankedMatch={isRankedMatch}
                             currentRankedPoints={statistics.rankedProgress.points}
+                            currentPlayerStatistics={statistics}
+                            steamPersonaName={steamUser?.name}
                             steamLobbyId={steamLobbyId}
                             steamLobbyRole={steamLobbyRole}
                             steamMultiplayerDiagnostics={steamDiagnostics}

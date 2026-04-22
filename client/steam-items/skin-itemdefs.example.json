@@ -1,0 +1,111 @@
+{
+  "note": "Game-side Steam Inventory item definition IDs. Create matching ItemDefs in Steamworks Inventory Service before enabling live grants/store bundles.",
+  "items": [
+    { "itemdefid": 4100, "name": "ranked_gold_skin", "display_name": "Gold Ranked Skin", "type": "item", "tradable": true, "marketable": false },
+    { "itemdefid": 4101, "name": "ranked_platinum_skin", "display_name": "Platinum Ranked Skin", "type": "item", "tradable": true, "marketable": false },
+    { "itemdefid": 4102, "name": "ranked_topaz_skin", "display_name": "Topaz Ranked Skin", "type": "item", "tradable": true, "marketable": false },
+    { "itemdefid": 4103, "name": "ranked_diamond_skin", "display_name": "Diamond Ranked Skin", "type": "item", "tradable": true, "marketable": false },
+    { "itemdefid": 4104, "name": "ranked_obsidian_skin", "display_name": "Obsidian Ranked Skin", "type": "item", "tradable": true, "marketable": false },
+    { "itemdefid": 4105, "name": "ranked_godly_skin", "display_name": "Godly Ranked Skin", "type": "item", "tradable": true, "marketable": false },
+    { "itemdefid": 4200, "name": "demo_ruby_mastery_skin", "display_name": "Ruby Mastery Skin", "type": "item", "tradable": false, "marketable": false },
+    { "itemdefid": 4301, "name": "leaderboard_world_champion_skin", "display_name": "World Champion Leaderboard Skin", "type": "item", "tradable": true, "marketable": false },
+    { "itemdefid": 4302, "name": "leaderboard_silver_vanguard_skin", "display_name": "Silver Vanguard Leaderboard Skin", "type": "item", "tradable": true, "marketable": false },
+    { "itemdefid": 4303, "name": "leaderboard_bronze_warlord_skin", "display_name": "Bronze Warlord Leaderboard Skin", "type": "item", "tradable": true, "marketable": false },
+    { "itemdefid": 4310, "name": "leaderboard_top_ten_skin", "display_name": "Top Ten Contender Leaderboard Skin", "type": "item", "tradable": true, "marketable": false },
+    { "itemdefid": 4999, "name": "developer_rainbow_skin", "display_name": "Developer Rainbow Skin", "type": "item", "hidden": true, "tradable": false, "marketable": false },
+    { "itemdefid": 5100, "name": "stars_currency", "display_name": "Stars", "type": "item", "tradable": false, "marketable": false, "description": "Profile currency used for commander profile services such as paid name changes." }
+  ],
+  "store_products": [
+    {
+      "sku": "skin_ranked_gold",
+      "itemdefid": 4100,
+      "product_name": "Gold Ranked Skin",
+      "store_visibility": "season_reward_or_admin_grant",
+      "enhancement_rule": "Duplicate copies enhance at 3, 6, 9, 12+ copies."
+    },
+    {
+      "sku": "skin_ranked_platinum",
+      "itemdefid": 4101,
+      "product_name": "Platinum Ranked Skin",
+      "store_visibility": "season_reward_or_admin_grant",
+      "enhancement_rule": "Duplicate copies enhance at 3, 6, 9, 12+ copies."
+    },
+    {
+      "sku": "skin_ranked_topaz",
+      "itemdefid": 4102,
+      "product_name": "Topaz Ranked Skin",
+      "store_visibility": "season_reward_or_admin_grant",
+      "enhancement_rule": "Duplicate copies enhance at 3, 6, 9, 12+ copies."
+    },
+    {
+      "sku": "skin_ranked_diamond",
+      "itemdefid": 4103,
+      "product_name": "Diamond Ranked Skin",
+      "store_visibility": "season_reward_or_admin_grant",
+      "enhancement_rule": "Duplicate copies enhance at 3, 6, 9, 12+ copies."
+    },
+    {
+      "sku": "skin_ranked_obsidian",
+      "itemdefid": 4104,
+      "product_name": "Obsidian Ranked Skin",
+      "store_visibility": "season_reward_or_admin_grant",
+      "enhancement_rule": "Duplicate copies enhance at 3, 6, 9, 12+ copies."
+    },
+    {
+      "sku": "skin_ranked_godly",
+      "itemdefid": 4105,
+      "product_name": "Godly Ranked Skin",
+      "store_visibility": "season_reward_or_admin_grant",
+      "enhancement_rule": "Duplicate copies enhance at 3, 6, 9, 12+ copies."
+    },
+    {
+      "sku": "skin_demo_ruby_mastery",
+      "itemdefid": 4200,
+      "product_name": "Ruby Demo Mastery Skin",
+      "store_visibility": "achievement_only",
+      "enhancement_rule": "Duplicate copies enhance at 3, 6, 9, 12+ copies if golden achievement variants are granted later."
+    },
+    {
+      "sku": "skin_leaderboard_first",
+      "itemdefid": 4301,
+      "product_name": "World Champion Leaderboard Skin",
+      "store_visibility": "leaderboard_reward_only",
+      "enhancement_rule": "Each leaderboard #1 reward grants another copy."
+    },
+    {
+      "sku": "skin_leaderboard_second",
+      "itemdefid": 4302,
+      "product_name": "Silver Vanguard Leaderboard Skin",
+      "store_visibility": "leaderboard_reward_only",
+      "enhancement_rule": "Each leaderboard #2 reward grants another copy."
+    },
+    {
+      "sku": "skin_leaderboard_third",
+      "itemdefid": 4303,
+      "product_name": "Bronze Warlord Leaderboard Skin",
+      "store_visibility": "leaderboard_reward_only",
+      "enhancement_rule": "Each leaderboard #3 reward grants another copy."
+    },
+    {
+      "sku": "skin_leaderboard_top_ten",
+      "itemdefid": 4310,
+      "product_name": "Top Ten Leaderboard Skin",
+      "store_visibility": "leaderboard_reward_only",
+      "enhancement_rule": "Each top 4-10 leaderboard reward grants another copy."
+    },
+    {
+      "sku": "skin_developer_rainbow",
+      "itemdefid": 4999,
+      "product_name": "Developer Rainbow Skin",
+      "store_visibility": "hidden_admin_only",
+      "enhancement_rule": "Creator-only; do not list in the public Steam item store."
+    },
+    {
+      "sku": "stars_currency",
+      "itemdefid": 5100,
+      "product_name": "Stars Currency",
+      "store_visibility": "profile_currency",
+      "enhancement_rule": "Stars are saved in the local/Steam profile economy and can be spent on profile services such as commander name changes."
+    }
+  ]
+}

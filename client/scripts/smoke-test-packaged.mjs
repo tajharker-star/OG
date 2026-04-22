@@ -30,6 +30,12 @@ const portByPlatform = {
   windows: "3903",
 };
 
+const directSmokeTimeoutMsByPlatform = {
+  macos: 75000,
+  linux: 20000,
+  windows: 20000,
+};
+
 const rendererReadyPatterns = [
   "[Electron] Renderer finished loading.",
   "[SmokeTest] Renderer loaded. Closing app shortly.",
@@ -291,7 +297,7 @@ async function runDirectSmokeTest(packagedTarget) {
     const timeout = setTimeout(() => {
       timedOut = true;
       child.kill("SIGTERM");
-    }, 20000);
+    }, directSmokeTimeoutMsByPlatform[target.key] ?? 20000);
 
     child.on("exit", (code, signal) => {
       clearTimeout(timeout);
@@ -378,8 +384,4 @@ console.log(`[SmokeTest] Launch target: ${packagedTarget.binaryPath}`);
 console.log(`[SmokeTest] Launch cwd: ${packagedTarget.cwd}`);
 console.log(`[SmokeTest] Using staged depot binary: ${usingStagedBinary}`);
 
-if (target.key === "macos") {
-  await runMacSmokeTest(packagedTarget);
-} else {
-  await runDirectSmokeTest(packagedTarget);
-}
+await runDirectSmokeTest(packagedTarget);

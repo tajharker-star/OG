@@ -31,6 +31,86 @@ export interface PatchNoteEntry {
 
 export const PATCH_NOTE_ENTRIES: PatchNoteEntry[] = [
     {
+        id: 'profile-stars-and-name-change-economy',
+        badge: 'Latest',
+        filters: ['Latest', 'Content'],
+        sortOrder: 186,
+        dateLabel: 'Apr 22, 2026',
+        title: 'Commander profiles, Stars currency, and name changes',
+        summary: 'The lobby now has a dedicated Profile button with your highest rank badge, full stat record, achievements, Steam leaderboard placements, and a Stars-powered commander name system.',
+        highlights: [
+            'Added a new Profile button next to Patch Notes so players can quickly open their commander profile from the main menu.',
+            'Profiles now show highest ranked division, the matching Conquerors-style rank badge, lifetime Stars, full stats, achievement progress, and live Steam leaderboard placement snapshots.',
+            'Added Stars as the new in-game profile currency, using the actual logo star artwork so the currency matches the game identity.',
+            'Added an in-game commander name changer with the first name change free and later changes costing Stars.',
+            'Updated local match joining so the chosen commander name is sent into campaign, custom, LAN, public, and Steam rooms instead of falling back to generic player IDs.'
+        ],
+        tags: ['Profiles', 'Stars', 'Stats', 'Steam'],
+        iconKey: 'stats',
+        changeIcons: ['stats', 'steam', 'lobby'],
+        accent: '#ffe27a'
+    },
+    {
+        id: 'unique-prestige-banners-and-rainbow-developer-skins',
+        badge: 'Latest',
+        filters: ['Latest', 'Content'],
+        sortOrder: 180,
+        dateLabel: 'Apr 22, 2026',
+        title: 'Unique prestige banners and live rainbow developer skins',
+        summary: 'Rank, achievement, leaderboard, and developer cosmetics now look much more distinct, with landscape prestige banners and animated Developer rainbow skin color in actual matches.',
+        highlights: [
+            'Rebuilt rank and leaderboard badges into landscape prestige banners so they fit profile cards and the armory more cleanly.',
+            'Gave each badge family its own silhouette and symbol language: coin-gold, icy platinum mask, topaz flame crystal, diamond gem, obsidian cracked mask, godly halo, ruby mastery crystal, podium leaderboard crests, and rainbow developer prism.',
+            'Limited star symbols to the hardest prestige rewards such as Godly, Ruby mastery, and first-place champion status.',
+            'Added stronger rarity-based glow and extra side shards around super achievements and champion-level banners.',
+            'Changed the actual Developer skin rendering so units and buildings now rainbow-fade in-game instead of only showing rainbow in the UI badge.'
+        ],
+        tags: ['Skins', 'Profiles', 'Leaderboards', 'Visuals'],
+        iconKey: 'stats',
+        changeIcons: ['stats', 'units', 'buildings'],
+        accent: '#ff7bdc'
+    },
+    {
+        id: 'profile-badges-tab-profiles-and-feedback-link',
+        badge: 'Latest',
+        filters: ['Latest', 'Content'],
+        sortOrder: 176,
+        dateLabel: 'Apr 22, 2026',
+        title: 'Logo-styled badges, Tab profiles, and Steam feedback link',
+        summary: 'Profiles, leaderboards, and the Skins armory now share a cleaner Conquerors-style badge language, with in-match player profiles and a direct Steam discussion link for requesting changes.',
+        highlights: [
+            'Replaced the random armory unit/building placeholder art with no-text prestige badges inspired by the Conquerors: Domination logo: shield silhouettes, wing plates, ember glows, crowns, laurels, and rank-specific materials.',
+            'Added matching leaderboard position badges for #1, #2, #3, and top 10 reward states so skins, profiles, and leaderboard rewards feel like one connected system.',
+            'Added an in-match Tab roster: hold Tab to preview every player, then hover a commander to see their rank badge, live match power, resources, units, structures, bases, and local lifetime stats.',
+            'Added a profile report action that sends the report to the match host log and confirms it in chat for easier moderation testing.',
+            'Added a Request Changes button under Wishlist on Steam that opens the official Steam discussion thread for player feedback.'
+        ],
+        tags: ['Profiles', 'Skins', 'Leaderboards', 'Steam'],
+        iconKey: 'steam',
+        changeIcons: ['stats', 'steam', 'lobby'],
+        accent: '#ffcb55'
+    },
+    {
+        id: 'leaderboard-skins-and-steam-item-armory',
+        badge: 'Latest',
+        filters: ['Latest', 'Content'],
+        sortOrder: 170,
+        dateLabel: 'Apr 22, 2026',
+        title: 'Leaderboard skins, Steam item hooks, and armory cleanup',
+        summary: 'The Skins armory now treats prestige finishes more like collectible rewards, with global leaderboard trophy skins, duplicate-copy enhancement tiers, and a cleaner owned-versus-locked layout.',
+        highlights: [
+            'Added four Steam leaderboard reward skins: World Champion for #1, Silver Vanguard for #2, Bronze Warlord for #3, and Top Ten Contender for #4-#10 on any supported global leaderboard.',
+            'Unlocked skins now track item copy counts and enhancement tiers, with 1 copy as normal, 3 copies unlocking Enhancement +1, 6 copies unlocking +2, 9 copies unlocking +3, and higher copies continuing the pattern.',
+            'Reworked the armory so owned skins are shown first while unowned skins live inside a hidden locked-vault tab that players can open only when they want to browse future rewards.',
+            'Prepared Steam Inventory item definition hooks for ranked, achievement, leaderboard, and developer skins so the Steamworks Inventory Service can be connected to the exact in-game skin rewards once the item definitions are published.',
+            'Changed the hidden Developer skin from green to an animated rainbow prestige finish above Ruby and Godly.'
+        ],
+        tags: ['Skins', 'Leaderboards', 'Steam', 'Inventory'],
+        iconKey: 'steam',
+        changeIcons: ['steam', 'stats', 'lobby'],
+        accent: '#ffe177'
+    },
+    {
         id: 'steam-multiplayer-and-ranked-quick-match',
         badge: 'Latest',
         filters: ['Latest', 'Content', 'Balance'],

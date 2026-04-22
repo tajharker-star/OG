@@ -56,6 +56,26 @@ export interface SteamStatsUpdateResult {
     error?: string;
 }
 
+export interface SteamInventoryItem {
+    itemDefId: number;
+    quantity: number;
+    itemId?: string;
+}
+
+export interface SteamInventoryResult {
+    success: boolean;
+    items: SteamInventoryItem[];
+    unavailable?: boolean;
+    error?: string;
+}
+
+export interface SteamInventoryGrantResult {
+    success: boolean;
+    granted: number[];
+    unavailable?: boolean;
+    error?: string;
+}
+
 export type SteamLeaderboardSortMethod = 'ascending' | 'descending';
 export type SteamLeaderboardDisplayType = 'numeric' | 'time_seconds' | 'time_milliseconds';
 export type SteamLeaderboardUploadMethod = 'keep_best' | 'force_update';
@@ -327,6 +347,40 @@ class SteamService {
         }
 
         return await ipcRenderer.invoke('steam:set-leaderboard-score', options);
+    }
+
+    public async getInventoryItems(): Promise<SteamInventoryResult> {
+        if (!this.isInitialized || !ipcRenderer) {
+            return { success: false, items: [], unavailable: true, error: 'Not initialized' };
+        }
+
+        try {
+            return await ipcRenderer.invoke('steam:get-inventory-items');
+        } catch (error) {
+            return {
+                success: false,
+                items: [],
+                unavailable: true,
+                error: error instanceof Error ? error.message : String(error),
+            };
+        }
+    }
+
+    public async requestInventoryItemGrant(itemDefIds: number[]): Promise<SteamInventoryGrantResult> {
+        if (!this.isInitialized || !ipcRenderer) {
+            return { success: false, granted: [], unavailable: true, error: 'Not initialized' };
+        }
+
+        try {
+            return await ipcRenderer.invoke('steam:request-inventory-items', itemDefIds);
+        } catch (error) {
+            return {
+                success: false,
+                granted: [],
+                unavailable: true,
+                error: error instanceof Error ? error.message : String(error),
+            };
+        }
     }
 }
 

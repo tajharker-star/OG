@@ -2393,6 +2393,8 @@ export class MainScene extends Phaser.Scene {
         this.activeSkinLoadout = {
             unitSkinId: initialSkinLoadout.unitSkinId || 'default',
             buildingSkinId: initialSkinLoadout.buildingSkinId || 'default',
+            unitEnhancementLevel: initialSkinLoadout.unitEnhancementLevel || 0,
+            buildingEnhancementLevel: initialSkinLoadout.buildingEnhancementLevel || 0,
         };
     }
 
@@ -2400,13 +2402,17 @@ export class MainScene extends Phaser.Scene {
         const nextLoadout = e.detail;
         if (!nextLoadout) return;
 
-        const sameUnitSkin = nextLoadout.unitSkinId === this.activeSkinLoadout.unitSkinId;
-        const sameBuildingSkin = nextLoadout.buildingSkinId === this.activeSkinLoadout.buildingSkinId;
+        const sameUnitSkin = nextLoadout.unitSkinId === this.activeSkinLoadout.unitSkinId
+            && (nextLoadout.unitEnhancementLevel || 0) === (this.activeSkinLoadout.unitEnhancementLevel || 0);
+        const sameBuildingSkin = nextLoadout.buildingSkinId === this.activeSkinLoadout.buildingSkinId
+            && (nextLoadout.buildingEnhancementLevel || 0) === (this.activeSkinLoadout.buildingEnhancementLevel || 0);
         if (sameUnitSkin && sameBuildingSkin) return;
 
         this.activeSkinLoadout = {
             unitSkinId: nextLoadout.unitSkinId || 'default',
             buildingSkinId: nextLoadout.buildingSkinId || 'default',
+            unitEnhancementLevel: nextLoadout.unitEnhancementLevel || 0,
+            buildingEnhancementLevel: nextLoadout.buildingEnhancementLevel || 0,
         };
 
         if (this.currentUnits.length > 0) {

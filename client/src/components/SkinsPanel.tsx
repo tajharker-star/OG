@@ -1,9 +1,14 @@
 import React from 'react';
 import { Modal } from './Modal';
 import { SkinRenderPreview } from './SkinRenderPreview';
+import { RankBadgeIcon } from './RankBadgeIcon';
 import {
     SKIN_DEFINITIONS,
     SKIN_DEFINITIONS_BY_ID,
+    STEAM_SKIN_ITEM_DEFS,
+    getSkinCopyCount,
+    getSkinEnhancementLabel,
+    getSkinEnhancementLevel,
     getSkinPreviewStyle,
     type PlayerSkinProfile,
     type SkinDefinition,
@@ -46,6 +51,12 @@ const FAMILY_SECTIONS: Array<{
         copy: 'These finishes climb from premium tournament metals into rare endgame prestige looks built for the full game ranked ladder.',
     },
     {
+        family: 'leaderboard',
+        title: 'Leaderboard Trophies',
+        eyebrow: 'Global Top 10',
+        copy: 'Leaderboard skins are awarded from live Steam leaderboards: #1, #2, #3, and a Top 10 contender finish for ranks 4-10.',
+    },
+    {
         family: 'achievement',
         title: 'Demo Mastery',
         eyebrow: 'Completion Reward',
@@ -59,6 +70,8 @@ const getCardEyebrow = (definition: SkinDefinition) => {
             return 'Developer Only';
         case 'ranked':
             return 'Season Reward';
+        case 'leaderboard':
+            return 'Steam Leaderboard';
         case 'achievement':
             return 'Mastery Reward';
         default:
@@ -74,30 +87,12 @@ const SkinSwatch: React.FC<{
     const style = getSkinPreviewStyle(skinId);
 
     return (
-        <div className={`skins-swatch skins-swatch--${focus} ${className}`.trim()} style={style}>
+        <div className={`skins-swatch skins-swatch--${focus} skins-swatch--skin-${skinId} ${className}`.trim()} style={style}>
             <div className="skins-swatch__ambient" />
-            <div className="skins-swatch__ground skins-swatch__ground--unit" />
-            <div className="skins-swatch__ground skins-swatch__ground--building" />
-
-            <div className="skins-swatch__unit-trail" />
-            <div className="skins-swatch__unit">
-                <div className="skins-swatch__unit-head" />
-                <div className="skins-swatch__unit-visor" />
-                <div className="skins-swatch__unit-body" />
-                <div className="skins-swatch__unit-shoulder" />
-                <div className="skins-swatch__unit-emblem" />
-                <div className="skins-swatch__unit-weapon" />
-            </div>
-
-            <div className="skins-swatch__building-trail" />
-            <div className="skins-swatch__building">
-                <div className="skins-swatch__building-roof" />
-                <div className="skins-swatch__building-body" />
-                <div className="skins-swatch__building-tower" />
-                <div className="skins-swatch__building-door" />
-                <div className="skins-swatch__building-emblem" />
-            </div>
-
+            <div className="skins-swatch__banner-backplate" />
+            <RankBadgeIcon skinId={skinId} size="large" className="skins-swatch__rank-badge" title={`${skinId} badge`} />
+            <div className="skins-swatch__banner-flame skins-swatch__banner-flame--left" />
+            <div className="skins-swatch__banner-flame skins-swatch__banner-flame--right" />
             <div className="skins-swatch__shine" />
         </div>
     );
@@ -122,11 +117,13 @@ const LoadoutPreview: React.FC<{
 const SkinCard: React.FC<{
     definition: SkinDefinition;
     unlocked: boolean;
+    copyCount: number;
+    enhancementLevel: number;
     activeUnit: boolean;
     activeBuilding: boolean;
     onEquip: (target: SkinTarget, skinId: SkinId) => void;
     onPreview: (skinId: SkinId) => void;
-}> = ({ definition, unlocked, activeUnit, activeBuilding, onEquip, onPreview }) => {
+}> = ({ definition, unlocked, copyCount, enhancementLevel, activeUnit, activeBuilding, onEquip, onPreview }) => {
     const equippedLabel = activeUnit && activeBuilding
         ? 'Units and towers are equipped'
         : activeUnit
@@ -134,6 +131,7 @@ const SkinCard: React.FC<{
             : activeBuilding
                 ? 'Towers are equipped'
                 : null;
+    const steamItem = STEAM_SKIN_ITEM_DEFS[definition.id];
 
     return (
         <article className={`skin-card ${unlocked ? 'skin-card--unlocked' : 'skin-card--locked'}`}>
@@ -151,6 +149,23 @@ const SkinCard: React.FC<{
 
             <div className="skin-card__summary">{definition.summary}</div>
             <div className="skin-card__unlock">{definition.unlockText}</div>
+
+            <div className="skin-card__inventory-row">
+                <span>{copyCount > 0 ? `${copyCount} owned` : 'No copies yet'}</span>
+                <strong>{getSkinEnhancementLabel(copyCount)}</strong>
+            </div>
+
+            <div className="skin-card__enhancement-track" aria-label={`Enhancement level ${enhancementLevel}`}>
+                {[0, 1, 2, 3].map((level) => (
+                    <span key={level} className={level <= enhancementLevel ? 'is-filled' : ''} />
+                ))}
+            </div>
+
+            {steamItem && (
+                <div className="skin-card__steam-item">
+                    Steam ItemDef #{steamItem.itemDefId} • {steamItem.rarity}
+                </div>
+            )}
 
             {equippedLabel && <div className="skin-card__equipped-note">{equippedLabel}</div>}
 
@@ -193,13 +208,56 @@ export const SkinsPanel: React.FC<SkinsPanelProps> = ({
     onEquip,
 }) => {
     const [previewSkinId, setPreviewSkinId] = React.useState<SkinId | null>(null);
+    const [showLockedVault, setShowLockedVault] = React.useState(false);
 
     const currentUnitSkin = SKIN_DEFINITIONS_BY_ID[profile.loadout.unitSkinId];
     const currentBuildingSkin = SKIN_DEFINITIONS_BY_ID[profile.loadout.buildingSkinId];
     const visibleDefinitions = SKIN_DEFINITIONS.filter((definition) => showDeveloperSkin || definition.family !== 'developer');
+    const ownedDefinitions = visibleDefinitions.filter((definition) => unlockedSkinIds.has(definition.id));
+    const lockedDefinitions = visibleDefinitions.filter((definition) => !unlockedSkinIds.has(definition.id));
     const rankedDefinitions = visibleDefinitions.filter((definition) => definition.family === 'ranked');
     const rankedUnlockedCount = rankedDefinitions.filter((definition) => unlockedSkinIds.has(definition.id)).length;
+    const ownedCopyCount = visibleDefinitions.reduce((total, definition) => total + getSkinCopyCount(profile, definition.id), 0);
     const previewDefinition = previewSkinId ? SKIN_DEFINITIONS_BY_ID[previewSkinId] : null;
+    const renderSkinSection = (section: typeof FAMILY_SECTIONS[number], items: SkinDefinition[], lockedVault = false) => {
+        if (items.length === 0) {
+            return null;
+        }
+
+        return (
+            <section key={`${lockedVault ? 'locked-' : ''}${section.family}`} className={`skins-panel__section ${lockedVault ? 'skins-panel__section--locked-vault' : ''}`}>
+                <div className="skins-panel__section-head">
+                    <div>
+                        <div className="skins-panel__section-eyebrow">{lockedVault ? 'Locked Vault' : section.eyebrow}</div>
+                        <div className="skins-panel__section-title">{lockedVault ? `${section.title} - Locked` : section.title}</div>
+                        <p className="skins-panel__section-copy">{lockedVault ? 'Hidden until you open this section so the armory stays clean while you browse owned skins.' : section.copy}</p>
+                    </div>
+                    <div className="skins-panel__section-count">{items.length} skin{items.length === 1 ? '' : 's'}</div>
+                </div>
+
+                <div className={`skins-panel__grid skins-panel__grid--${section.family}`}>
+                    {items.map((definition) => {
+                        const copyCount = getSkinCopyCount(profile, definition.id);
+                        const enhancementLevel = getSkinEnhancementLevel(profile, definition.id);
+
+                        return (
+                            <SkinCard
+                                key={definition.id}
+                                definition={definition}
+                                unlocked={unlockedSkinIds.has(definition.id)}
+                                copyCount={copyCount}
+                                enhancementLevel={enhancementLevel}
+                                activeUnit={profile.loadout.unitSkinId === definition.id}
+                                activeBuilding={profile.loadout.buildingSkinId === definition.id}
+                                onEquip={onEquip}
+                                onPreview={setPreviewSkinId}
+                            />
+                        );
+                    })}
+                </div>
+            </section>
+        );
+    };
 
     return (
         <>
@@ -208,8 +266,8 @@ export const SkinsPanel: React.FC<SkinsPanelProps> = ({
                     <div className="skins-panel__eyebrow">Armory</div>
                     <h3 className="skins-panel__title">Skins</h3>
                     <p className="skins-panel__copy">
-                        Equip prestige finishes for your units and towers. The ranked line now ramps from polished metals to luminous endgame prestige,
-                        while Ruby stays the mastery reward for fully clearing the demo.
+                        Equip prestige finishes for your units and towers. Leaderboard trophies, Steam item definitions, and duplicate-copy enhancement
+                        tiers now sit inside the armory, while locked skins stay tucked away until you open the vault.
                     </p>
 
                     <div className="skins-panel__summary-grid">
@@ -228,6 +286,14 @@ export const SkinsPanel: React.FC<SkinsPanelProps> = ({
                         <div className="skins-panel__summary-card">
                             <span>Ruby Progress</span>
                             <strong>{unlockedAchievementCount} / {totalAchievementCount} Achievements</strong>
+                        </div>
+                        <div className="skins-panel__summary-card">
+                            <span>Owned Copies</span>
+                            <strong>{ownedCopyCount.toLocaleString()}</strong>
+                        </div>
+                        <div className="skins-panel__summary-card">
+                            <span>Hidden Locked</span>
+                            <strong>{lockedDefinitions.length} skins</strong>
                         </div>
                     </div>
                 </section>
@@ -250,39 +316,33 @@ export const SkinsPanel: React.FC<SkinsPanelProps> = ({
                 {FAMILY_SECTIONS
                     .filter((section) => showDeveloperSkin || section.family !== 'developer')
                     .map((section) => {
-                    const items = visibleDefinitions.filter((definition) => definition.family === section.family);
+                        const items = ownedDefinitions.filter((definition) => definition.family === section.family);
+                        return renderSkinSection(section, items);
+                    })}
 
-                    if (items.length === 0) {
-                        return null;
-                    }
+                <section className="skins-panel__section skins-panel__section--vault-toggle">
+                    <div className="skins-panel__section-head">
+                        <div>
+                            <div className="skins-panel__section-eyebrow">Hidden Vault</div>
+                            <div className="skins-panel__section-title">Unowned Skins</div>
+                            <p className="skins-panel__section-copy">Open this only when you want to inspect skins you have not earned yet.</p>
+                        </div>
+                        <button
+                            type="button"
+                            className="skins-panel__vault-button"
+                            onClick={() => setShowLockedVault((value) => !value)}
+                        >
+                            {showLockedVault ? 'Hide Locked Skins' : `Show ${lockedDefinitions.length} Locked Skins`}
+                        </button>
+                    </div>
+                </section>
 
-                    return (
-                        <section key={section.family} className="skins-panel__section">
-                            <div className="skins-panel__section-head">
-                                <div>
-                                    <div className="skins-panel__section-eyebrow">{section.eyebrow}</div>
-                                    <div className="skins-panel__section-title">{section.title}</div>
-                                    <p className="skins-panel__section-copy">{section.copy}</p>
-                                </div>
-                                <div className="skins-panel__section-count">{items.length} skin{items.length === 1 ? '' : 's'}</div>
-                            </div>
-
-                            <div className={`skins-panel__grid skins-panel__grid--${section.family}`}>
-                                {items.map((definition) => (
-                                    <SkinCard
-                                        key={definition.id}
-                                        definition={definition}
-                                        unlocked={unlockedSkinIds.has(definition.id)}
-                                        activeUnit={profile.loadout.unitSkinId === definition.id}
-                                        activeBuilding={profile.loadout.buildingSkinId === definition.id}
-                                        onEquip={onEquip}
-                                        onPreview={setPreviewSkinId}
-                                    />
-                                ))}
-                            </div>
-                        </section>
-                    );
-                })}
+                {showLockedVault && FAMILY_SECTIONS
+                    .filter((section) => showDeveloperSkin || section.family !== 'developer')
+                    .map((section) => {
+                        const items = lockedDefinitions.filter((definition) => definition.family === section.family);
+                        return renderSkinSection(section, items, true);
+                    })}
             </div>
 
             <Modal

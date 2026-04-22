@@ -74,6 +74,38 @@ const MOTION_TRAIL_STYLES: Partial<Record<SkinId, MotionTrailStyle>> = {
         baseAlpha: 0.9,
         growth: 0.12,
     },
+    leaderboard_top10: {
+        spacing: 15,
+        minSpeed: 15,
+        lifetimeMs: 820,
+        maxActive: 220,
+        baseAlpha: 0.88,
+        growth: 0.12,
+    },
+    leaderboard_third: {
+        spacing: 14,
+        minSpeed: 14,
+        lifetimeMs: 860,
+        maxActive: 230,
+        baseAlpha: 0.9,
+        growth: 0.13,
+    },
+    leaderboard_second: {
+        spacing: 14,
+        minSpeed: 14,
+        lifetimeMs: 880,
+        maxActive: 240,
+        baseAlpha: 0.9,
+        growth: 0.13,
+    },
+    leaderboard_first: {
+        spacing: 13,
+        minSpeed: 14,
+        lifetimeMs: 940,
+        maxActive: 260,
+        baseAlpha: 0.93,
+        growth: 0.15,
+    },
     developer: {
         spacing: 13,
         minSpeed: 14,
@@ -83,6 +115,8 @@ const MOTION_TRAIL_STYLES: Partial<Record<SkinId, MotionTrailStyle>> = {
         growth: 0.14,
     },
 };
+
+const DEVELOPER_RAINBOW_COLORS = [0xff4fd8, 0xfff06b, 0x72ff7d, 0x79fff2, 0x7d8cff, 0xff4fd8];
 
 const blendColor = (from: number, to: number, amount: number): number => {
     const a = Phaser.Display.Color.ValueToColor(from);
@@ -103,6 +137,74 @@ const getBrightness = (color: number): number => {
 const isSkinTone = (color: number): boolean => {
     const rgb = Phaser.Display.Color.ValueToColor(color);
     return rgb.red > 120 && rgb.green > 80 && rgb.blue > 55 && rgb.red > rgb.green && rgb.green > rgb.blue * 0.8;
+};
+
+const getStoredBaseColor = (
+    child: Phaser.GameObjects.GameObject,
+    key: string,
+    currentColor: number
+): number => {
+    const dataTarget = child as Phaser.GameObjects.GameObject & {
+        getData?: (key: string) => unknown;
+        setData?: (key: string, value: unknown) => Phaser.GameObjects.GameObject;
+    };
+    const storedColor = typeof dataTarget.getData === 'function' ? dataTarget.getData(key) : undefined;
+    if (typeof storedColor === 'number' && Number.isFinite(storedColor)) {
+        return storedColor;
+    }
+
+    if (typeof dataTarget.setData === 'function') {
+        dataTarget.setData(key, currentColor);
+    }
+    return currentColor;
+};
+
+const createDeveloperRuntimePalette = (basePalette: SkinPalette, color: number): SkinPalette => ({
+    ...basePalette,
+    primary: color,
+    secondary: blendColor(color, 0xffffff, 0.52),
+    stroke: blendColor(color, 0xffffff, 0.72),
+    glow: blendColor(color, 0xffffff, 0.18),
+    shadow: blendColor(basePalette.shadow, color, 0.14),
+});
+
+const getRuntimeSkinEnhancementLevel = (skinId: SkinId, target: SkinRenderTarget): number => {
+    if (typeof window === 'undefined' || skinId === 'default') {
+        return 0;
+    }
+
+    const loadout = (window as Window & {
+        agSkinLoadout?: {
+            unitSkinId?: SkinId;
+            buildingSkinId?: SkinId;
+            unitEnhancementLevel?: number;
+            buildingEnhancementLevel?: number;
+        };
+    }).agSkinLoadout;
+
+    const rawLevel = target === 'building'
+        ? (loadout?.buildingSkinId === skinId ? loadout?.buildingEnhancementLevel : 0)
+        : (loadout?.unitSkinId === skinId ? loadout?.unitEnhancementLevel : 0);
+
+    return Math.max(0, Math.min(8, Math.floor(rawLevel || 0)));
+};
+
+const enhancePaletteForSkinCopies = (palette: SkinPalette, enhancementLevel: number): SkinPalette => {
+    if (enhancementLevel <= 0) {
+        return palette;
+    }
+
+    const boost = Math.min(0.55, enhancementLevel * 0.11);
+    return {
+        ...palette,
+        glowAlpha: Math.min(0.38, palette.glowAlpha * (1 + boost) + enhancementLevel * 0.012),
+        sheenAlpha: Math.min(0.3, palette.sheenAlpha * (1 + boost * 0.8) + enhancementLevel * 0.006),
+        outerGlowAlpha: Math.min(0.46, palette.outerGlowAlpha * (1 + boost) + enhancementLevel * 0.014),
+        outlineAlpha: Math.min(0.52, palette.outlineAlpha * (1 + boost * 0.8) + enhancementLevel * 0.01),
+        pulseStrength: Math.min(0.16, palette.pulseStrength * (1 + boost * 0.7) + enhancementLevel * 0.004),
+        trailAlpha: Math.min(0.34, palette.trailAlpha * (1 + boost) + enhancementLevel * 0.012),
+        trailScale: Math.min(1.5, palette.trailScale + enhancementLevel * 0.035),
+    };
 };
 
 const transformFillColor = (color: number, palette: SkinPalette, target: SkinRenderTarget): number => {
@@ -163,8 +265,9 @@ const applySkinToDisplayObject = (
     };
 
     if (!preserveColor && typeof maybeShape.fillColor === 'number' && typeof maybeShape.setFillStyle === 'function') {
+        const baseFillColor = getStoredBaseColor(child, 'skinBaseFillColor', maybeShape.fillColor);
         maybeShape.setFillStyle(
-            isAuraLine ? palette.glow : transformFillColor(maybeShape.fillColor, palette, target),
+            isAuraLine ? palette.glow : transformFillColor(baseFillColor, palette, target),
             typeof maybeShape.fillAlpha === 'number' ? maybeShape.fillAlpha : 1
         );
     }
@@ -176,9 +279,10 @@ const applySkinToDisplayObject = (
         && typeof maybeShape.setStrokeStyle === 'function'
     ) {
         if (!preserveColor) {
+            const baseStrokeColor = getStoredBaseColor(child, 'skinBaseStrokeColor', maybeShape.strokeColor);
             maybeShape.setStrokeStyle(
                 maybeShape.lineWidth,
-                isAuraLine ? palette.glow : transformStrokeColor(maybeShape.strokeColor, palette, target),
+                isAuraLine ? palette.glow : transformStrokeColor(baseStrokeColor, palette, target),
                 typeof maybeShape.strokeAlpha === 'number' ? maybeShape.strokeAlpha : 1
             );
         }
@@ -188,6 +292,74 @@ const applySkinToDisplayObject = (
     if (!preserveColor && typeof maybeImage.setTint === 'function' && child instanceof Phaser.GameObjects.Image) {
         maybeImage.setTint(blendColor(0xffffff, palette.primary, palette.fillBlend * 0.5));
     }
+};
+
+const applyEffectTint = (child: Phaser.GameObjects.GameObject, palette: SkinPalette) => {
+    if (child instanceof Phaser.GameObjects.Container) {
+        child.list.forEach((nestedChild) => applyEffectTint(nestedChild, palette));
+        return;
+    }
+
+    const maybeShape = child as Phaser.GameObjects.Shape & {
+        fillColor?: number;
+        fillAlpha?: number;
+        strokeColor?: number;
+        strokeAlpha?: number;
+        lineWidth?: number;
+        setFillStyle?: (color?: number, alpha?: number) => Phaser.GameObjects.Shape;
+        setStrokeStyle?: (lineWidth?: number, color?: number, alpha?: number) => Phaser.GameObjects.Shape;
+    };
+
+    if (typeof maybeShape.fillColor === 'number' && typeof maybeShape.setFillStyle === 'function') {
+        const alpha = typeof maybeShape.fillAlpha === 'number' ? maybeShape.fillAlpha : 1;
+        maybeShape.setFillStyle(blendColor(palette.glow, palette.secondary, 0.26), alpha);
+    }
+
+    if (
+        typeof maybeShape.strokeColor === 'number'
+        && typeof maybeShape.lineWidth === 'number'
+        && maybeShape.lineWidth > 0
+        && typeof maybeShape.setStrokeStyle === 'function'
+    ) {
+        const alpha = typeof maybeShape.strokeAlpha === 'number' ? maybeShape.strokeAlpha : 1;
+        maybeShape.setStrokeStyle(maybeShape.lineWidth, palette.stroke, alpha);
+    }
+
+    const maybeTintable = child as Phaser.GameObjects.GameObject & {
+        setTint?: (topLeft?: number, topRight?: number, bottomLeft?: number, bottomRight?: number) => Phaser.GameObjects.GameObject;
+    };
+    if (typeof maybeTintable.setTint === 'function') {
+        maybeTintable.setTint(palette.glow, palette.secondary, palette.primary, palette.glow);
+    }
+};
+
+const animateDeveloperSkinPalette = (
+    scene: Phaser.Scene,
+    container: Phaser.GameObjects.Container,
+    target: SkinRenderTarget,
+    basePalette: SkinPalette,
+    glowLayer: Phaser.GameObjects.Container,
+    sheenLayer: Phaser.GameObjects.Container
+) => {
+    scene.tweens.addCounter({
+        from: 0,
+        to: DEVELOPER_RAINBOW_COLORS.length - 1,
+        duration: 4200,
+        repeat: -1,
+        ease: 'Sine.easeInOut',
+        onUpdate: (tween) => {
+            const value = tween.getValue() ?? 0;
+            const low = Math.floor(value);
+            const high = (low + 1) % DEVELOPER_RAINBOW_COLORS.length;
+            const color = blendColor(DEVELOPER_RAINBOW_COLORS[low], DEVELOPER_RAINBOW_COLORS[high], value - low);
+            const palette = createDeveloperRuntimePalette(basePalette, color);
+
+            container.list
+                .filter((child) => child !== glowLayer && child !== sheenLayer)
+                .forEach((child) => applySkinToDisplayObject(child, palette, target));
+            applyEffectTint(glowLayer, palette);
+        },
+    });
 };
 
 const getFallbackMetrics = (target: SkinRenderTarget): SkinEffectMetrics => {
@@ -1459,6 +1631,23 @@ const addDeveloperEffect = (
     );
     const spark = addDiamondSpark(scene, metrics.centerX + metrics.width * 0.24, metrics.centerY - metrics.height * 0.2, Math.max(3, metrics.width * 0.032), palette.secondary, 0.46);
     group.add([flameOuter, flameInner, spark]);
+
+    scene.tweens.addCounter({
+        from: 0,
+        to: DEVELOPER_RAINBOW_COLORS.length - 1,
+        duration: 4200,
+        repeat: -1,
+        ease: 'Sine.easeInOut',
+        onUpdate: (tween) => {
+            const value = tween.getValue() ?? 0;
+            const low = Math.floor(value);
+            const high = (low + 1) % DEVELOPER_RAINBOW_COLORS.length;
+            const color = blendColor(DEVELOPER_RAINBOW_COLORS[low], DEVELOPER_RAINBOW_COLORS[high], value - low);
+            flameOuter.setFillStyle(color, 0.52);
+            flameInner.setFillStyle(blendColor(color, 0xffffff, 0.38), 0.42);
+            spark.setFillStyle(blendColor(color, 0xffffff, 0.18), 0.56);
+        },
+    });
 };
 
 const createSheenLayer = (
@@ -1491,6 +1680,21 @@ const createSheenLayer = (
             break;
         case 'ruby':
             addRubyEffect(scene, group, palette, metrics);
+            break;
+        case 'leaderboard_first':
+            addGoldEffect(scene, group, palette, metrics);
+            addGodlyEffect(scene, group, palette, metrics);
+            break;
+        case 'leaderboard_second':
+            addPlatinumEffect(scene, group, palette, metrics);
+            addDiamondEffect(scene, group, palette, metrics);
+            break;
+        case 'leaderboard_third':
+            addTopazEffect(scene, group, palette, metrics);
+            addRubyEffect(scene, group, palette, metrics);
+            break;
+        case 'leaderboard_top10':
+            addDiamondEffect(scene, group, palette, metrics);
             break;
         case 'developer':
             addDeveloperEffect(scene, group, palette, metrics);
@@ -1598,6 +1802,24 @@ const addDeveloperTrail = (
     const emberA = addDiamondSpark(scene, length * 0.18, -width * 0.14, Math.max(2, width * 0.1), palette.secondary, 0.28);
     const emberB = addDiamondSpark(scene, -length * 0.12, width * 0.1, Math.max(1.8, width * 0.08), palette.glow, 0.24);
     group.add([flameBody, innerFlame, emberA, emberB]);
+
+    scene.tweens.addCounter({
+        from: 0,
+        to: DEVELOPER_RAINBOW_COLORS.length - 1,
+        duration: 3600,
+        repeat: -1,
+        ease: 'Sine.easeInOut',
+        onUpdate: (tween) => {
+            const value = tween.getValue() ?? 0;
+            const low = Math.floor(value);
+            const high = (low + 1) % DEVELOPER_RAINBOW_COLORS.length;
+            const color = blendColor(DEVELOPER_RAINBOW_COLORS[low], DEVELOPER_RAINBOW_COLORS[high], value - low);
+            flameBody.setFillStyle(color, 0.58);
+            innerFlame.setFillStyle(blendColor(color, 0xffffff, 0.34), 0.46);
+            emberA.setFillStyle(blendColor(color, 0xffffff, 0.18), 0.34);
+            emberB.setFillStyle(color, 0.3);
+        },
+    });
 };
 
 export const createMotionTrailSegment = (
@@ -1614,10 +1836,11 @@ export const createMotionTrailSegment = (
         return null;
     }
 
-    const { palette } = definition;
+    const enhancementLevel = getRuntimeSkinEnhancementLevel(skinId, 'unit');
+    const palette = enhancePaletteForSkinCopies(definition.palette, enhancementLevel);
     const root = scene.add.container(x, y);
-    const length = 18 * unitScale * palette.trailScale;
-    const width = 9 * unitScale * Math.max(0.92, palette.trailScale * 0.9);
+    const length = 18 * unitScale * palette.trailScale * (1 + enhancementLevel * 0.025);
+    const width = 9 * unitScale * Math.max(0.92, palette.trailScale * 0.9) * (1 + enhancementLevel * 0.02);
 
     if (skinId === 'diamond') {
         addDiamondTrail(scene, root, palette, length, width);
@@ -1625,8 +1848,12 @@ export const createMotionTrailSegment = (
         addObsidianTrail(scene, root, palette, length, width);
     } else if (skinId === 'godly') {
         addGodlyTrail(scene, root, palette, length, width);
-    } else if (skinId === 'ruby') {
+    } else if (skinId === 'ruby' || skinId === 'leaderboard_third') {
         addRubyTrail(scene, root, palette, length, width);
+    } else if (skinId === 'leaderboard_top10' || skinId === 'leaderboard_second') {
+        addDiamondTrail(scene, root, palette, length, width);
+    } else if (skinId === 'leaderboard_first') {
+        addGodlyTrail(scene, root, palette, length, width);
     } else if (skinId === 'developer') {
         addDeveloperTrail(scene, root, palette, length, width);
     } else {
@@ -1699,7 +1926,7 @@ export const applySkinToArtContainer = (
         return;
     }
 
-    const { palette } = definition;
+    const palette = enhancePaletteForSkinCopies(definition.palette, getRuntimeSkinEnhancementLevel(skinId, target));
     const metrics = measureSkinEffectMetrics(container, target);
     const renderType = typeof container.getData === 'function'
         ? target === 'unit'
@@ -1722,4 +1949,7 @@ export const applySkinToArtContainer = (
     const sheenLayer = createSheenLayer(scene, skinId, palette, metrics);
     container.add(sheenLayer);
     animateSkinEffects(scene, glowLayer, sheenLayer, palette, target);
+    if (skinId === 'developer') {
+        animateDeveloperSkinPalette(scene, container, target, palette, glowLayer, sheenLayer);
+    }
 };

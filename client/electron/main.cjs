@@ -91,6 +91,25 @@ const steamLobbyVisibilityMap = {
   invisible: 3,
 };
 
+function registerSteamInventoryUnavailableHandlers(reason = 'Steam Inventory item bridge is not implemented in this build. Create matching Steamworks Inventory Service item definitions before enabling live grants.') {
+  ipcMain.removeHandler('steam:get-inventory-items');
+  ipcMain.handle('steam:get-inventory-items', async () => ({
+    success: false,
+    items: [],
+    unavailable: true,
+    error: reason,
+  }));
+
+  ipcMain.removeHandler('steam:request-inventory-items');
+  ipcMain.handle('steam:request-inventory-items', async (_, itemDefIds) => ({
+    success: false,
+    granted: [],
+    requested: Array.isArray(itemDefIds) ? itemDefIds : [],
+    unavailable: true,
+    error: reason,
+  }));
+}
+
 if (!runtimeDebugLogsEnabled) {
   console.log = () => {};
   console.info = () => {};
@@ -900,6 +919,29 @@ async function createWindow() {
       port: localServerPort,
     };
   });
+  ipcMain.removeHandler('local-server-start');
+  ipcMain.handle('local-server-start', async () => {
+    const ready = await waitForServerReady(localServerPort, app.isPackaged ? 25000 : 12000);
+    return {
+      success: ready,
+      ready,
+      managed: Boolean(serverProcess),
+      port: Number(localServerPort),
+      error: ready ? undefined : `Local backend did not become reachable on port ${localServerPort}.`,
+    };
+  });
+  ipcMain.removeHandler('local-server-stop');
+  ipcMain.handle('local-server-stop', async () => {
+    const ready = await isServerReachable(localServerPort);
+    return {
+      success: true,
+      stopped: false,
+      ready,
+      managed: Boolean(serverProcess),
+      port: Number(localServerPort),
+      reason: 'Electron keeps the shared local backend warm and pauses match simulation from the renderer.',
+    };
+  });
 
   const win = new BrowserWindow({
     width: contentWidth || 1280,
@@ -1476,8 +1518,11 @@ async function createWindow() {
         };
       }
     });
+
+    registerSteamInventoryUnavailableHandlers();
   } else {
     console.log('[Steam] Initialization failed or not running.');
+    registerSteamInventoryUnavailableHandlers('Steam is not initialized, so Steam Inventory skin items cannot be read or granted.');
     win.webContents.on('did-finish-load', () => {
       win.webContents.send('steam:init-error', steamInitError || 'Steam is not running or AppID is missing.');
       if (isSmokeTest && forceSteamBypassForSmoke && !win.isDestroyed() && !win.webContents.isDestroyed()) {

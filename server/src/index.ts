@@ -177,6 +177,19 @@ const cleanupRoom = (roomId: string) => {
     }
 };
 
+const sanitizeDisplayName = (rawName: unknown): string | undefined => {
+    if (typeof rawName !== 'string') {
+        return undefined;
+    }
+
+    const value = rawName.replace(/\s+/g, ' ').trim();
+    if (value.length < 3 || value.length > 24) {
+        return undefined;
+    }
+
+    return /^[a-zA-Z0-9 _.-]+$/.test(value) ? value : undefined;
+};
+
 io.on('connection', (socket) => {
     const clientIp = socket.handshake.address;
     console.log(`[Connection] New connection: ${socket.id} from ${clientIp}`);
@@ -198,7 +211,7 @@ io.on('connection', (socket) => {
         socket.emit('SERVER_HELLO', {
             serverVersion: '1.0.0',
             protocolVersion: 1,
-            motd: 'Welcome to Conqueror\'s Dominion'
+            motd: 'Welcome to Conquerors: Domination'
         });
     });
 
@@ -206,6 +219,22 @@ io.on('connection', (socket) => {
 
     // Track connection type
     (socket as any).isTunnel = true; // Default to true (safe/slow) until identified
+    (socket as any).displayName = undefined;
+
+    socket.on('set_player_name', (rawName: unknown) => {
+        const displayName = sanitizeDisplayName(rawName);
+        if (!displayName) {
+            return;
+        }
+
+        (socket as any).displayName = displayName;
+        const gs = rooms.get(currentRoom);
+        const player = gs?.players.get(socket.id);
+        if (player && !player.isBot) {
+            player.name = displayName;
+            io.to(currentRoom).emit('playersData', gs!.getPlayersSnapshot(true));
+        }
+    });
 
     socket.on('identify_connection', (data: { isTunnel: boolean }) => {
         (socket as any).isTunnel = data.isTunnel;
@@ -278,7 +307,7 @@ io.on('connection', (socket) => {
 
         const gs = targetGs;
 
-        gs.addPlayer(socket.id);
+        gs.addPlayer(socket.id, false, (socket as any).displayName);
         gs.checkVotingStart(io, roomId);
 
         if (!suppressBroadcast) {
@@ -490,12 +519,17 @@ io.on('connection', (socket) => {
         };
         internalSingleplayer?: boolean;
         source?: 'campaign' | 'custom' | 'singleplayer';
+        playerName?: string;
     };
 
     const createConfiguredGame = (data: CustomGameCreatePayload, sourceLabel: string) => {
         console.log(`[Server] ${sourceLabel} request:`, data);
         const roomId = `custom_${socket.id}_${Date.now()}`;
         const internalSingleplayer = Boolean(data.internalSingleplayer);
+        const requestedDisplayName = sanitizeDisplayName(data.playerName);
+        if (requestedDisplayName) {
+            (socket as any).displayName = requestedDisplayName;
+        }
 
         // Create room with specific map type
         const requestedMapType = data.mapType || 'random';
@@ -625,10 +659,15 @@ io.on('connection', (socket) => {
         tunnelUrl?: string,
         forceNew?: boolean,
         queueType?: 'standard' | 'ranked_quick_match',
-        requiredPlayers?: number
+        requiredPlayers?: number,
+        playerName?: string
     }) => {
         const requestedType = data?.mapType || 'random';
         const queueType = data?.queueType === 'ranked_quick_match' ? 'ranked_quick_match' : 'standard';
+        const requestedDisplayName = sanitizeDisplayName(data?.playerName);
+        if (requestedDisplayName) {
+            (socket as any).displayName = requestedDisplayName;
+        }
 
         // Find least-populated public room or create a new one
         let targetId: string | null = null;
@@ -704,7 +743,7 @@ io.on('connection', (socket) => {
     // Handle initial join to lobby if client doesn't emit joinRoom immediately
     socket.join('lobby');
     const defaultGs = getOrCreateRoom('lobby');
-    defaultGs.addPlayer(socket.id);
+    defaultGs.addPlayer(socket.id, false, (socket as any).displayName);
     // Ensure lobby never starts a game
     if (defaultGs.status !== 'waiting') {
         defaultGs.status = 'waiting';
@@ -828,6 +867,41 @@ io.on('connection', (socket) => {
         io.to(currentRoom).emit('chat_message', {
             sender: socket.id,
             content: message,
+            timestamp: Date.now()
+        });
+    });
+
+    socket.on('report_player', (payload: {
+        roomId?: string | null;
+        reportedPlayerId?: string;
+        reportedPlayerName?: string;
+        reportedPlayerIsBot?: boolean;
+        reason?: string;
+        createdAt?: string;
+    }) => {
+        const reportedPlayerId = typeof payload?.reportedPlayerId === 'string'
+            ? payload.reportedPlayerId.slice(0, 96)
+            : 'unknown';
+        const reportedPlayerName = typeof payload?.reportedPlayerName === 'string'
+            ? payload.reportedPlayerName.slice(0, 80)
+            : 'Unknown';
+        const reason = typeof payload?.reason === 'string'
+            ? payload.reason.slice(0, 80)
+            : 'unspecified';
+
+        runtimeLog('[PlayerReport]', {
+            roomId: payload?.roomId || currentRoom,
+            reporterSocketId: socket.id,
+            reportedPlayerId,
+            reportedPlayerName,
+            reportedPlayerIsBot: Boolean(payload?.reportedPlayerIsBot),
+            reason,
+            createdAt: payload?.createdAt || new Date().toISOString(),
+        });
+
+        socket.emit('chat_message', {
+            sender: 'System',
+            content: `Report received for ${reportedPlayerName}. Thanks for helping keep matches clean.`,
             timestamp: Date.now()
         });
     });
