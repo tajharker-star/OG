@@ -4,6 +4,7 @@ import {
     STEAM_LEADERBOARD_DEFINITIONS,
     formatLeaderboardScore,
     getLeaderboardSkinRewardForRank,
+    isLeaderboardLiveInDemo,
     type LeaderboardMetricId,
     type SteamLeaderboardDefinition,
 } from '../utils/steamLeaderboards';
@@ -39,6 +40,15 @@ const LeaderboardTable: React.FC<{
     loading: boolean;
 }> = ({ definition, snapshot, loading }) => {
     const entries = snapshot?.entries || [];
+
+    if (!isLeaderboardLiveInDemo(definition)) {
+        return (
+            <div className="leaderboards-panel__empty leaderboards-panel__empty--coming-soon">
+                <strong>Coming Soon</strong>
+                <span>{definition.comingSoonReason || 'This leaderboard will open in the full game.'}</span>
+            </div>
+        );
+    }
 
     if (loading && entries.length === 0) {
         return <div className="leaderboards-panel__empty">Loading Steam leaderboard...</div>;
@@ -98,13 +108,16 @@ export function LeaderboardsPanel({ steamConnected, steamPersonaName, onLeaderbo
         () => STEAM_LEADERBOARD_DEFINITIONS.find((entry) => entry.id === activeLeaderboardId) || STEAM_LEADERBOARD_DEFINITIONS[0],
         [activeLeaderboardId]
     );
+    const activeLeaderboardIsLive = isLeaderboardLiveInDemo(activeDefinition);
 
     const activeSnapshot = snapshotById[activeDefinition.id];
-    const activeRewardSkinId = getLeaderboardSkinRewardForRank(activeSnapshot?.playerEntry?.rank);
+    const activeRewardSkinId = activeLeaderboardIsLive
+        ? getLeaderboardSkinRewardForRank(activeSnapshot?.playerEntry?.rank)
+        : null;
     const activeRewardDefinition = activeRewardSkinId ? SKIN_DEFINITIONS_BY_ID[activeRewardSkinId] : null;
 
     const loadLeaderboard = useCallback(async (leaderboard: SteamLeaderboardDefinition) => {
-        if (!steamConnected || !steamService.isInitialized) {
+        if (!steamConnected || !steamService.isInitialized || !isLeaderboardLiveInDemo(leaderboard)) {
             return;
         }
 
@@ -132,6 +145,12 @@ export function LeaderboardsPanel({ steamConnected, steamPersonaName, onLeaderbo
     }, [steamConnected]);
 
     useEffect(() => {
+        if (!activeLeaderboardIsLive) {
+            setIsLoading(false);
+            setLastError(null);
+            return;
+        }
+
         void loadLeaderboard(activeDefinition);
 
         if (!steamConnected || !steamService.isInitialized) {
@@ -145,22 +164,44 @@ export function LeaderboardsPanel({ steamConnected, steamPersonaName, onLeaderbo
         return () => {
             window.clearInterval(timer);
         };
-    }, [activeDefinition, loadLeaderboard, steamConnected]);
+    }, [activeDefinition, activeLeaderboardIsLive, loadLeaderboard, steamConnected]);
 
     useEffect(() => {
-        const rank = activeSnapshot?.playerEntry?.rank;
-        const rewardSkinId = getLeaderboardSkinRewardForRank(rank);
-        if (!rewardSkinId || !rank || !onLeaderboardRewardEligible) {
+        if (!steamConnected || !steamService.isInitialized) {
             return;
         }
 
-        onLeaderboardRewardEligible({
-            leaderboardId: activeDefinition.id,
-            leaderboardTitle: activeDefinition.title,
-            rewardSkinId,
-            rank,
+        STEAM_LEADERBOARD_DEFINITIONS
+            .filter(isLeaderboardLiveInDemo)
+            .forEach((definition) => {
+                void loadLeaderboard(definition);
+            });
+    }, [loadLeaderboard, steamConnected]);
+
+    useEffect(() => {
+        if (!onLeaderboardRewardEligible) {
+            return;
+        }
+
+        STEAM_LEADERBOARD_DEFINITIONS.forEach((definition) => {
+            if (!isLeaderboardLiveInDemo(definition)) {
+                return;
+            }
+
+            const rank = snapshotById[definition.id]?.playerEntry?.rank;
+            const rewardSkinId = getLeaderboardSkinRewardForRank(rank);
+            if (!rewardSkinId || !rank) {
+                return;
+            }
+
+            onLeaderboardRewardEligible({
+                leaderboardId: definition.id,
+                leaderboardTitle: definition.title,
+                rewardSkinId,
+                rank,
+            });
         });
-    }, [activeDefinition.id, activeDefinition.title, activeSnapshot?.playerEntry?.rank, onLeaderboardRewardEligible]);
+    }, [snapshotById, onLeaderboardRewardEligible]);
 
     if (!steamConnected || !steamService.isInitialized) {
         return (
@@ -204,7 +245,7 @@ export function LeaderboardsPanel({ steamConnected, steamPersonaName, onLeaderbo
                         onClick={() => setActiveLeaderboardId(definition.id)}
                     >
                         <strong>{definition.title}</strong>
-                        <span>{definition.scoreLabel}</span>
+                        <span>{isLeaderboardLiveInDemo(definition) ? definition.scoreLabel : 'Coming Soon'}</span>
                     </button>
                 ))}
             </div>
@@ -230,12 +271,12 @@ export function LeaderboardsPanel({ steamConnected, steamPersonaName, onLeaderbo
                 <div className="leaderboards-player-strip">
                     <div>
                         <span>Your Placement</span>
-                        <strong>{playerEntry ? `#${playerEntry.rank}` : 'Unranked'}</strong>
+                        <strong>{activeLeaderboardIsLive ? (playerEntry ? `#${playerEntry.rank}` : 'Unranked') : 'Coming Soon'}</strong>
                     </div>
                     <div>
                         <span>Your Score</span>
                         <strong>
-                            {playerEntry
+                            {activeLeaderboardIsLive && playerEntry
                                 ? formatLeaderboardScore(playerEntry.score, activeDefinition.displayType)
                                 : '--'}
                         </strong>
@@ -250,12 +291,20 @@ export function LeaderboardsPanel({ steamConnected, steamPersonaName, onLeaderbo
                     <RankBadgeIcon leaderboardRank={playerEntry?.rank ?? null} size="small" className="leaderboards-reward-strip__badge" />
                     <div>
                         <span>Leaderboard Skin Reward</span>
-                        <strong>{activeRewardDefinition ? activeRewardDefinition.title : 'Top 10 required'}</strong>
+                        <strong>
+                            {!activeLeaderboardIsLive
+                                ? 'Coming Soon'
+                                : activeRewardDefinition
+                                    ? activeRewardDefinition.title
+                                    : 'Top 10 required'}
+                        </strong>
                     </div>
                     <p>
-                        {activeRewardDefinition
-                            ? `Your #${playerEntry?.rank} placement unlocks a Steam-linked skin copy for this leaderboard.`
-                            : 'Place #1, #2, #3, or #4-#10 to claim a leaderboard skin copy.'}
+                        {!activeLeaderboardIsLive
+                            ? (activeDefinition.comingSoonReason || 'This reward opens in the full game.')
+                            : activeRewardDefinition
+                                ? `Your current #${playerEntry?.rank} position unlocks a Steam-linked skin copy while you are on this leaderboard.`
+                                : 'Reach current #1, #2, #3, or #4-#10 on a live leaderboard to claim that leaderboard skin copy.'}
                     </p>
                 </div>
             </div>

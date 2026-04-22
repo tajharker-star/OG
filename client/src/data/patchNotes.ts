@@ -31,6 +31,26 @@ export interface PatchNoteEntry {
 
 export const PATCH_NOTE_ENTRIES: PatchNoteEntry[] = [
     {
+        id: 'demo-leaderboard-eligibility-and-profile-badges',
+        badge: 'Latest',
+        filters: ['Latest', 'Content'],
+        sortOrder: 190,
+        dateLabel: 'Apr 22, 2026',
+        title: 'Demo leaderboard cleanup and selectable profile badges',
+        summary: 'Leaderboards now better match the demo scope: multiplayer and ranked boards are marked Coming Soon, Difficulty 10 explains exactly how to qualify, and current leaderboard positions unlock the matching skin tier.',
+        highlights: [
+            'Marked ranked and multiplayer leaderboards as Coming Soon for the demo so players do not see empty ranked results before the main-game server release.',
+            'Updated the Difficulty 10 leaderboard to explain that either a Custom win against difficulty 10 bots or the final difficulty 10 campaign win can post a fastest-time score.',
+            'Fixed Difficulty 10 leaderboard uploads so custom difficulty 10 wins count alongside campaign difficulty 10 wins.',
+            'Changed leaderboard skin rewards to unlock from your current live leaderboard position, including #1, #2, #3, and #4-#10 tiers.',
+            'Added a profile badge picker so players can show their highest badge automatically or manually select an unlocked badge.'
+        ],
+        tags: ['Leaderboards', 'Profiles', 'Skins', 'Demo'],
+        iconKey: 'stats',
+        changeIcons: ['stats', 'steam', 'lobby'],
+        accent: '#ffe27a'
+    },
+    {
         id: 'profile-stars-and-name-change-economy',
         badge: 'Latest',
         filters: ['Latest', 'Content'],

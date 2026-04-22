@@ -17,6 +17,8 @@ export type SteamLeaderboardDefinition = {
     sortMethod: SteamLeaderboardSortMethod;
     displayType: SteamLeaderboardDisplayType;
     scoreLabel: string;
+    demoStatus: 'live' | 'coming_soon';
+    comingSoonReason?: string;
 };
 
 export type LeaderboardUploadCandidate = {
@@ -33,6 +35,7 @@ export const STEAM_LEADERBOARD_DEFINITIONS: SteamLeaderboardDefinition[] = [
         sortMethod: 'descending',
         displayType: 'numeric',
         scoreLabel: 'Wins',
+        demoStatus: 'live',
     },
     {
         id: 'ranked_peak',
@@ -42,6 +45,8 @@ export const STEAM_LEADERBOARD_DEFINITIONS: SteamLeaderboardDefinition[] = [
         sortMethod: 'descending',
         displayType: 'numeric',
         scoreLabel: 'Ranked Points',
+        demoStatus: 'coming_soon',
+        comingSoonReason: 'Ranked matchmaking and ranked RP are reserved for the full main-game multiplayer release.',
     },
     {
         id: 'fastest_multiplayer_win',
@@ -51,6 +56,8 @@ export const STEAM_LEADERBOARD_DEFINITIONS: SteamLeaderboardDefinition[] = [
         sortMethod: 'ascending',
         displayType: 'time_milliseconds',
         scoreLabel: 'Time',
+        demoStatus: 'coming_soon',
+        comingSoonReason: 'Steam multiplayer leaderboards unlock with the main-game server release.',
     },
     {
         id: 'fastest_ranked_win',
@@ -60,15 +67,18 @@ export const STEAM_LEADERBOARD_DEFINITIONS: SteamLeaderboardDefinition[] = [
         sortMethod: 'ascending',
         displayType: 'time_milliseconds',
         scoreLabel: 'Time',
+        demoStatus: 'coming_soon',
+        comingSoonReason: 'Ranked quick-match leaderboards unlock with the main-game ranked release.',
     },
     {
         id: 'fastest_campaign_d10_win',
         steamName: 'LB_FASTEST_CAMPAIGN_D10_WIN_MS',
-        title: 'Fastest Campaign D10 Win',
-        description: 'Fastest campaign win on difficulty 10.',
+        title: 'Fastest Difficulty 10 Win',
+        description: 'Beat a difficulty 10 bot in Custom, or beat the final difficulty 10 campaign stage. The fastest victory time posts here after the win.',
         sortMethod: 'ascending',
         displayType: 'time_milliseconds',
         scoreLabel: 'Time',
+        demoStatus: 'live',
     },
 ];
 
@@ -86,6 +96,10 @@ export const getLeaderboardSkinRewardForRank = (rank: number | null | undefined)
     if (normalizedRank >= 4 && normalizedRank <= 10) return 'leaderboard_top10';
     return null;
 };
+
+export const isLeaderboardLiveInDemo = (definition: SteamLeaderboardDefinition): boolean => (
+    definition.demoStatus === 'live'
+);
 
 const formatMilliseconds = (milliseconds: number): string => {
     const clamped = Math.max(0, Math.trunc(milliseconds));
@@ -132,20 +146,25 @@ export const buildLeaderboardUploadCandidates = (
         });
     };
 
-    add('lifetime_wins', statistics.lifetime.wins);
-    add('ranked_peak', statistics.rankedProgress.bestPoints);
+    const addLive = (id: LeaderboardMetricId, score: number) => {
+        const definition = STEAM_LEADERBOARD_BY_ID[id];
+        if (!definition || !isLeaderboardLiveInDemo(definition)) return;
+        add(id, score);
+    };
+
+    addLive('lifetime_wins', statistics.lifetime.wins);
 
     if (summary.result === 'win' && matchDurationMs && matchDurationMs > 0) {
         if (summary.source === 'steam' && !summary.ranked) {
-            add('fastest_multiplayer_win', matchDurationMs);
+            addLive('fastest_multiplayer_win', matchDurationMs);
         }
 
         if (summary.ranked) {
-            add('fastest_ranked_win', matchDurationMs);
+            addLive('fastest_ranked_win', matchDurationMs);
         }
 
-        if (summary.source === 'campaign' && (summary.maxBotDifficulty || 0) >= 10) {
-            add('fastest_campaign_d10_win', matchDurationMs);
+        if ((summary.source === 'campaign' || summary.source === 'custom') && (summary.maxBotDifficulty || 0) >= 10) {
+            addLive('fastest_campaign_d10_win', matchDurationMs);
         }
     }
 

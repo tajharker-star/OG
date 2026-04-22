@@ -30,7 +30,7 @@ import {
     TUTORIAL_MAP_OPTIONS,
     type TutorialMapType,
 } from './data/tutorialGuide';
-import { buildLeaderboardUploadCandidates, type LeaderboardMetricId } from './utils/steamLeaderboards';
+import { buildLeaderboardUploadCandidates, getLeaderboardSkinRewardForRank, type LeaderboardMetricId } from './utils/steamLeaderboards';
 import {
     createDefaultSteamMultiplayerDiagnostics,
     type SteamMultiplayerDiagnostics,
@@ -48,9 +48,11 @@ import {
     getMatchStarReward,
     normalizeCommanderProfile,
     readProfileBackup,
+    setProfileBadgeVariant,
     spendStarsOnNameChange,
     writeProfileBackup,
     type CommanderProfile,
+    type ProfileBadgeVariant,
 } from './utils/playerProfile';
 import './App.css';
 
@@ -147,6 +149,21 @@ const RANKED_SKIN_ID_SET = new Set<SkinId>([
     'obsidian',
     'godly',
 ]);
+const PROFILE_BADGE_BY_SKIN_ID: Partial<Record<SkinId, ProfileBadgeVariant>> = {
+    default: 'default',
+    gold: 'gold',
+    platinum: 'platinum',
+    topaz: 'topaz',
+    diamond: 'diamond',
+    obsidian: 'obsidian',
+    godly: 'godly',
+    ruby: 'ruby',
+    leaderboard_first: 'leaderboard_first',
+    leaderboard_second: 'leaderboard_second',
+    leaderboard_third: 'leaderboard_third',
+    leaderboard_top10: 'leaderboard_top10',
+    developer: 'developer',
+};
 const LEADERBOARD_REWARD_SKIN_ID_SET = new Set<SkinId>([
     'leaderboard_first',
     'leaderboard_second',
@@ -1510,6 +1527,17 @@ function App() {
 
             if (!result.success) {
                 console.warn(`[Steam] Failed to update leaderboard ${definition.steamName}:`, result.error);
+                return;
+            }
+
+            const rewardSkinId = getLeaderboardSkinRewardForRank(result.rank);
+            if (rewardSkinId && result.rank) {
+                await handleLeaderboardRewardEligible({
+                    leaderboardId: definition.id,
+                    leaderboardTitle: definition.title,
+                    rewardSkinId,
+                    rank: result.rank,
+                });
             }
         }));
     };
@@ -1575,6 +1603,33 @@ function App() {
         () => getUnlockedSkinIds(skinsProfile, unlockedAchievementCount, totalAchievementCount, hasDeveloperSkinAccess),
         [skinsProfile, unlockedAchievementCount, totalAchievementCount, hasDeveloperSkinAccess]
     );
+    const unlockedProfileBadgeVariants = useMemo(() => {
+        const badgeVariants = new Set<ProfileBadgeVariant>(['default']);
+        unlockedSkinIds.forEach((skinId) => {
+            const badgeVariant = PROFILE_BADGE_BY_SKIN_ID[skinId];
+            if (badgeVariant) {
+                badgeVariants.add(badgeVariant);
+            }
+        });
+
+        const highestRankedPoints = Math.max(statistics.rankedProgress.points, statistics.rankedProgress.bestPoints);
+        if (highestRankedPoints >= 100) badgeVariants.add('gold');
+        if (highestRankedPoints >= 200) badgeVariants.add('platinum');
+        if (highestRankedPoints >= 300) badgeVariants.add('topaz');
+        if (highestRankedPoints >= 400) badgeVariants.add('diamond');
+        if (highestRankedPoints >= 500) badgeVariants.add('obsidian');
+        if (highestRankedPoints >= 600) badgeVariants.add('godly');
+
+        return Array.from(badgeVariants);
+    }, [statistics.rankedProgress.bestPoints, statistics.rankedProgress.points, unlockedSkinIds]);
+
+    const handleSelectProfileBadge = async (badgeVariant: ProfileBadgeVariant | null) => {
+        await commitCommanderProfile(setProfileBadgeVariant(
+            commanderProfileRef.current,
+            badgeVariant,
+            unlockedProfileBadgeVariants
+        ));
+    };
 
     const releaseBootSplash = (delayMs: number = 320) => {
         if (bootSplashReleasedRef.current) {
@@ -2058,6 +2113,15 @@ function App() {
 
         void commitSkinsProfile(sanitizedProfile);
     }, [didLoadSave, unlockedSkinIds]);
+
+    useEffect(() => {
+        const selectedBadgeVariant = commanderProfileRef.current.selectedBadgeVariant;
+        if (!didLoadSave || !selectedBadgeVariant || unlockedProfileBadgeVariants.includes(selectedBadgeVariant)) {
+            return;
+        }
+
+        void handleSelectProfileBadge(null);
+    }, [didLoadSave, unlockedProfileBadgeVariants]);
 
     useEffect(() => {
         if (!commanderDisplayName.trim()) {
@@ -3895,7 +3959,9 @@ function App() {
                         statistics={statistics}
                         achievements={evaluatedAchievements}
                         steamConnected={Boolean(steamUser && steamService.isInitialized)}
+                        unlockedBadgeVariants={unlockedProfileBadgeVariants}
                         onChangeDisplayName={handleChangeDisplayName}
+                        onSelectBadge={handleSelectProfileBadge}
                     />
                 </Suspense>
             )}

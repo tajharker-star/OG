@@ -5,6 +5,21 @@ export const ACHIEVEMENT_STAR_REWARD = 40;
 
 const LOCAL_PROFILE_BACKUP_KEY = 'ag_commander_profile_v1';
 
+export type ProfileBadgeVariant =
+    | 'default'
+    | 'gold'
+    | 'platinum'
+    | 'topaz'
+    | 'diamond'
+    | 'obsidian'
+    | 'godly'
+    | 'ruby'
+    | 'leaderboard_first'
+    | 'leaderboard_second'
+    | 'leaderboard_third'
+    | 'leaderboard_top10'
+    | 'developer';
+
 export interface CommanderProfile {
     version: number;
     displayName: string | null;
@@ -12,6 +27,7 @@ export interface CommanderProfile {
     lifetimeStarsEarned: number;
     firstNameChangeFree: boolean;
     nameChangeCount: number;
+    selectedBadgeVariant: ProfileBadgeVariant | null;
     updatedAt: string | null;
 }
 
@@ -28,6 +44,7 @@ export const createDefaultCommanderProfile = (): CommanderProfile => ({
     lifetimeStarsEarned: 0,
     firstNameChangeFree: true,
     nameChangeCount: 0,
+    selectedBadgeVariant: null,
     updatedAt: null,
 });
 
@@ -40,6 +57,27 @@ const readNumber = (value: unknown, fallback = 0): number => (
 );
 
 const clampStars = (value: number): number => Math.max(0, Math.trunc(value));
+const PROFILE_BADGE_VARIANTS = new Set<ProfileBadgeVariant>([
+    'default',
+    'gold',
+    'platinum',
+    'topaz',
+    'diamond',
+    'obsidian',
+    'godly',
+    'ruby',
+    'leaderboard_first',
+    'leaderboard_second',
+    'leaderboard_third',
+    'leaderboard_top10',
+    'developer',
+]);
+
+const normalizeBadgeVariant = (value: unknown): ProfileBadgeVariant | null => (
+    typeof value === 'string' && PROFILE_BADGE_VARIANTS.has(value as ProfileBadgeVariant)
+        ? value as ProfileBadgeVariant
+        : null
+);
 
 export const normalizeCommanderProfile = (value: unknown): CommanderProfile => {
     const defaults = createDefaultCommanderProfile();
@@ -60,6 +98,7 @@ export const normalizeCommanderProfile = (value: unknown): CommanderProfile => {
             ? value.firstNameChangeFree
             : defaults.firstNameChangeFree,
         nameChangeCount: clampStars(readNumber(value.nameChangeCount, defaults.nameChangeCount)),
+        selectedBadgeVariant: normalizeBadgeVariant(value.selectedBadgeVariant),
         updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : defaults.updatedAt,
     };
 };
@@ -89,6 +128,23 @@ export const sanitizeCommanderName = (rawName: string): { success: boolean; valu
 export const getNameChangeCost = (profile: CommanderProfile): number => (
     profile.firstNameChangeFree ? 0 : NAME_CHANGE_STAR_COST
 );
+
+export const setProfileBadgeVariant = (
+    profile: CommanderProfile,
+    badgeVariant: ProfileBadgeVariant | null,
+    unlockedBadgeVariants: ProfileBadgeVariant[],
+    timestamp: string = new Date().toISOString()
+): CommanderProfile => {
+    const normalized = normalizeCommanderProfile(profile);
+    const unlocked = new Set(unlockedBadgeVariants);
+    const nextBadgeVariant = badgeVariant && unlocked.has(badgeVariant) ? badgeVariant : null;
+
+    return {
+        ...normalized,
+        selectedBadgeVariant: nextBadgeVariant,
+        updatedAt: timestamp,
+    };
+};
 
 export const awardStars = (
     profile: CommanderProfile,

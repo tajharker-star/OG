@@ -9,16 +9,18 @@ import {
 import type { EvaluatedAchievement } from '../utils/playerAchievements';
 import {
     formatLeaderboardScore,
+    isLeaderboardLiveInDemo,
     STEAM_LEADERBOARD_DEFINITIONS,
     type LeaderboardMetricId,
 } from '../utils/steamLeaderboards';
 import { steamService } from '../services/steam';
 import {
     getNameChangeCost,
+    type ProfileBadgeVariant,
     type CommanderProfile,
 } from '../utils/playerProfile';
 import { getAchievementIcon } from '../utils/achievementIcons';
-import { RankBadgeIcon, getBadgeVariantForRankedPoints } from './RankBadgeIcon';
+import { RankBadgeIcon, getBadgeVariantForRankedPoints, type RankBadgeVariant } from './RankBadgeIcon';
 import starCurrencyUrl from '../assets/star-currency.png';
 import './ProfileModal.css';
 
@@ -30,7 +32,9 @@ type ProfileModalProps = {
     statistics: PlayerStatistics;
     achievements: EvaluatedAchievement[];
     steamConnected: boolean;
+    unlockedBadgeVariants: ProfileBadgeVariant[];
     onChangeDisplayName: (nextName: string) => Promise<{ success: boolean; error?: string }>;
+    onSelectBadge: (badgeVariant: ProfileBadgeVariant | null) => Promise<void>;
 };
 
 type PlacementState = {
@@ -41,8 +45,24 @@ type PlacementState = {
     rank: number | null;
     score: number | null;
     totalEntries: number;
-    status: 'loading' | 'ready' | 'offline' | 'error';
+    status: 'loading' | 'ready' | 'offline' | 'error' | 'coming_soon';
     error?: string;
+};
+
+const BADGE_LABELS: Record<ProfileBadgeVariant, string> = {
+    default: 'Recruit',
+    gold: 'Gold',
+    platinum: 'Platinum',
+    topaz: 'Topaz',
+    diamond: 'Diamond',
+    obsidian: 'Obsidian',
+    godly: 'Godly',
+    ruby: 'Ruby',
+    leaderboard_first: 'World Champion',
+    leaderboard_second: 'Silver Vanguard',
+    leaderboard_third: 'Bronze Warlord',
+    leaderboard_top10: 'Top 10',
+    developer: 'Developer',
 };
 
 const formatPercent = (wins: number, losses: number) => {
@@ -73,7 +93,7 @@ const createOfflinePlacements = (status: PlacementState['status']): PlacementSta
         rank: null,
         score: null,
         totalEntries: 0,
-        status,
+        status: isLeaderboardLiveInDemo(definition) ? status : 'coming_soon',
     }))
 );
 
@@ -107,7 +127,9 @@ export function ProfileModal({
     statistics,
     achievements,
     steamConnected,
+    unlockedBadgeVariants,
     onChangeDisplayName,
+    onSelectBadge,
 }: ProfileModalProps) {
     const resolvedDisplayName = commanderProfile.displayName || steamPersonaName || 'Commander';
     const [draftName, setDraftName] = useState(resolvedDisplayName);
@@ -137,6 +159,20 @@ export function ProfileModal({
 
         const loadPlacements = async () => {
             const nextPlacements = await Promise.all(STEAM_LEADERBOARD_DEFINITIONS.map(async (definition): Promise<PlacementState> => {
+                if (!isLeaderboardLiveInDemo(definition)) {
+                    return {
+                        id: definition.id,
+                        title: definition.title,
+                        scoreLabel: definition.scoreLabel,
+                        displayType: definition.displayType,
+                        rank: null,
+                        score: null,
+                        totalEntries: 0,
+                        status: 'coming_soon',
+                        error: definition.comingSoonReason,
+                    };
+                }
+
                 try {
                     const result = await steamService.getLeaderboardSnapshot({
                         name: definition.steamName,
@@ -213,6 +249,30 @@ export function ProfileModal({
 
     const nameChangeCost = getNameChangeCost(commanderProfile);
     const canAffordNameChange = commanderProfile.stars >= nameChangeCost;
+    const activeBadgeVariant = (
+        commanderProfile.selectedBadgeVariant && unlockedBadgeVariants.includes(commanderProfile.selectedBadgeVariant)
+            ? commanderProfile.selectedBadgeVariant
+            : summary.badgeVariant
+    ) as RankBadgeVariant;
+    const badgeOptions = useMemo(() => {
+        const ordered: ProfileBadgeVariant[] = [
+            'default',
+            'gold',
+            'platinum',
+            'topaz',
+            'diamond',
+            'obsidian',
+            'godly',
+            'ruby',
+            'leaderboard_top10',
+            'leaderboard_third',
+            'leaderboard_second',
+            'leaderboard_first',
+            'developer',
+        ];
+        const unlocked = new Set(unlockedBadgeVariants);
+        return ordered.filter((badgeVariant) => unlocked.has(badgeVariant));
+    }, [unlockedBadgeVariants]);
 
     const handleNameSubmit = async (event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
@@ -240,17 +300,17 @@ export function ProfileModal({
                 <section className="profile-hero-card">
                     <div className="profile-hero-card__identity">
                         <RankBadgeIcon
-                            variant={summary.badgeVariant}
+                            variant={activeBadgeVariant}
                             size="large"
-                            title="Highest rank badge"
+                            title="Shown profile badge"
                             className="profile-hero-card__badge"
                         />
                         <div>
                             <div className="profile-hero-card__eyebrow">Commander Profile</div>
                             <h2 className="profile-hero-card__name">{resolvedDisplayName}</h2>
                             <div className="profile-hero-card__rank">
-                                Highest Rank: Division {summary.rankedProgress.tier}
-                                <span>{summary.highestRankedPoints.toLocaleString()} RP peak</span>
+                                Shown Badge: {BADGE_LABELS[activeBadgeVariant]}
+                                <span>Highest earned rank: Division {summary.rankedProgress.tier} / {summary.highestRankedPoints.toLocaleString()} RP</span>
                             </div>
                         </div>
                     </div>
@@ -261,6 +321,35 @@ export function ProfileModal({
                             <strong>{commanderProfile.stars.toLocaleString()}</strong>
                             <small>{commanderProfile.lifetimeStarsEarned.toLocaleString()} lifetime earned</small>
                         </div>
+                    </div>
+                </section>
+
+                <section className="profile-section">
+                    <div className="profile-section__header">
+                        <h3>Profile Badge</h3>
+                        <span>Choose any badge you have unlocked</span>
+                    </div>
+                    <div className="profile-badge-picker">
+                        {badgeOptions.map((badgeVariant) => (
+                            <button
+                                key={badgeVariant}
+                                type="button"
+                                className={`profile-badge-option ${activeBadgeVariant === badgeVariant ? 'is-active' : ''}`}
+                                onClick={() => void onSelectBadge(badgeVariant)}
+                            >
+                                <RankBadgeIcon variant={badgeVariant as RankBadgeVariant} size="small" framed={false} />
+                                <span>{BADGE_LABELS[badgeVariant]}</span>
+                            </button>
+                        ))}
+                        {commanderProfile.selectedBadgeVariant && (
+                            <button
+                                type="button"
+                                className="profile-badge-option profile-badge-option--auto"
+                                onClick={() => void onSelectBadge(null)}
+                            >
+                                Auto Highest Badge
+                            </button>
+                        )}
                     </div>
                 </section>
 
@@ -341,12 +430,16 @@ export function ProfileModal({
                                     <strong>
                                         {placement.status === 'loading'
                                             ? 'Loading...'
+                                            : placement.status === 'coming_soon'
+                                                ? 'Coming Soon'
                                             : placement.rank
                                                 ? `#${placement.rank.toLocaleString()}`
                                                 : 'Unranked'}
                                     </strong>
                                     <small>
-                                        {placement.score !== null
+                                        {placement.status === 'coming_soon'
+                                            ? placement.error || 'Full game feature'
+                                            : placement.score !== null
                                             ? `${placement.scoreLabel}: ${formatLeaderboardScore(placement.score, placement.displayType)}`
                                             : placement.status === 'offline'
                                                 ? 'Steam offline'
