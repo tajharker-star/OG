@@ -22,7 +22,7 @@ const MOTHERSHIP_RADIATION_STACK_DAMAGE_PER_SECOND = 4;
 const ECONOMY_PRODUCTION_INTERVAL_SECONDS = 2;
 const ECONOMY_PRODUCTION_MULTIPLIER = 2;
 const MIN_SERVER_TICK_MS = 33;
-const HUMAN_READY_GATE_TIMEOUT_MS = 12000;
+const HUMAN_READY_GATE_TIMEOUT_MS = 45000;
 const MAX_GLOBAL_UNITS_UNDER_LOAD = 1100;
 const MAX_GLOBAL_INFANTRY_UNDER_LOAD = 700;
 
@@ -201,12 +201,6 @@ export class GameState {
 
     public setRuntimeMode(mode: RuntimeMode) {
         this.runtimeMode = mode;
-        if (mode === 'internal_singleplayer') {
-            this.requireHumanReadyForBotStart = false;
-            this.humanMatchReadyPlayerIds.clear();
-            this.botsReleasedForMatch = true;
-            this.humanReadyGateArmedAt = 0;
-        }
     }
 
     public isInternalSingleplayerMode(): boolean {
@@ -427,17 +421,6 @@ export class GameState {
     }
 
     public armHumanReadyBotStartGate() {
-        if (this.runtimeMode === 'internal_singleplayer') {
-            this.requireHumanReadyForBotStart = false;
-            this.humanMatchReadyPlayerIds.clear();
-            this.botsReleasedForMatch = true;
-            this.humanReadyGateArmedAt = 0;
-            this.matchState = 'IN_MATCH';
-            const now = Date.now();
-            this.bots.forEach(bot => bot.resetMatchStartTime(now));
-            return;
-        }
-
         this.humanMatchReadyPlayerIds.clear();
         this.requireHumanReadyForBotStart = true;
         this.humanReadyGateArmedAt = Date.now();
@@ -454,7 +437,6 @@ export class GameState {
     }
 
     public markHumanPlayerMatchReady(playerId: string): boolean {
-        if (this.runtimeMode === 'internal_singleplayer') return true;
         if (!this.requireHumanReadyForBotStart || this.status !== 'playing') return false;
         const player = this.players.get(playerId);
         if (!player || player.isBot || player.status === 'eliminated') return false;

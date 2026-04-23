@@ -21,6 +21,7 @@ import { ActionGuidePanel } from './ActionGuidePanel';
 import { TutorialPanel } from './TutorialPanel';
 import { BUILDING_ACTION_GUIDES, UNIT_ACTION_GUIDES, getContextualActionGuide, type ActionGuide } from '../data/actionGuides';
 import { settingsManager } from '../game/SettingsManager';
+import { appendDiagnosticsLog, copyTextToClipboard, formatDiagnosticsEntry } from '../utils/diagnosticsLog';
 import { Confetti } from './Confetti';
 import { EndGameOverlay } from './EndGameOverlay';
 import './GameUI.css';
@@ -80,6 +81,7 @@ type LagDiagnosticDetail = {
 type LagDiagnosticToast = LagDiagnosticDetail & {
     pingMs: number;
     localTransport: boolean;
+    diagnosticsCopyText: string;
 };
 
 type LobbyInvitePanelKey = 'steam' | 'access' | 'diagnostics';
@@ -808,7 +810,22 @@ export const GameUI: React.FC<GameUIProps> = ({
                 localTransport: isLocalModeRef.current || detail.serverRuntimeMode === 'internal_singleplayer',
                 fps: detail.fps > 0 ? detail.fps : fpsRef.current,
                 memoryMb: detail.memoryMb ?? (memoryRef.current > 0 ? memoryRef.current : null),
+                diagnosticsCopyText: '',
             };
+            const diagnosticsEntry = appendDiagnosticsLog({
+                ...detail,
+                pingMs: toast.pingMs,
+                localTransport: toast.localTransport,
+                fps: toast.fps,
+                memoryMb: toast.memoryMb,
+                captureContext: {
+                    url: window.location.href,
+                    visibilityState: document.visibilityState,
+                    userAgent: navigator.userAgent,
+                    socketConnected: socket.connected,
+                },
+            });
+            toast.diagnosticsCopyText = formatDiagnosticsEntry(diagnosticsEntry);
             setLagDiagnosticToast(toast);
 
             if (lagDiagnosticDismissTimeoutRef.current !== null) {
@@ -1426,7 +1443,9 @@ export const GameUI: React.FC<GameUIProps> = ({
         const windowed = samples.slice(-FPS_SAMPLE_WINDOW);
         const avg = windowed.reduce((sum, value) => sum + value, 0) / windowed.length;
         const minFps = Math.min(...windowed);
-        return avg >= 45 && minFps >= 28;
+        const avgTarget = isLocalMode ? 24 : 45;
+        const minTarget = isLocalMode ? 18 : 28;
+        return avg >= avgTarget && minFps >= minTarget;
     };
 
     useEffect(() => {
@@ -1654,7 +1673,8 @@ export const GameUI: React.FC<GameUIProps> = ({
     }, [isLocalMode, isMatchCoreReady, isMatchLoading, matchLoadChecks]);
 
     useEffect(() => {
-        if (gameStatus !== 'playing' || !socket.connected || !isMatchCoreReady) return;
+        const performanceReady = (isLocalMode || matchLoadChecks.ping) && matchLoadChecks.fps;
+        if (gameStatus !== 'playing' || !socket.connected || !isMatchCoreReady || !performanceReady || isMatchLoading) return;
         if (matchReadySignalSentRef.current) return;
 
         const elapsed = Date.now() - matchLoadStartedAtRef.current;
@@ -1662,7 +1682,7 @@ export const GameUI: React.FC<GameUIProps> = ({
 
         const sendReady = () => {
             if (matchReadySignalSentRef.current) return;
-            if (gameStatus !== 'playing' || !socket.connected || !isMatchCoreReady) return;
+            if (gameStatus !== 'playing' || !socket.connected || !isMatchCoreReady || !performanceReady || isMatchLoading) return;
             matchReadySignalSentRef.current = true;
             socket.emit('player_match_ready');
         };
@@ -1674,7 +1694,7 @@ export const GameUI: React.FC<GameUIProps> = ({
 
         const timeout = window.setTimeout(sendReady, delayMs);
         return () => window.clearTimeout(timeout);
-    }, [gameStatus, isMatchCoreReady]);
+    }, [gameStatus, isLocalMode, isMatchCoreReady, isMatchLoading, matchLoadChecks.fps, matchLoadChecks.ping]);
 
     useEffect(() => {
         const shouldLockMatchInput = gameStatus === 'playing' && isMatchLoading;
@@ -3754,20 +3774,31 @@ export const GameUI: React.FC<GameUIProps> = ({
 
             {lagDiagnosticToast && (
                 <aside className={`lag-diagnostic-toast ${lagDiagnosticToast.severity === 'critical' ? 'is-critical' : ''}`}>
-                    <button
-                        type="button"
-                        className="lag-diagnostic-toast__close"
-                        onClick={() => {
-                            if (lagDiagnosticDismissTimeoutRef.current !== null) {
-                                window.clearTimeout(lagDiagnosticDismissTimeoutRef.current);
-                                lagDiagnosticDismissTimeoutRef.current = null;
-                            }
-                            setLagDiagnosticToast(null);
-                        }}
-                        aria-label="Dismiss lag diagnostic"
-                    >
-                        ×
-                    </button>
+                    <div className="lag-diagnostic-toast__actions">
+                        <button
+                            type="button"
+                            className="lag-diagnostic-toast__copy"
+                            onClick={() => {
+                                void copyTextToClipboard(lagDiagnosticToast.diagnosticsCopyText);
+                            }}
+                        >
+                            Copy
+                        </button>
+                        <button
+                            type="button"
+                            className="lag-diagnostic-toast__close"
+                            onClick={() => {
+                                if (lagDiagnosticDismissTimeoutRef.current !== null) {
+                                    window.clearTimeout(lagDiagnosticDismissTimeoutRef.current);
+                                    lagDiagnosticDismissTimeoutRef.current = null;
+                                }
+                                setLagDiagnosticToast(null);
+                            }}
+                            aria-label="Dismiss lag diagnostic"
+                        >
+                            ×
+                        </button>
+                    </div>
                     <div className="lag-diagnostic-toast__label">
                         {lagDiagnosticToast.severity === 'critical' ? 'Critical Freeze Diagnostic' : 'Lag Diagnostic'}
                     </div>

@@ -55,12 +55,32 @@ export interface SkinLoadout {
     buildingEnhancementLevel?: number;
 }
 
+export interface LeaderboardRewardGrant {
+    leaderboardId: string;
+    leaderboardTitle: string;
+    rewardSkinId: SkinId;
+    rank: number;
+    grantedAt: string;
+}
+
+export interface LeaderboardRewardClaim {
+    leaderboardId: string;
+    leaderboardTitle: string;
+    rewardSkinId: SkinId;
+    highestRank: number;
+    firstGrantedAt: string;
+    lastGrantedAt: string;
+    nextEligibleAt: string;
+    totalGrants: number;
+    grants: LeaderboardRewardGrant[];
+}
+
 export interface PlayerSkinProfile {
     version: number;
     loadout: SkinLoadout;
     earnedSeasonRewards: SkinId[];
     skinItemCounts: Partial<Record<SkinId, number>>;
-    claimedLeaderboardRewards: Record<string, string>;
+    claimedLeaderboardRewards: Record<string, LeaderboardRewardClaim>;
 }
 
 export interface SteamSkinItemDefinition {
@@ -486,6 +506,110 @@ export const createDefaultPlayerSkinProfile = (): PlayerSkinProfile => ({
 
 const isObject = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 
+const isIsoLikeDate = (value: unknown): value is string => {
+    if (typeof value !== 'string' || value.length === 0) return false;
+    return Number.isFinite(new Date(value).getTime());
+};
+
+const normalizeLeaderboardRewardGrant = (
+    value: unknown,
+    fallback: {
+        leaderboardId: string;
+        leaderboardTitle: string;
+        rewardSkinId: SkinId;
+        rank: number;
+        grantedAt: string;
+    }
+): LeaderboardRewardGrant => {
+    const grant = isObject(value) ? value : {};
+    const rewardSkinId = canonicalizeSkinId(grant.rewardSkinId) || fallback.rewardSkinId;
+    return {
+        leaderboardId: typeof grant.leaderboardId === 'string' && grant.leaderboardId
+            ? grant.leaderboardId
+            : fallback.leaderboardId,
+        leaderboardTitle: typeof grant.leaderboardTitle === 'string' && grant.leaderboardTitle
+            ? grant.leaderboardTitle
+            : fallback.leaderboardTitle,
+        rewardSkinId,
+        rank: Math.max(1, Math.floor(Number(grant.rank) || fallback.rank)),
+        grantedAt: isIsoLikeDate(grant.grantedAt) ? grant.grantedAt : fallback.grantedAt,
+    };
+};
+
+const normalizeLeaderboardRewardClaim = (key: string, value: unknown): LeaderboardRewardClaim | null => {
+    const [fallbackLeaderboardId = 'unknown', fallbackSkinId = 'leaderboard_top10'] = key.split(':');
+    const fallbackRewardSkinId = canonicalizeSkinId(fallbackSkinId) || 'leaderboard_top10';
+    const nowIso = new Date().toISOString();
+
+    if (typeof value === 'string') {
+        const rankMatch = value.match(/Rank #(\d+)/i);
+        const dateMatch = value.match(/at ([0-9T:.-]+Z?)/i);
+        const rank = Math.max(1, Math.floor(Number(rankMatch?.[1]) || 10));
+        const grantedAt = isIsoLikeDate(dateMatch?.[1]) ? dateMatch![1] : nowIso;
+        const titleMatch = value.match(/on (.+?) at /i);
+        const leaderboardTitle = titleMatch?.[1] || fallbackLeaderboardId;
+        const grant = normalizeLeaderboardRewardGrant(null, {
+            leaderboardId: fallbackLeaderboardId,
+            leaderboardTitle,
+            rewardSkinId: fallbackRewardSkinId,
+            rank,
+            grantedAt,
+        });
+
+        return {
+            leaderboardId: grant.leaderboardId,
+            leaderboardTitle: grant.leaderboardTitle,
+            rewardSkinId: grant.rewardSkinId,
+            highestRank: grant.rank,
+            firstGrantedAt: grant.grantedAt,
+            lastGrantedAt: grant.grantedAt,
+            nextEligibleAt: grant.grantedAt,
+            totalGrants: 1,
+            grants: [grant],
+        };
+    }
+
+    if (!isObject(value)) {
+        return null;
+    }
+
+    const rewardSkinId = canonicalizeSkinId(value.rewardSkinId) || fallbackRewardSkinId;
+    const leaderboardId = typeof value.leaderboardId === 'string' && value.leaderboardId
+        ? value.leaderboardId
+        : fallbackLeaderboardId;
+    const leaderboardTitle = typeof value.leaderboardTitle === 'string' && value.leaderboardTitle
+        ? value.leaderboardTitle
+        : leaderboardId;
+    const highestRank = Math.max(1, Math.floor(Number(value.highestRank) || 10));
+    const firstGrantedAt = isIsoLikeDate(value.firstGrantedAt) ? value.firstGrantedAt : nowIso;
+    const lastGrantedAt = isIsoLikeDate(value.lastGrantedAt) ? value.lastGrantedAt : firstGrantedAt;
+    const nextEligibleAt = isIsoLikeDate(value.nextEligibleAt) ? value.nextEligibleAt : lastGrantedAt;
+    const fallbackGrant = {
+        leaderboardId,
+        leaderboardTitle,
+        rewardSkinId,
+        rank: highestRank,
+        grantedAt: lastGrantedAt,
+    };
+    const grants = (Array.isArray(value.grants) ? value.grants : [])
+        .map((grant) => normalizeLeaderboardRewardGrant(grant, fallbackGrant))
+        .filter((grant) => grant.rewardSkinId === rewardSkinId)
+        .slice(-25);
+    const normalizedGrants = grants.length > 0 ? grants : [normalizeLeaderboardRewardGrant(null, fallbackGrant)];
+
+    return {
+        leaderboardId,
+        leaderboardTitle,
+        rewardSkinId,
+        highestRank: Math.min(highestRank, ...normalizedGrants.map((grant) => grant.rank)),
+        firstGrantedAt,
+        lastGrantedAt,
+        nextEligibleAt,
+        totalGrants: Math.max(normalizedGrants.length, Math.floor(Number(value.totalGrants) || normalizedGrants.length)),
+        grants: normalizedGrants,
+    };
+};
+
 const canonicalizeSkinId = (value: unknown): SkinId | null => {
     if (typeof value !== 'string') {
         return null;
@@ -542,9 +666,9 @@ export const normalizePlayerSkinProfile = (value: unknown): PlayerSkinProfile =>
         skinItemCounts,
         claimedLeaderboardRewards: Object.fromEntries(
             Object.entries(rawClaimedLeaderboardRewards)
-                .filter(([key, entry]) => key.length > 0 && typeof entry === 'string')
-                .map(([key, entry]) => [key, entry as string])
-        ) as Record<string, string>,
+                .map(([key, entry]) => [key, normalizeLeaderboardRewardClaim(key, entry)] as const)
+                .filter(([key, entry]) => key.length > 0 && entry !== null)
+        ) as Record<string, LeaderboardRewardClaim>,
     };
 };
 

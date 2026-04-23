@@ -257,6 +257,8 @@ export class MainScene extends Phaser.Scene {
       private lastProjectileBurstSize: number = 0;
       private lastServerTickHealthAt: number = 0;
       private lastServerTickHealth: ServerTickHealth | null = null;
+      private mapDetailBudgetRemaining: number = 0;
+      private mapWeatherBudgetRemaining: number = 0;
 
     private cameraInitialized: boolean = false;
     private currentMap: GameMap | null = null;
@@ -328,9 +330,48 @@ export class MainScene extends Phaser.Scene {
     return this.cachedSettings.graphics.showParticles && this.getAutoPerformanceLevel() < AUTO_PERFORMANCE_MAX_LEVEL;
   }
 
-  private shouldRenderWeather() {
-    return this.cachedSettings.graphics.showWeather && this.getAutoPerformanceLevel() <= 2;
-  }
+	  private shouldRenderWeather() {
+	    return this.cachedSettings.graphics.showWeather && this.getAutoPerformanceLevel() <= 2;
+	  }
+
+      private isMatchStartLoadingActive() {
+        return Boolean((window as any).gameInputLocked);
+      }
+
+      private prepareMapAmbientBudgets() {
+        const graphics = this.cachedSettings.graphics;
+        const maxParticles = this.getEffectiveParticleBudget(graphics.maxParticles || 200);
+        const autoLevel = this.getAutoPerformanceLevel();
+        const electronSafe = Boolean((window as any).process?.versions?.electron);
+        const platformScale = electronSafe ? 0.65 : 1;
+
+        if (this.isMatchStartLoadingActive()) {
+          this.mapDetailBudgetRemaining = 0;
+          this.mapWeatherBudgetRemaining = 0;
+          return;
+        }
+
+        const detailCap = autoLevel >= 2 ? 90 : autoLevel >= 1 ? 140 : 220;
+        const weatherCap = autoLevel >= 2 ? 40 : autoLevel >= 1 ? 80 : 120;
+        this.mapDetailBudgetRemaining = this.shouldRenderParticles()
+          ? Math.min(maxParticles, Math.round(detailCap * platformScale))
+          : 0;
+        this.mapWeatherBudgetRemaining = this.shouldRenderWeather()
+          ? Math.min(maxParticles, Math.round(weatherCap * platformScale))
+          : 0;
+      }
+
+      private takeMapDetailBudget(requested: number) {
+        const allowed = Math.max(0, Math.min(Math.floor(requested), this.mapDetailBudgetRemaining));
+        this.mapDetailBudgetRemaining -= allowed;
+        return allowed;
+      }
+
+      private takeMapWeatherBudget(requested: number) {
+        const allowed = Math.max(0, Math.min(Math.floor(requested), this.mapWeatherBudgetRemaining));
+        this.mapWeatherBudgetRemaining -= allowed;
+        return allowed;
+      }
 
   private getAdaptiveMapRenderIntervalMs() {
     const level = this.getAutoPerformanceLevel();
@@ -441,8 +482,9 @@ export class MainScene extends Phaser.Scene {
     window.dispatchEvent(new CustomEvent('freeze-diagnostic', { detail }));
   }
 
-  private maybeEmitLagDiagnostic(delta: number) {
-    if (this.isMenuMode) return;
+	  private maybeEmitLagDiagnostic(delta: number) {
+	    if (this.isMenuMode) return;
+        if (this.isMatchStartLoadingActive()) return;
 
     const now = Date.now();
     const frameGapMs = Math.max(0, Math.round(delta));
@@ -5057,15 +5099,16 @@ export class MainScene extends Phaser.Scene {
 	      const graphicsSettings = this.cachedSettings.graphics;
        let numDetails = 0;
 
-       if (this.shouldRenderParticles()) {
-           const density = 0.002; // Base density
-           const area = bounds.width * bounds.height; 
-           numDetails = Math.floor(area * density);
-           
-           // Limit total particles based on settings
-           const maxParticles = this.getEffectiveParticleBudget(graphicsSettings.maxParticles || 500);
-           numDetails = Math.min(numDetails, maxParticles);
-       }
+	       if (this.shouldRenderParticles()) {
+	           const density = 0.002; // Base density
+	           const area = bounds.width * bounds.height; 
+	           numDetails = Math.floor(area * density);
+	           
+	           // Limit total particles based on settings
+	           const maxParticles = this.getEffectiveParticleBudget(graphicsSettings.maxParticles || 500);
+	           numDetails = Math.min(numDetails, maxParticles);
+               numDetails = this.takeMapDetailBudget(numDetails);
+	       }
  
        detailGraphics.fillStyle(detailColor, 0.5); // Slightly more transparent
 
@@ -5139,8 +5182,8 @@ export class MainScene extends Phaser.Scene {
           // Let's approximate: 50 particles per large island if max is high.
           // Or use a strict density.
           
-          const area = bounds.width * bounds.height;
-          const numTumbleweeds = Math.min(20, Math.floor(area / 10000 * (maxP / 500))); 
+	          const area = bounds.width * bounds.height;
+	          const numTumbleweeds = this.takeMapWeatherBudget(Math.min(20, Math.floor(area / 10000 * (maxP / 500))));
           
           for(let k=0; k<numTumbleweeds; k++) {
               const tx = bounds.x + Math.random() * bounds.width;
@@ -5167,7 +5210,7 @@ export class MainScene extends Phaser.Scene {
           const maxP = this.getEffectiveParticleBudget(graphicsSettings.maxParticles || 1000);
           
           // Rain density
-          const numDrops = Math.floor(island.radius / 5 * (maxP / 500)); 
+	          const numDrops = this.takeMapWeatherBudget(Math.floor(island.radius / 5 * (maxP / 500)));
           
           for(let k=0; k<numDrops; k++) {
               const rx = bounds.x + Math.random() * bounds.width;
@@ -5219,15 +5262,16 @@ export class MainScene extends Phaser.Scene {
       }
     }
 
-    renderMap(mapData: GameMap) {
-        this.currentMap = mapData;
-        this.islandsGroup.clear(true, true);
-        this.tumbleweeds = [];
-        this.weatherParticles = [];
-        this.oilAnimations = [];
-        this.goldSparkles = [];
-        this.oilSpotVisuals.clear();
-        // this.revealedOilSpots.clear(); // Persistence Fix: Do not clear revealed spots on re-render
+	    renderMap(mapData: GameMap) {
+	        this.currentMap = mapData;
+	        this.islandsGroup.clear(true, true);
+	        this.tumbleweeds = [];
+	        this.weatherParticles = [];
+	        this.oilAnimations = [];
+	        this.goldSparkles = [];
+	        this.oilSpotVisuals.clear();
+            this.prepareMapAmbientBudgets();
+	        // this.revealedOilSpots.clear(); // Persistence Fix: Do not clear revealed spots on re-render
 
         // Render Oil Spots
         if (mapData.oilSpots) {

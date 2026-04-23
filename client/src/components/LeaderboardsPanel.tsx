@@ -8,13 +8,14 @@ import {
     type LeaderboardMetricId,
     type SteamLeaderboardDefinition,
 } from '../utils/steamLeaderboards';
-import { SKIN_DEFINITIONS_BY_ID, type SkinId } from '../utils/playerSkins';
+import { SKIN_DEFINITIONS_BY_ID, type LeaderboardRewardClaim, type SkinId } from '../utils/playerSkins';
 import { RankBadgeIcon } from './RankBadgeIcon';
 import './LeaderboardsPanel.css';
 
 type LeaderboardsPanelProps = {
     steamConnected: boolean;
     steamPersonaName?: string | null;
+    claimedLeaderboardRewards?: Record<string, LeaderboardRewardClaim>;
     onLeaderboardRewardEligible?: (reward: {
         leaderboardId: LeaderboardMetricId;
         leaderboardTitle: string;
@@ -97,7 +98,7 @@ const LeaderboardTable: React.FC<{
     );
 };
 
-export function LeaderboardsPanel({ steamConnected, steamPersonaName, onLeaderboardRewardEligible }: LeaderboardsPanelProps) {
+export function LeaderboardsPanel({ steamConnected, steamPersonaName, claimedLeaderboardRewards, onLeaderboardRewardEligible }: LeaderboardsPanelProps) {
     const [activeLeaderboardId, setActiveLeaderboardId] = useState<LeaderboardMetricId>('lifetime_wins');
     const [snapshotById, setSnapshotById] = useState<SnapshotById>({});
     const [isLoading, setIsLoading] = useState(false);
@@ -201,7 +202,7 @@ export function LeaderboardsPanel({ steamConnected, steamPersonaName, onLeaderbo
                 rank,
             });
         });
-    }, [snapshotById, onLeaderboardRewardEligible]);
+    }, [snapshotById, onLeaderboardRewardEligible, claimedLeaderboardRewards]);
 
     if (!steamConnected || !steamService.isInitialized) {
         return (

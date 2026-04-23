@@ -37,6 +37,8 @@ import {
 } from './types/steamDiagnostics';
 import {
     STEAM_SKIN_ITEM_DEFS,
+    type LeaderboardRewardClaim,
+    type LeaderboardRewardGrant,
     type PlayerSkinProfile,
     type SkinId,
     type SkinTarget,
@@ -116,6 +118,7 @@ const DEFAULT_TUTORIAL_MAP: TutorialMapType = 'desert';
 const DEVELOPER_SKIN_ALLOWED_NAMES = new Set(['thecoadstar']);
 const DEVELOPER_SKIN_ALLOWED_OS_USERS = new Set<string>();
 const RANKED_QUICK_QUEUE_TYPE = 'ranked_quick_match';
+const LEADERBOARD_REWARD_REPEAT_COOLDOWN_MS = 5 * 24 * 60 * 60 * 1000;
 const DEFAULT_SKIN_PROFILE: PlayerSkinProfile = {
     version: 2,
     loadout: {
@@ -557,6 +560,106 @@ const canonicalizeSkinId = (value: unknown): SkinId | null => {
     return VALID_SKIN_IDS.has(normalized as SkinId) ? (normalized as SkinId) : null;
 };
 
+const isIsoLikeDate = (value: unknown): value is string => (
+    typeof value === 'string' && value.length > 0 && Number.isFinite(new Date(value).getTime())
+);
+
+const normalizeLeaderboardRewardGrant = (
+    value: unknown,
+    fallback: LeaderboardRewardGrant,
+): LeaderboardRewardGrant => {
+    const grant = value && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : {};
+    const rewardSkinId = canonicalizeSkinId(grant.rewardSkinId) || fallback.rewardSkinId;
+
+    return {
+        leaderboardId: typeof grant.leaderboardId === 'string' && grant.leaderboardId
+            ? grant.leaderboardId
+            : fallback.leaderboardId,
+        leaderboardTitle: typeof grant.leaderboardTitle === 'string' && grant.leaderboardTitle
+            ? grant.leaderboardTitle
+            : fallback.leaderboardTitle,
+        rewardSkinId,
+        rank: Math.max(1, Math.floor(Number(grant.rank) || fallback.rank)),
+        grantedAt: isIsoLikeDate(grant.grantedAt) ? grant.grantedAt : fallback.grantedAt,
+    };
+};
+
+const normalizeLeaderboardRewardClaim = (key: string, value: unknown): LeaderboardRewardClaim | null => {
+    const [fallbackLeaderboardId = 'unknown', fallbackSkinId = 'leaderboard_top10'] = key.split(':');
+    const fallbackRewardSkinId = canonicalizeSkinId(fallbackSkinId) || 'leaderboard_top10';
+    const nowIso = new Date().toISOString();
+
+    if (typeof value === 'string') {
+        const rankMatch = value.match(/Rank #(\d+)/i);
+        const dateMatch = value.match(/at ([0-9T:.-]+Z?)/i);
+        const titleMatch = value.match(/on (.+?) at /i);
+        const rank = Math.max(1, Math.floor(Number(rankMatch?.[1]) || 10));
+        const grantedAt = isIsoLikeDate(dateMatch?.[1]) ? dateMatch![1] : nowIso;
+        const grant = normalizeLeaderboardRewardGrant(null, {
+            leaderboardId: fallbackLeaderboardId,
+            leaderboardTitle: titleMatch?.[1] || fallbackLeaderboardId,
+            rewardSkinId: fallbackRewardSkinId,
+            rank,
+            grantedAt,
+        });
+
+        return {
+            leaderboardId: grant.leaderboardId,
+            leaderboardTitle: grant.leaderboardTitle,
+            rewardSkinId: grant.rewardSkinId,
+            highestRank: grant.rank,
+            firstGrantedAt: grant.grantedAt,
+            lastGrantedAt: grant.grantedAt,
+            nextEligibleAt: grant.grantedAt,
+            totalGrants: 1,
+            grants: [grant],
+        };
+    }
+
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return null;
+    }
+
+    const rawClaim = value as Record<string, unknown>;
+    const rewardSkinId = canonicalizeSkinId(rawClaim.rewardSkinId) || fallbackRewardSkinId;
+    const leaderboardId = typeof rawClaim.leaderboardId === 'string' && rawClaim.leaderboardId
+        ? rawClaim.leaderboardId
+        : fallbackLeaderboardId;
+    const leaderboardTitle = typeof rawClaim.leaderboardTitle === 'string' && rawClaim.leaderboardTitle
+        ? rawClaim.leaderboardTitle
+        : leaderboardId;
+    const highestRank = Math.max(1, Math.floor(Number(rawClaim.highestRank) || 10));
+    const firstGrantedAt = isIsoLikeDate(rawClaim.firstGrantedAt) ? rawClaim.firstGrantedAt : nowIso;
+    const lastGrantedAt = isIsoLikeDate(rawClaim.lastGrantedAt) ? rawClaim.lastGrantedAt : firstGrantedAt;
+    const nextEligibleAt = isIsoLikeDate(rawClaim.nextEligibleAt) ? rawClaim.nextEligibleAt : lastGrantedAt;
+    const fallbackGrant: LeaderboardRewardGrant = {
+        leaderboardId,
+        leaderboardTitle,
+        rewardSkinId,
+        rank: highestRank,
+        grantedAt: lastGrantedAt,
+    };
+    const grants = (Array.isArray(rawClaim.grants) ? rawClaim.grants : [])
+        .map((grant) => normalizeLeaderboardRewardGrant(grant, fallbackGrant))
+        .filter((grant) => grant.rewardSkinId === rewardSkinId)
+        .slice(-25);
+    const normalizedGrants = grants.length > 0 ? grants : [fallbackGrant];
+
+    return {
+        leaderboardId,
+        leaderboardTitle,
+        rewardSkinId,
+        highestRank: Math.min(highestRank, ...normalizedGrants.map((grant) => grant.rank)),
+        firstGrantedAt,
+        lastGrantedAt,
+        nextEligibleAt,
+        totalGrants: Math.max(normalizedGrants.length, Math.floor(Number(rawClaim.totalGrants) || normalizedGrants.length)),
+        grants: normalizedGrants,
+    };
+};
+
 const normalizePlayerSkinProfile = (value: unknown): PlayerSkinProfile => {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
         return createDefaultPlayerSkinProfile();
@@ -607,9 +710,9 @@ const normalizePlayerSkinProfile = (value: unknown): PlayerSkinProfile => {
         skinItemCounts,
         claimedLeaderboardRewards: Object.fromEntries(
             Object.entries(rawClaimedLeaderboardRewards)
-                .filter(([key, entry]) => key.length > 0 && typeof entry === 'string')
-                .map(([key, entry]) => [key, entry as string])
-        ) as Record<string, string>,
+                .map(([key, entry]) => [key, normalizeLeaderboardRewardClaim(key, entry)] as const)
+                .filter(([key, entry]) => key.length > 0 && entry !== null)
+        ) as Record<string, LeaderboardRewardClaim>,
     };
 };
 
@@ -1554,9 +1657,39 @@ function App() {
 
         const claimKey = `${reward.leaderboardId}:${reward.rewardSkinId}`;
         const currentProfile = skinsProfileRef.current;
-        if (currentProfile.claimedLeaderboardRewards?.[claimKey]) {
+        const existingClaim = currentProfile.claimedLeaderboardRewards?.[claimKey] || null;
+        const nowMs = Date.now();
+        const nowIso = new Date(nowMs).toISOString();
+        const nextEligibleMs = existingClaim?.nextEligibleAt
+            ? new Date(existingClaim.nextEligibleAt).getTime()
+            : 0;
+
+        if (existingClaim && Number.isFinite(nextEligibleMs) && nowMs < nextEligibleMs) {
             return;
         }
+
+        const grant: LeaderboardRewardGrant = {
+            leaderboardId: reward.leaderboardId,
+            leaderboardTitle: reward.leaderboardTitle,
+            rewardSkinId: reward.rewardSkinId,
+            rank: reward.rank,
+            grantedAt: nowIso,
+        };
+        const nextEligibleAt = new Date(nowMs + LEADERBOARD_REWARD_REPEAT_COOLDOWN_MS).toISOString();
+        const nextClaim: LeaderboardRewardClaim = {
+            leaderboardId: reward.leaderboardId,
+            leaderboardTitle: reward.leaderboardTitle,
+            rewardSkinId: reward.rewardSkinId,
+            highestRank: Math.min(existingClaim?.highestRank || reward.rank, reward.rank),
+            firstGrantedAt: existingClaim?.firstGrantedAt || nowIso,
+            lastGrantedAt: nowIso,
+            nextEligibleAt,
+            totalGrants: (existingClaim?.totalGrants || 0) + 1,
+            grants: [
+                ...((existingClaim?.grants || []).slice(-24)),
+                grant,
+            ],
+        };
 
         const nextProfile = withSkinLoadoutEnhancements({
             ...currentProfile,
@@ -1566,7 +1699,7 @@ function App() {
             },
             claimedLeaderboardRewards: {
                 ...(currentProfile.claimedLeaderboardRewards || {}),
-                [claimKey]: `Rank #${reward.rank} on ${reward.leaderboardTitle} at ${new Date().toISOString()}`,
+                [claimKey]: nextClaim,
             },
         });
 
@@ -3881,6 +4014,7 @@ function App() {
                                 <LazyLeaderboardsPanel
                                     steamConnected={Boolean(steamUser && steamService.isInitialized)}
                                     steamPersonaName={steamUser?.name}
+                                    claimedLeaderboardRewards={skinsProfile.claimedLeaderboardRewards}
                                     onLeaderboardRewardEligible={handleLeaderboardRewardEligible}
                                 />
                             </Suspense>

@@ -2,9 +2,19 @@ import React, { useState, useEffect } from 'react';
 import { settingsManager } from '../game/SettingsManager';
 import { SFX_EFFECT_DEFINITIONS, SFX_GROUP_DEFINITIONS } from '../audio/sfxCatalog';
 import { soundEffectsManager } from '../audio/soundEffects';
+import {
+    clearDiagnosticsLog,
+    copyTextToClipboard,
+    DIAGNOSTICS_LOG_UPDATED_EVENT,
+    DIAGNOSTICS_STORAGE_KEY,
+    formatDiagnosticsEntry,
+    formatDiagnosticsLog,
+    readDiagnosticsLog,
+} from '../utils/diagnosticsLog';
 import { Modal } from './Modal';
 import type { Settings, Keybinds } from '../game/SettingsManager';
 import type { GameMap } from '../types/game';
+import type { DiagnosticLogEntry } from '../utils/diagnosticsLog';
 import './SettingsModal.css';
 
 interface SettingsModalProps {
@@ -17,10 +27,25 @@ const SFX_EFFECT_GROUPS = SFX_GROUP_DEFINITIONS.map(group => ({
     effects: SFX_EFFECT_DEFINITIONS.filter(effect => effect.group === group.id),
 }));
 
+type SettingsTab = 'controls' | 'audio' | 'graphics' | 'diagnostics' | 'server';
+
+const SETTINGS_TABS: SettingsTab[] = ['controls', 'audio', 'graphics', 'diagnostics', 'server'];
+
+const SETTINGS_TAB_LABELS: Record<SettingsTab, string> = {
+    controls: 'Controls',
+    audio: 'Audio',
+    graphics: 'Graphics',
+    diagnostics: 'Diagnostics',
+    server: 'Server',
+};
+
 export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose, mapData }) => {
     const [settings, setSettings] = useState<Settings>(settingsManager.getSettings());
-    const [activeTab, setActiveTab] = useState<'controls' | 'audio' | 'graphics' | 'server'>('controls');
+    const [activeTab, setActiveTab] = useState<SettingsTab>('controls');
     const [rebindAction, setRebindAction] = useState<keyof Keybinds | null>(null);
+    const [diagnosticsLog, setDiagnosticsLog] = useState<DiagnosticLogEntry[]>(() => readDiagnosticsLog());
+    const [diagnosticsCopyState, setDiagnosticsCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+    const visibleDiagnosticsLog = [...diagnosticsLog].reverse();
 
     useEffect(() => {
         const fps = (window as any).game?.loop?.actualFps;
@@ -34,6 +59,38 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose, mapData }
         settingsManager.on('change', handleSettingsChange);
         return () => settingsManager.off('change', handleSettingsChange);
     }, []);
+
+    useEffect(() => {
+        const refreshDiagnosticsLog = () => setDiagnosticsLog(readDiagnosticsLog());
+        const handleStorage = (event: StorageEvent) => {
+            if (event.key === DIAGNOSTICS_STORAGE_KEY) {
+                refreshDiagnosticsLog();
+            }
+        };
+
+        window.addEventListener(DIAGNOSTICS_LOG_UPDATED_EVENT, refreshDiagnosticsLog as EventListener);
+        window.addEventListener('storage', handleStorage);
+        refreshDiagnosticsLog();
+
+        return () => {
+            window.removeEventListener(DIAGNOSTICS_LOG_UPDATED_EVENT, refreshDiagnosticsLog as EventListener);
+            window.removeEventListener('storage', handleStorage);
+        };
+    }, []);
+
+    const copyDiagnosticsText = async (text: string) => {
+        const copied = await copyTextToClipboard(text);
+        setDiagnosticsCopyState(copied ? 'copied' : 'failed');
+    };
+
+    const handleCopyDiagnosticsLog = () => {
+        void copyDiagnosticsText(formatDiagnosticsLog(diagnosticsLog));
+    };
+
+    const handleClearDiagnosticsLog = () => {
+        setDiagnosticsLog(clearDiagnosticsLog());
+        setDiagnosticsCopyState('idle');
+    };
 
     // Handle key rebind
     useEffect(() => {
@@ -67,7 +124,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose, mapData }
         >
             {/* Tabs */}
             <div className="settings-tabs">
-                {(['controls', 'audio', 'graphics', 'server'] as const).map(tab => (
+                {SETTINGS_TABS.map(tab => (
                     // Only show server tab if mapData exists (ingame)
                     (tab === 'server' && !mapData) ? null : (
                     <button
@@ -75,7 +132,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose, mapData }
                         onClick={() => setActiveTab(tab)}
                         className={`settings-tab-btn ${activeTab === tab ? 'active' : ''}`}
                     >
-                        {tab.charAt(0).toUpperCase() + tab.slice(1)}
+                        {SETTINGS_TAB_LABELS[tab]}
                     </button>
                     )
                 ))}
@@ -379,6 +436,70 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose, mapData }
                         </div>
                     )}
 
+                    {activeTab === 'diagnostics' && (
+                        <div className="settings-section settings-diagnostics-panel">
+                            <div className="settings-diagnostics-hero">
+                                <div>
+                                    <h4>Session Diagnostics Console</h4>
+                                    <p>
+                                        Lag packets are saved before reload, survive Command+R, and clear when the app window closes.
+                                    </p>
+                                </div>
+                                <div className="settings-diagnostics-hero__count">
+                                    <span>{diagnosticsLog.length}</span>
+                                    <small>captured</small>
+                                </div>
+                            </div>
+
+                            <div className="settings-diagnostics-toolbar">
+                                <button
+                                    type="button"
+                                    className="settings-diagnostics-action"
+                                    onClick={handleCopyDiagnosticsLog}
+                                >
+                                    Copy All For Codex
+                                </button>
+                                <button
+                                    type="button"
+                                    className="settings-diagnostics-action settings-diagnostics-action--muted"
+                                    onClick={() => setDiagnosticsLog(readDiagnosticsLog())}
+                                >
+                                    Refresh
+                                </button>
+                                <button
+                                    type="button"
+                                    className="settings-diagnostics-action settings-diagnostics-action--danger"
+                                    onClick={handleClearDiagnosticsLog}
+                                >
+                                    Clear Session
+                                </button>
+                                <span className={`settings-diagnostics-copy-state settings-diagnostics-copy-state--${diagnosticsCopyState}`}>
+                                    {diagnosticsCopyState === 'copied' && 'Copied to clipboard.'}
+                                    {diagnosticsCopyState === 'failed' && 'Copy failed. Try again.'}
+                                    {diagnosticsCopyState === 'idle' && 'Ready to capture lag packets.'}
+                                </span>
+                            </div>
+
+                            {diagnosticsLog.length === 0 ? (
+                                <div className="settings-diagnostics-empty">
+                                    No lag diagnostics have been captured yet. When the top-right lag popup appears, it will also be saved here.
+                                </div>
+                            ) : (
+                                <div className="settings-diagnostics-log" role="log" aria-label="Session lag diagnostics">
+                                    {visibleDiagnosticsLog.map(entry => (
+                                        <DiagnosticLogCard
+                                            key={`${entry.id}-${entry.capturedAt}`}
+                                            entry={entry}
+                                            onCopy={(text) => {
+                                                void copyDiagnosticsText(text);
+                                            }}
+                                        />
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    )}
+
                     {activeTab === 'server' && (
                         <div className="settings-section settings-section--cards">
                             <div className="info-box">
@@ -410,6 +531,88 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose, mapData }
 };
 
 // Helper Components
+const getDiagnosticNumber = (detail: Record<string, unknown>, key: string): number | null => {
+    const value = detail[key];
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+};
+
+const getDiagnosticString = (detail: Record<string, unknown>, key: string): string | null => {
+    const value = detail[key];
+    return typeof value === 'string' && value.length > 0 ? value : null;
+};
+
+const getDiagnosticRecommendations = (detail: Record<string, unknown>): string[] => {
+    const value = detail.recommendations;
+    if (!Array.isArray(value)) return [];
+    return value.filter((item): item is string => typeof item === 'string' && item.length > 0);
+};
+
+const formatDiagnosticMs = (value: number | null) => value === null ? '--' : `${Math.round(value)}ms`;
+const formatDiagnosticCount = (value: number | null) => value === null ? '--' : `${Math.round(value)}`;
+const formatDiagnosticPercent = (value: number | null) => value === null ? '--' : `${Math.round(value * 100)}%`;
+
+const DiagnosticLogCard = ({
+    entry,
+    onCopy,
+}: {
+    entry: DiagnosticLogEntry;
+    onCopy: (text: string) => void;
+}) => {
+    const detail = entry.detail;
+    const severity = getDiagnosticString(detail, 'severity') ?? 'info';
+    const reason = getDiagnosticString(detail, 'reason') ?? 'No diagnostic reason recorded.';
+    const localTransport = detail.localTransport === true;
+    const pingMs = getDiagnosticNumber(detail, 'pingMs');
+    const recommendations = getDiagnosticRecommendations(detail);
+    const heartbeatMs = getDiagnosticNumber(detail, 'serverHeartbeatAgeMs');
+
+    return (
+        <article className={`settings-diagnostics-entry settings-diagnostics-entry--${severity}`}>
+            <header className="settings-diagnostics-entry__header">
+                <div>
+                    <span className="settings-diagnostics-entry__time">{entry.iso}</span>
+                    <strong>{severity.toUpperCase()}</strong>
+                </div>
+                <button
+                    type="button"
+                    className="settings-diagnostics-entry__copy"
+                    onClick={() => onCopy(formatDiagnosticsEntry(entry))}
+                >
+                    Copy Entry
+                </button>
+            </header>
+
+            <div className="settings-diagnostics-entry__reason">{reason}</div>
+
+            <div className="settings-diagnostics-entry__metrics">
+                <span>Frame {formatDiagnosticMs(getDiagnosticNumber(detail, 'frameGapMs'))}</span>
+                <span>Snapshot {formatDiagnosticMs(getDiagnosticNumber(detail, 'snapshotAgeMs'))}</span>
+                <span>FPS {formatDiagnosticCount(getDiagnosticNumber(detail, 'fps'))}</span>
+                <span>Ping {localTransport ? 'Local' : formatDiagnosticMs(pingMs)}</span>
+                <span>Units {formatDiagnosticCount(getDiagnosticNumber(detail, 'unitCount'))}</span>
+                <span>Buildings {formatDiagnosticCount(getDiagnosticNumber(detail, 'buildingCount'))}</span>
+                <span>Auto L{formatDiagnosticCount(getDiagnosticNumber(detail, 'autoPerformanceLevel'))}</span>
+                <span>Server Load {formatDiagnosticPercent(getDiagnosticNumber(detail, 'serverLoadFactor'))}</span>
+                <span>Server Tick {formatDiagnosticMs(getDiagnosticNumber(detail, 'serverTickMs'))}</span>
+                <span>Heartbeat {formatDiagnosticMs(heartbeatMs)}</span>
+            </div>
+
+            {recommendations.length > 0 && (
+                <div className="settings-diagnostics-entry__recommendations">
+                    {recommendations.slice(0, 3).map((recommendation, index) => (
+                        <span key={`${entry.id}-recommendation-${index}`}>{recommendation}</span>
+                    ))}
+                </div>
+            )}
+
+            <details className="settings-diagnostics-entry__raw">
+                <summary>Raw packet</summary>
+                <pre>{JSON.stringify(detail, null, 2)}</pre>
+            </details>
+        </article>
+    );
+};
+
 const VolumeSlider = ({
     label,
     value,
