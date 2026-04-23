@@ -100,6 +100,14 @@ function main() {
     assert((ownerVisibleMap.waterBuildings || []).length === 1, 'owner should see naval mine');
     assert((enemyVisibleMap.waterBuildings || []).length === 0, 'enemy should not see naval mine');
 
+    enemyDestroyer.x = 800;
+    enemyDestroyer.y = 400;
+    const mineHealthBeforeCombat = mine.health;
+    gameState.resolveCombat({ to: () => ({ emit: () => undefined }) }, 'naval-mine-test');
+    assert(mine.health === mineHealthBeforeCombat, 'enemy units should not detect or attack hidden naval mines');
+    enemyDestroyer.x = 645;
+    enemyDestroyer.y = 400;
+
     const now = Date.now();
     const enemyDestroyerHealthBefore = enemyDestroyer.health;
     const enemyConstructionShipHealthBefore = enemyConstructionShip.health;

@@ -22,6 +22,13 @@ type ProjectilePalette = {
     shadow: string;
 };
 
+type TrailPoint = {
+    x: number;
+    y: number;
+    age: number;
+    radius: number;
+};
+
 type SimulationProjectile = {
     id: number;
     kind: ProjectileKind;
@@ -41,6 +48,7 @@ type SimulationProjectile = {
     turnPhase: number;
     palette: ProjectilePalette;
     sprite: HTMLCanvasElement;
+    trail: TrailPoint[];
     dead?: boolean;
 };
 
@@ -292,6 +300,7 @@ function spawnProjectile(
         turnPhase: randomBetween(0, Math.PI * 2),
         palette,
         sprite,
+        trail: [],
     };
 }
 
@@ -315,29 +324,74 @@ function createBurst(
     };
 }
 
+function drawProjectileTrail(ctx: CanvasRenderingContext2D, projectile: SimulationProjectile) {
+    if (projectile.trail.length < 2) return;
+
+    const maxAge = projectile.kind === 'rocket' ? 0.62 : 0.2;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    if (projectile.kind === 'bullet') {
+        for (let index = 0; index < projectile.trail.length - 1; index += 1) {
+            const current = projectile.trail[index];
+            const next = projectile.trail[index + 1];
+            const ageRatio = clamp(current.age / maxAge, 0, 1);
+            const alpha = (1 - ageRatio) * (1 - index / projectile.trail.length) * 0.72;
+            if (alpha <= 0.02) continue;
+
+            const gradient = ctx.createLinearGradient(next.x, next.y, current.x, current.y);
+            gradient.addColorStop(0, hsla(projectile.palette.hue, projectile.palette.saturation, projectile.palette.lightness + 8, 0));
+            gradient.addColorStop(0.62, projectile.palette.trailSoft);
+            gradient.addColorStop(1, projectile.palette.trail);
+            ctx.globalAlpha = alpha;
+            ctx.strokeStyle = gradient;
+            ctx.lineWidth = Math.max(0.75, projectile.radius * (1.1 - ageRatio) * 0.55);
+            ctx.beginPath();
+            ctx.moveTo(next.x, next.y);
+            ctx.lineTo(current.x, current.y);
+            ctx.stroke();
+        }
+    } else {
+        for (let index = projectile.trail.length - 1; index >= 0; index -= 1) {
+            const point = projectile.trail[index];
+            const ageRatio = clamp(point.age / maxAge, 0, 1);
+            const alpha = (1 - ageRatio) * 0.42;
+            if (alpha <= 0.015) continue;
+
+            const radius = point.radius * (1.25 + ageRatio * 2.35);
+            const glow = ctx.createRadialGradient(point.x, point.y, 0, point.x, point.y, radius);
+            glow.addColorStop(0, hsla(projectile.palette.hue + 12, projectile.palette.saturation + 10, 88, alpha));
+            glow.addColorStop(0.28, projectile.palette.trailSoft);
+            glow.addColorStop(0.72, hsla(projectile.palette.hue, projectile.palette.saturation - 28, 36, alpha * 0.35));
+            glow.addColorStop(1, hsla(projectile.palette.hue, projectile.palette.saturation - 36, 18, 0));
+            ctx.fillStyle = glow;
+            ctx.beginPath();
+            ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        const flame = projectile.trail[0];
+        if (flame) {
+            ctx.globalAlpha = 0.78;
+            ctx.fillStyle = hsla(projectile.palette.hue + 20, projectile.palette.saturation + 12, 88, 0.72);
+            ctx.beginPath();
+            ctx.arc(flame.x, flame.y, Math.max(4, projectile.radius * 0.72), 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    ctx.restore();
+}
+
 function drawProjectile(ctx: CanvasRenderingContext2D, projectile: SimulationProjectile) {
+    drawProjectileTrail(ctx, projectile);
+
     const heading = Math.atan2(projectile.vy, projectile.vx);
     ctx.save();
     ctx.translate(projectile.x, projectile.y);
     ctx.rotate(heading);
-
-    const tailStart = -projectile.trailLength;
-    ctx.lineCap = 'round';
-    ctx.globalAlpha = projectile.kind === 'rocket' ? 0.42 : 0.22;
-    ctx.strokeStyle = projectile.palette.trailSoft;
-    ctx.lineWidth = projectile.kind === 'rocket' ? 8 * projectile.sizeScale : 4 * projectile.sizeScale;
-    ctx.beginPath();
-    ctx.moveTo(tailStart, 0);
-    ctx.lineTo(-projectile.radius * 0.3, 0);
-    ctx.stroke();
-
-    ctx.globalAlpha = 0.96;
-    ctx.strokeStyle = projectile.palette.trail;
-    ctx.lineWidth = projectile.kind === 'rocket' ? 3.4 * projectile.sizeScale : 1.7 * projectile.sizeScale;
-    ctx.beginPath();
-    ctx.moveTo(tailStart, 0);
-    ctx.lineTo(-projectile.radius * 0.18, 0);
-    ctx.stroke();
 
     if (projectile.kind === 'rocket') {
         ctx.globalAlpha = 0.95;
@@ -461,6 +515,8 @@ export const LobbyBackdrop = memo(function LobbyBackdrop({ electronSafe = false 
         let lastTime = performance.now();
         let projectiles: SimulationProjectile[] = [];
         let bursts: CollisionBurst[] = [];
+        const instanceId = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+        (window as Window & { __agLobbyBackdropInstance?: string }).__agLobbyBackdropInstance = instanceId;
 
         const resize = () => {
             const rect = container.getBoundingClientRect();
@@ -512,6 +568,10 @@ export const LobbyBackdrop = memo(function LobbyBackdrop({ electronSafe = false 
 
         const step = (now: number) => {
             if (disposed) return;
+            if ((window as Window & { __agLobbyBackdropInstance?: string }).__agLobbyBackdropInstance !== instanceId) {
+                disposed = true;
+                return;
+            }
 
             const dt = Math.min(0.033, Math.max(0.001, (now - lastTime) / 1000));
             lastTime = now;
@@ -528,6 +588,22 @@ export const LobbyBackdrop = memo(function LobbyBackdrop({ electronSafe = false 
                 projectile.vy = Math.sin(heading) * speed;
                 projectile.x += projectile.vx * dt;
                 projectile.y += projectile.vy * dt;
+
+                const tailHeading = Math.atan2(projectile.vy, projectile.vx) + Math.PI;
+                projectile.trail.unshift({
+                    x: projectile.x + Math.cos(tailHeading) * projectile.radius * 0.82,
+                    y: projectile.y + Math.sin(tailHeading) * projectile.radius * 0.82,
+                    age: 0,
+                    radius: projectile.kind === 'rocket'
+                        ? Math.max(4, projectile.radius * 0.72)
+                        : Math.max(1.2, projectile.radius * 0.35),
+                });
+                const maxTrailAge = projectile.kind === 'rocket' ? 0.62 : 0.2;
+                const maxTrailPoints = projectile.kind === 'rocket' ? 26 : 8;
+                projectile.trail = projectile.trail
+                    .map(point => ({ ...point, age: point.age + dt }))
+                    .filter((point, index) => point.age <= maxTrailAge && index < maxTrailPoints);
+
                 reflectEdge(projectile, width, height);
             }
 
@@ -611,6 +687,10 @@ export const LobbyBackdrop = memo(function LobbyBackdrop({ electronSafe = false 
 
         return () => {
             disposed = true;
+            const globalWindow = window as Window & { __agLobbyBackdropInstance?: string };
+            if (globalWindow.__agLobbyBackdropInstance === instanceId) {
+                delete globalWindow.__agLobbyBackdropInstance;
+            }
             window.cancelAnimationFrame(animationFrame);
             resizeObserver?.disconnect();
             window.removeEventListener('resize', resize);

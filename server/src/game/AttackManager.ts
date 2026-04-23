@@ -407,20 +407,43 @@ export class AttackManager {
         if (!targetOwnerId) return baseHealth;
 
         let towerHealth = 0;
+        let wallHealth = 0;
         const towerRadius = gameState.mapType === 'islands' ? 950 : 1100;
+        const wallRadius = gameState.mapType === 'islands' ? 1000 : 1200;
         gameState.map.islands.forEach(island => {
             island.buildings.forEach(building => {
-                if (building.type !== 'tower' || building.ownerId !== targetOwnerId) return;
+                if (building.ownerId !== targetOwnerId) return;
                 const bx = island.x + (building.x || 0);
                 const by = island.y + (building.y || 0);
                 const inRadius = Math.hypot(bx - targetBase.x, by - targetBase.y) <= towerRadius;
                 const sameIsland = !!targetIsland && island.id === targetIsland.id;
-                if (!inRadius && !sameIsland) return;
-                towerHealth += Math.max(0, building.health ?? 0);
+                if (building.type === 'tower') {
+                    if (!inRadius && !sameIsland) return;
+                    towerHealth += Math.max(0, building.health ?? 0);
+                    return;
+                }
+
+                if (building.type === 'wall_node') {
+                    const wallInRadius = Math.hypot(bx - targetBase.x, by - targetBase.y) <= wallRadius;
+                    if (!wallInRadius && !sameIsland) return;
+                    wallHealth += Math.max(0, building.health ?? 0);
+                }
             });
         });
 
-        return Math.max(0, baseHealth + towerHealth);
+        gameState.map.bridges.forEach(bridge => {
+            if (bridge.type !== 'wall' || bridge.ownerId !== targetOwnerId || bridge.health <= 0) return;
+            const endpoints = gameState.getBridgeEndpoints(bridge);
+            if (!endpoints) return;
+            const mx = (endpoints.ax + endpoints.bx) * 0.5;
+            const my = (endpoints.ay + endpoints.by) * 0.5;
+            const inRadius = Math.hypot(mx - targetBase.x, my - targetBase.y) <= wallRadius;
+            const touchesTargetIsland = !!targetIsland && (bridge.islandAId === targetIsland.id || bridge.islandBId === targetIsland.id);
+            if (!inRadius && !touchesTargetIsland) return;
+            wallHealth += Math.max(0, bridge.health ?? 0) * 0.75;
+        });
+
+        return Math.max(0, baseHealth + towerHealth + wallHealth);
     }
 
     private getUnitAssaultPower(unit: Unit): number {

@@ -2820,10 +2820,19 @@ function App() {
         };
     }, [ipc]);
 
-    const handleQuitGame = () => {
-        if (window.confirm("Are you sure you want to quit to desktop?")) {
-            window.close(); // Electron handles this
+    const handleQuitGame = async () => {
+        if (!window.confirm("Are you sure you want to quit to desktop?")) return;
+
+        try {
+            if (ipc?.invoke) {
+                await ipc.invoke('app:quit');
+                return;
+            }
+        } catch (error) {
+            console.warn('[App] Electron app:quit failed, falling back to window.close().', error);
         }
+
+        window.close();
     };
 
 
@@ -3147,6 +3156,7 @@ function App() {
             botCount: level.botCount,
             difficulty: level.difficulty,
             startingResources: level.startingResources,
+            internalSingleplayer: true,
             source: 'campaign',
             playerName: commanderDisplayName,
         });
@@ -3185,6 +3195,7 @@ function App() {
 
         socket.emit('createSoloGame', {
             ...customConfig,
+            internalSingleplayer: true,
             source: 'custom',
             playerName: commanderDisplayName,
         });
@@ -3296,7 +3307,7 @@ function App() {
         || steamDiagnostics.events.length > 0
         || steamDiagnostics.route !== 'idle'
         || steamDiagnostics.flow !== 'idle';
-    const shouldRenderGameCanvas = !isElectronRuntime || isPlaying;
+    const shouldRenderGameCanvas = isPlaying;
 
     return (
         <div className={`App${isElectronRuntime ? ' App--electron' : ''}`}>
@@ -4055,7 +4066,7 @@ function App() {
                     <p>{steamError}</p>
                     <p>Please launch the game from Steam.</p>
                     <div className="modal-footer">
-                        <button onClick={() => window.close()} className="menu-btn primary">Quit Game</button>
+                        <button onClick={handleQuitGame} className="menu-btn primary">Quit Game</button>
                     </div>
                 </Modal>
             )}

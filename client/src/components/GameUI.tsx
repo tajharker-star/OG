@@ -71,6 +71,7 @@ type LagDiagnosticDetail = {
     serverTickMs?: number | null;
     serverHeartbeatAgeMs?: number | null;
     serverGateActive?: boolean;
+    serverRuntimeMode?: string;
     serverStatus?: string;
     serverMatchState?: string;
     emittedAt: number;
@@ -78,6 +79,7 @@ type LagDiagnosticDetail = {
 
 type LagDiagnosticToast = LagDiagnosticDetail & {
     pingMs: number;
+    localTransport: boolean;
 };
 
 type LobbyInvitePanelKey = 'steam' | 'access' | 'diagnostics';
@@ -730,6 +732,7 @@ export const GameUI: React.FC<GameUIProps> = ({
     const pingRef = useRef(0);
     const fpsRef = useRef(60);
     const memoryRef = useRef(0);
+    const isLocalModeRef = useRef(isLocalMode);
 
     // Multiplayer Lobby State
     const [gameStatus, setGameStatus] = useState<'waiting' | 'voting' | 'playing'>(initialGameStatus || 'waiting');
@@ -790,7 +793,8 @@ export const GameUI: React.FC<GameUIProps> = ({
         pingRef.current = ping;
         fpsRef.current = fps;
         memoryRef.current = memory;
-    }, [ping, fps, memory]);
+        isLocalModeRef.current = isLocalMode;
+    }, [ping, fps, memory, isLocalMode]);
 
     useEffect(() => {
         const handleLagDiagnostic = (event: Event) => {
@@ -800,7 +804,8 @@ export const GameUI: React.FC<GameUIProps> = ({
 
             const toast: LagDiagnosticToast = {
                 ...detail,
-                pingMs: pingRef.current > 0 ? pingRef.current : 0,
+                pingMs: isLocalModeRef.current ? 0 : (pingRef.current > 0 ? pingRef.current : 0),
+                localTransport: isLocalModeRef.current || detail.serverRuntimeMode === 'internal_singleplayer',
                 fps: detail.fps > 0 ? detail.fps : fpsRef.current,
                 memoryMb: detail.memoryMb ?? (memoryRef.current > 0 ? memoryRef.current : null),
             };
@@ -1673,14 +1678,21 @@ export const GameUI: React.FC<GameUIProps> = ({
 
     useEffect(() => {
         const shouldLockMatchInput = gameStatus === 'playing' && isMatchLoading;
-        if ((window as any).gameMenuMode === shouldLockMatchInput) return;
-        (window as any).gameMenuMode = shouldLockMatchInput;
-        window.dispatchEvent(new CustomEvent('game-menu-mode', { detail: shouldLockMatchInput }));
+        if ((window as any).gameInputLocked === shouldLockMatchInput) return;
+        (window as any).gameInputLocked = shouldLockMatchInput;
+        window.dispatchEvent(new CustomEvent('game-input-lock', { detail: shouldLockMatchInput }));
     }, [gameStatus, isMatchLoading]);
 
     useEffect(() => {
         // Ping Loop
         const pingInterval = setInterval(() => {
+            if (isLocalModeRef.current) {
+                if (pingRef.current !== 0) {
+                    setPing(0);
+                }
+                return;
+            }
+
             if (socket.connected) socket.emit('ping_check', Date.now());
         }, 1000);
 
@@ -1692,6 +1704,11 @@ export const GameUI: React.FC<GameUIProps> = ({
         }, 1000);
 
         const handlePong = (start: number) => {
+            if (isLocalModeRef.current) {
+                setPing(0);
+                return;
+            }
+
             setPing(Date.now() - start);
         };
 
@@ -1776,7 +1793,7 @@ export const GameUI: React.FC<GameUIProps> = ({
                 player: false,
                 baseVisible: false,
                 hqConfirmed: false,
-                ping: false,
+                ping: isLocalModeRef.current,
                 fps: false
             });
             matchLoadStartedAtRef.current = Date.now();
@@ -2625,8 +2642,8 @@ export const GameUI: React.FC<GameUIProps> = ({
                 { type: 'hospital', label: 'Hospital', cost: '150g, 20o', icon: '🏥', blurb: 'Keeps infantry fights efficient.' },
                 { type: 'repair_dock', label: 'Repair Dock', cost: '220g, 40o', icon: '🛠️', blurb: 'Repairs expensive vehicles and fleets.' },
                 { type: 'naval_mine', label: 'Naval Mine', cost: '120g, 20o', icon: '💣', blurb: 'Punishes predictable sea routes.' },
-                { type: 'wall', label: 'Wall', cost: '10g', icon: '🧱', blurb: 'Cheap blockers for funneling attacks.' },
-                { type: 'wall_node', label: 'Wall Node', cost: '20g', icon: '🏰', blurb: 'Anchor points for stronger wall lines.' },
+                { type: 'wall', label: 'Wall', cost: '10g', icon: '🧱', blurb: 'Taunts most attackers into breaking the line first.' },
+                { type: 'wall_node', label: 'Wall Node', cost: '20g', icon: '🏰', blurb: 'Anchor points for taunt wall lines.' },
                 { type: 'bridge_node', label: 'Bridge Node', cost: '50g', icon: '🌉', blurb: 'Connect islands and open new routes.' }
             ]
         }
@@ -2970,7 +2987,7 @@ export const GameUI: React.FC<GameUIProps> = ({
 
                     <div className="lobby-load-metrics">
                         <span>FPS: {fps}</span>
-                        <span>PING: {ping > 0 ? `${ping}ms` : '--'}</span>
+                        <span>PING: {isLocalMode ? 'Local' : (ping > 0 ? `${ping}ms` : '--')}</span>
                     </div>
                 </div>
             </div>
@@ -2980,7 +2997,7 @@ export const GameUI: React.FC<GameUIProps> = ({
     const lobbyLoadItems: LoadingCheckItem[] = [
         { label: 'Connection ready', ready: lobbyLoadChecks.connection },
         { label: 'Lobby snapshot loaded', ready: lobbyLoadChecks.players },
-        { label: 'Ping stabilized', ready: lobbyLoadChecks.ping },
+        { label: isLocalMode ? 'Local transport ready' : 'Ping stabilized', ready: lobbyLoadChecks.ping },
         { label: 'Frame rate stabilized', ready: lobbyLoadChecks.fps }
     ];
 
@@ -2990,7 +3007,7 @@ export const GameUI: React.FC<GameUIProps> = ({
         { label: 'Units snapshot loaded', ready: matchLoadChecks.units },
         { label: 'Local HQ visible on map', ready: matchLoadChecks.baseVisible },
         { label: 'Server confirmed local HQ', ready: matchLoadChecks.hqConfirmed },
-        { label: 'Ping stabilized', ready: matchLoadChecks.ping },
+        { label: isLocalMode ? 'Local transport ready' : 'Ping stabilized', ready: matchLoadChecks.ping },
         { label: 'Frame rate stabilized', ready: matchLoadChecks.fps }
     ];
 
@@ -3759,7 +3776,7 @@ export const GameUI: React.FC<GameUIProps> = ({
                         <span>Frame {lagDiagnosticToast.frameGapMs}ms</span>
                         {lagDiagnosticToast.snapshotAgeMs > 0 && <span>Snapshot {lagDiagnosticToast.snapshotAgeMs}ms</span>}
                         <span>FPS {lagDiagnosticToast.fps}</span>
-                        <span>Ping {lagDiagnosticToast.pingMs > 0 ? `${lagDiagnosticToast.pingMs}ms` : '--'}</span>
+                        <span>Ping {lagDiagnosticToast.localTransport ? 'Local' : (lagDiagnosticToast.pingMs > 0 ? `${lagDiagnosticToast.pingMs}ms` : '--')}</span>
                         <span>Units {lagDiagnosticToast.unitCount}</span>
                         <span>Buildings {lagDiagnosticToast.buildingCount}</span>
                         <span>Auto L{lagDiagnosticToast.autoPerformanceLevel}</span>
@@ -4633,7 +4650,7 @@ export const GameUI: React.FC<GameUIProps> = ({
             <div className="hud-bottom-bar">
                 <div className="hud-footer-group">
                     <span>FPS: {fps}</span>
-                    <span>PING: {ping}ms</span>
+                    <span>PING: {isLocalMode ? 'Local' : `${ping}ms`}</span>
                     <span>MEM: {memory}MB</span>
                 </div>
             </div>

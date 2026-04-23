@@ -526,11 +526,6 @@ export class GameState {
         const targetRoomId = roomId || this.roomId;
         if (!io || !targetRoomId) return;
 
-        if (this.runtimeMode === 'internal_singleplayer') {
-            io.to(targetRoomId).emit('mapData', this.map);
-            return;
-        }
-
         let emitted = false;
         this.players.forEach(player => {
             if (player.isBot) return;
@@ -545,11 +540,6 @@ export class GameState {
 
     public emitVisibleMapDataToPlayer(io: any, playerId: string) {
         if (!io) return;
-
-        if (this.runtimeMode === 'internal_singleplayer') {
-            io.to(playerId).emit('mapData', this.map);
-            return;
-        }
 
         io.to(playerId).emit('mapData', this.getVisibleMapForPlayer(playerId));
     }
@@ -4145,6 +4135,7 @@ export class GameState {
                 !destroyedNodeIds.has(bridge.nodeAId) && !destroyedNodeIds.has(bridge.nodeBId)
             );
             this.clearTraversalCaches();
+            this.touchMapVersion();
         }
 
         this.map.oilSpots.forEach(spot => {
@@ -4169,6 +4160,14 @@ export class GameState {
                 !destroyedNodeIds.has(bridge.nodeAId) && !destroyedNodeIds.has(bridge.nodeBId)
             );
             this.clearTraversalCaches();
+            this.touchMapVersion();
+        }
+
+        const bridgeCountBefore = this.map.bridges.length;
+        this.map.bridges = this.map.bridges.filter(bridge => bridge.health > 0);
+        if (this.map.bridges.length !== bridgeCountBefore) {
+            this.clearTraversalCaches();
+            this.touchMapVersion();
         }
 
         eliminateQueue.forEach(playerId => this.eliminatePlayer(playerId, 'HQ_DESTROYED'));
@@ -5122,11 +5121,21 @@ export class GameState {
             return true;
         };
 
+        const isWallTauntTarget = (targetType: string) => targetType === 'wall' || targetType === 'wall_node';
+        const ignoresWallTaunt = (attackerType: string) => (
+            attackerType === 'missile_launcher' ||
+            getLayer(attackerType).startsWith('AIR')
+        );
+
         const getTargetPriority = (attackerType: string, targetType: string, isBuildingTarget: boolean): number => {
             const isAirAttacker = ['light_plane', 'heavy_plane', 'mothership'].includes(attackerType);
             const isProductionTarget = ['base', 'barracks', 'tank_factory', 'dock', 'air_base'].includes(targetType);
             const isEconomyTarget = ['mine', 'oil_rig', 'oil_well'].includes(targetType);
-            const isNodeTarget = targetType === 'wall_node' || targetType === 'bridge_node';
+            const isNodeTarget = targetType === 'bridge_node';
+
+            if (isWallTauntTarget(targetType)) {
+                return ignoresWallTaunt(attackerType) ? 8 : -1;
+            }
 
             if (targetType === 'base') return 0;
             if (isProductionTarget) return 1;
@@ -5201,12 +5210,14 @@ export class GameState {
             islandId?: string;
             isWaterBuilding?: boolean;
             isOilBuilding?: boolean;
+            isWallSegment?: boolean;
         };
 
         const buildingCellSize = 280;
         const buildingGrid = new Map<string, CombatBuildingEntry[]>();
         const buildingTargetById = new Map<string, CombatBuildingEntry>();
         const addBuildingEntry = (entry: CombatBuildingEntry) => {
+            if (entry.type === 'naval_mine') return;
             buildingTargetById.set(entry.id, entry);
             const gx = Math.floor(entry.x / buildingCellSize);
             const gy = Math.floor(entry.y / buildingCellSize);
@@ -5240,6 +5251,21 @@ export class GameState {
                 y: building.y || 0,
                 ref: building,
                 isWaterBuilding: true,
+            });
+        });
+
+        this.map.bridges.forEach(bridge => {
+            if (bridge.type !== 'wall' || !bridge.ownerId || bridge.health <= 0) return;
+            const endpoints = this.getBridgeEndpoints(bridge);
+            if (!endpoints) return;
+            addBuildingEntry({
+                id: bridge.id,
+                ownerId: bridge.ownerId,
+                type: 'wall',
+                x: (endpoints.ax + endpoints.bx) * 0.5,
+                y: (endpoints.ay + endpoints.by) * 0.5,
+                ref: bridge,
+                isWallSegment: true,
             });
         });
 
@@ -5292,14 +5318,27 @@ export class GameState {
             islandId: entry.islandId,
             isWaterBuilding: !!entry.isWaterBuilding,
             isOilBuilding: !!entry.isOilBuilding,
+            isWallSegment: !!entry.isWallSegment,
             buildingRef: entry.ref,
         });
 
         const resolveCombatBuildingRef = (target: any) => {
-            if (target?.buildingRef) return target.buildingRef;
+            if (target?.buildingRef) {
+                if (target.isWallSegment) {
+                    target.buildingRef.realX = target.realX;
+                    target.buildingRef.realY = target.realY;
+                }
+                return target.buildingRef;
+            }
             if (target?.id) {
                 const fromIndex = buildingTargetById.get(target.id);
-                if (fromIndex?.ref) return fromIndex.ref;
+                if (fromIndex?.ref) {
+                    if (fromIndex.isWallSegment) {
+                        fromIndex.ref.realX = fromIndex.x;
+                        fromIndex.ref.realY = fromIndex.y;
+                    }
+                    return fromIndex.ref;
+                }
             }
             return null;
         };
@@ -6580,6 +6619,13 @@ export class GameState {
                     if (spot) {
                         worldX = spot.x;
                         worldY = spot.y;
+                    } else if (building.type === 'wall') {
+                        const bridge = this.map.bridges.find(candidate => candidate === building || candidate.id === building.id);
+                        const endpoints = bridge ? this.getBridgeEndpoints(bridge) : null;
+                        if (endpoints) {
+                            worldX = (endpoints.ax + endpoints.bx) * 0.5;
+                            worldY = (endpoints.ay + endpoints.by) * 0.5;
+                        }
                     }
                 }
             }

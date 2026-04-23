@@ -197,6 +197,14 @@ function stopServerProcess() {
   serverProcess = null;
 }
 
+function shutdownGameRuntime(reason = 'app shutting down') {
+  closePublicTunnel(reason);
+  leaveActiveSteamLobby(reason);
+  steamRelayBridge?.shutdown(reason);
+  steamBridge?.stop(reason);
+  stopServerProcess();
+}
+
 function getBestLanAddress() {
   const interfaces = os.networkInterfaces();
   let fallback = '127.0.0.1';
@@ -302,6 +310,21 @@ function registerCoreIpcHandlers() {
   ipcMain.removeHandler('network:close-public-tunnel');
   ipcMain.handle('network:close-public-tunnel', async () => {
     closePublicTunnel('renderer requested tunnel close');
+    return { success: true };
+  });
+
+  ipcMain.removeHandler('app:quit');
+  ipcMain.handle('app:quit', async () => {
+    setImmediate(() => {
+      shutdownGameRuntime('renderer requested app quit');
+      BrowserWindow.getAllWindows().forEach((win) => {
+        if (!win.isDestroyed()) {
+          win.destroy();
+        }
+      });
+      app.quit();
+    });
+
     return { success: true };
   });
 }
@@ -1578,15 +1601,12 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  stopServerProcess();
+  shutdownGameRuntime('all windows closed');
   if (process.platform !== 'darwin' || isSmokeTest) {
     app.quit();
   }
 });
 
 app.on('before-quit', () => {
-  closePublicTunnel('app quitting');
-  leaveActiveSteamLobby('app quitting');
-  steamRelayBridge?.shutdown('app quitting');
-  steamBridge?.stop('app quitting');
+  shutdownGameRuntime('app quitting');
 });

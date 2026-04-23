@@ -241,7 +241,8 @@ export const BUILDING_ACTION_GUIDES: Record<string, ActionGuide> = {
         '🧱',
         'wall',
         [
-            'Place where you want enemies to slow down or bunch up.',
+            'Place where you want ground and naval attackers to stop and fire first.',
+            'Artillery and aircraft will ignore the taunt, so support walls with towers and anti-air.',
             'Do not build walls so far forward that you cannot support them.',
         ],
         ['Use walls with towers and infantry to force bad fights instead of relying on walls alone.']
@@ -252,7 +253,8 @@ export const BUILDING_ACTION_GUIDES: Record<string, ActionGuide> = {
         'wall',
         [
             'Drop nodes to shape your defensive line around HQs, oil, and chokepoints.',
-            'Link them where the enemy naturally wants to path through.',
+            'Linked wall nodes taunt most attackers, forcing them to break the line before diving your base.',
+            'Missile launchers and flying units do not fall for the taunt.',
         ],
         ['Use wall nodes when you want defenses to fight on your terms instead of in open ground.']
     ),

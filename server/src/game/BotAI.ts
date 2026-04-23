@@ -215,12 +215,17 @@ export class BotAI {
       return this.usedUnitIds.has(unitId);
   }
 
-  public getDefenceTargets(mapType?: string): { towers: number; wallNodes: number } {
-      const phase = this.getMatchPhase();
+  public getDefenceTargets(mapType?: string, now: number = Date.now()): { towers: number; wallNodes: number } {
+      const phase = this.getMatchPhase(now);
+      const wallTauntBonus =
+          phase === 'EARLY'
+              ? (this.difficulty >= 7 ? 1 : 0)
+              : (this.difficulty >= 8 ? 2 : this.difficulty >= 5 ? 1 : 0);
+      const wallTarget = (baseTarget: number) => Math.max(0, baseTarget + wallTauntBonus);
       if (mapType === 'grasslands' && this.difficulty <= 3 && phase === 'EARLY') {
           return {
               towers: Math.min(1, this.strategyProfile.towers),
-              wallNodes: Math.min(4, this.strategyProfile.wallNodes)
+              wallNodes: Math.min(4, wallTarget(this.strategyProfile.wallNodes))
           };
       }
 
@@ -228,25 +233,26 @@ export class BotAI {
           if (phase === 'EARLY') {
               return {
                   towers: Math.min(2, this.strategyProfile.towers),
-                  wallNodes: Math.min(5, this.strategyProfile.wallNodes)
+                  wallNodes: Math.min(6, wallTarget(this.strategyProfile.wallNodes))
               };
           }
           if (phase === 'MID') {
               return {
                   towers: Math.min(4, this.strategyProfile.towers),
-                  wallNodes: Math.min(7, this.strategyProfile.wallNodes)
+                  wallNodes: Math.min(9, wallTarget(this.strategyProfile.wallNodes))
               };
           }
       }
 
       return {
           towers: this.strategyProfile.towers,
-          wallNodes: this.strategyProfile.wallNodes
+          wallNodes: wallTarget(this.strategyProfile.wallNodes)
       };
   }
 
   public getStrategySnapshot(mapType: string = 'random', now: number = Date.now()) {
       const phase = this.getMatchPhase(now);
+      const defenceTargets = this.getDefenceTargets(mapType, now);
       return {
           controllerId: this.strategyProfile.controllerId,
           difficulty: this.difficulty,
@@ -254,7 +260,7 @@ export class BotAI {
           mapType,
           resourceClaims: this.getDesiredResourceClaims(phase),
           towers: this.getDesiredTowerCount(),
-          wallNodes: this.strategyProfile.wallNodes,
+          wallNodes: defenceTargets.wallNodes,
           recruitmentBuildings: this.getDesiredRecruitmentBuildingCount(mapType, phase, true),
           airBases: this.getDesiredAirBaseCount(mapType, true, phase),
           capitalShipsUnlocked: canDeployCapitalShips(this.strategyProfile.capitalShipTiming, phase)

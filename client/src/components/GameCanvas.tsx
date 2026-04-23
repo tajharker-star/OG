@@ -11,9 +11,10 @@ export const GameCanvas: React.FC = () => {
     }
 
     return () => {
-      // Optional: Clean up on unmount if needed
-      // gameRef.current?.destroy(true);
-      // gameRef.current = null;
+      // Fully park Phaser whenever React leaves the battlefield.
+      // Otherwise hidden game loops keep running behind the lobby.
+      gameRef.current?.destroy(true);
+      gameRef.current = null;
     };
   }, []);
 

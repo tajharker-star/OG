@@ -77,6 +77,7 @@ type ServerTickHealth = {
     serverNow?: number;
     status?: 'waiting' | 'voting' | 'starting' | 'playing';
     matchState?: 'LOBBY' | 'STARTING' | 'IN_MATCH' | 'ENDED';
+    runtimeMode?: 'networked' | 'internal_singleplayer';
     loadFactor?: number;
     smoothedTickMs?: number;
     units?: number;
@@ -104,6 +105,7 @@ type LagDiagnosticDetail = {
     serverTickMs?: number | null;
     serverHeartbeatAgeMs?: number | null;
     serverGateActive?: boolean;
+    serverRuntimeMode?: string;
     serverStatus?: string;
     serverMatchState?: string;
     emittedAt: number;
@@ -451,9 +453,16 @@ export class MainScene extends Phaser.Scene {
     const serverLoadFactor = this.lastServerTickHealth?.loadFactor ?? null;
     const serverTickMs = this.lastServerTickHealth?.smoothedTickMs ?? null;
     const serverGateActive = !!this.lastServerTickHealth?.gateActive;
+    const serverRuntimeMode = this.lastServerTickHealth?.runtimeMode ?? null;
     const serverStatus = this.lastServerTickHealth?.status ?? null;
     const serverMatchState = this.lastServerTickHealth?.matchState ?? null;
     const serverHeartbeatFresh = serverHeartbeatAgeMs !== null && serverHeartbeatAgeMs <= 2200;
+    const localTransportHealthy =
+      serverRuntimeMode === 'internal_singleplayer' &&
+      serverLoadFactor !== null &&
+      serverTickMs !== null &&
+      serverLoadFactor < 0.55 &&
+      serverTickMs < 80;
     const snapshotLikelyGate = snapshotStallDetected && serverGateActive;
     const snapshotLikelyNetworkStall =
       snapshotStallDetected &&
@@ -461,6 +470,10 @@ export class MainScene extends Phaser.Scene {
       serverHeartbeatFresh &&
       serverLoadFactor !== null &&
       serverLoadFactor < 0.76;
+    const snapshotLikelyRendererStall =
+      snapshotStallDetected &&
+      !snapshotLikelyGate &&
+      localTransportHealthy;
 
     if (!frameHitchDetected && !snapshotStallDetected) {
       return;
@@ -484,6 +497,8 @@ export class MainScene extends Phaser.Scene {
     if (snapshotStallDetected) {
       if (snapshotLikelyGate) {
         reasons.push(`Match start gate is active (${snapshotAgeMs}ms without unit snapshots).`);
+      } else if (snapshotLikelyRendererStall) {
+        reasons.push(`Local renderer stalled for ${snapshotAgeMs}ms while the match engine stayed healthy.`);
       } else if (snapshotLikelyNetworkStall) {
         reasons.push(`Unit snapshot stream stalled for ${snapshotAgeMs}ms while host tick stayed healthy.`);
       } else if (serverHeartbeatAgeMs !== null && serverHeartbeatAgeMs >= CLIENT_SNAPSHOT_STALL_MS) {
@@ -521,6 +536,8 @@ export class MainScene extends Phaser.Scene {
     }
     if (snapshotLikelyGate) {
       recommendations.push('This is expected during the ready gate. Wait for all players to finish loading.');
+    } else if (snapshotLikelyRendererStall) {
+      recommendations.push('The local engine is healthy; Auto Performance is reducing render work to recover FPS.');
     } else if (snapshotLikelyNetworkStall) {
       recommendations.push('Snapshot stream stalled even though server health is good. Rejoin or restart host networking.');
     } else if (snapshotStallDetected) {
@@ -553,6 +570,7 @@ export class MainScene extends Phaser.Scene {
       serverTickMs,
       serverHeartbeatAgeMs,
       serverGateActive,
+      serverRuntimeMode: serverRuntimeMode || undefined,
       serverStatus: serverStatus || undefined,
       serverMatchState: serverMatchState || undefined,
       emittedAt: now,
@@ -2348,26 +2366,29 @@ export class MainScene extends Phaser.Scene {
     this.debugTextGroup.setDepth(2001);
 
     // Listen for Debug Data
-    socket.on('botDebugData', (data: any[]) => {
+    const handleBotDebugData = (data: any[]) => {
         this.lastDebugData = data;
-    });
+    };
+    socket.on('botDebugData', handleBotDebugData);
 
     // Listen for Building Damage (Audio Alerts)
     socket.on('buildingDamaged', this.handleBuildingDamage);
-    socket.on('economyBurst', (bursts: EconomyBurstEvent[]) => {
+    const handleEconomyBurst = (bursts: EconomyBurstEvent[]) => {
         bursts.forEach((burst) => this.spawnEconomyBurst(burst));
-    });
+    };
+    socket.on('economyBurst', handleEconomyBurst);
 
     // Toggle Debug View
-    window.addEventListener('toggle-debug-view', ((e: CustomEvent) => {
+    const handleToggleDebugView = ((e: CustomEvent) => {
         this.showDebugView = e.detail.show;
         if (!this.showDebugView) {
             this.debugGraphics.clear();
         }
-    }) as EventListener);
+    }) as EventListener;
+    window.addEventListener('toggle-debug-view', handleToggleDebugView);
 
     // Menu Mode Handler
-    window.addEventListener('game-menu-mode', ((e: CustomEvent) => {
+    const handleGameMenuMode = ((e: CustomEvent) => {
         this.setMenuMode(e.detail);
         if (e.detail) {
             // Enter Menu: Stop Ingame, Play Menu
@@ -2386,7 +2407,8 @@ export class MainScene extends Phaser.Scene {
                 this.ingameMusic.play();
             }
         }
-    }) as EventListener);
+    }) as EventListener;
+    window.addEventListener('game-menu-mode', handleGameMenuMode);
 
     const initialSkinLoadout = (window as Window & { agSkinLoadout?: SkinLoadout }).agSkinLoadout;
     if (initialSkinLoadout) {
@@ -2398,7 +2420,7 @@ export class MainScene extends Phaser.Scene {
         };
     }
 
-    window.addEventListener('ag:skin-loadout-changed', ((e: CustomEvent<SkinLoadout>) => {
+    const handleSkinLoadoutChanged = ((e: CustomEvent<SkinLoadout>) => {
         const nextLoadout = e.detail;
         if (!nextLoadout) return;
 
@@ -2421,10 +2443,11 @@ export class MainScene extends Phaser.Scene {
         if (this.currentMap) {
             this.renderMap(this.currentMap);
         }
-    }) as EventListener);
+    }) as EventListener;
+    window.addEventListener('ag:skin-loadout-changed', handleSkinLoadoutChanged);
 
     // Spectator Mode Handler
-    window.addEventListener('enable-spectator-mode', (() => {
+    const handleEnableSpectatorMode = (() => {
         this.isSpectating = true;
         this.isMenuMode = false; // Ensure we are not in menu mode (so camera works)
         
@@ -2446,10 +2469,11 @@ export class MainScene extends Phaser.Scene {
         if (this.selectionGraphics) this.selectionGraphics.clear();
 
         console.log('[MainScene] Spectator Mode Enabled');
-    }) as EventListener);
+    }) as EventListener;
+    window.addEventListener('enable-spectator-mode', handleEnableSpectatorMode);
 
     // Toggle Oil Scanner
-	    window.addEventListener('toggle-oil-scanner', ((e: CustomEvent) => {
+	    const handleToggleOilScanner = ((e: CustomEvent) => {
 	        this.showOilScanner = e.detail.show;
 	        this.rangeRingsDirty = true;
 	        this.oilScannerAccumulatorMs = this.oilScannerIntervalMs;
@@ -2464,7 +2488,8 @@ export class MainScene extends Phaser.Scene {
             // Force update immediately
             this.updateOilScanner();
         }
-    }) as EventListener);
+    }) as EventListener;
+	    window.addEventListener('toggle-oil-scanner', handleToggleOilScanner);
 
     // Initial State
     // Default to true (Menu Mode) if undefined to prevent flashing game state before App controls it
@@ -2512,22 +2537,31 @@ export class MainScene extends Phaser.Scene {
         }
     };
     settingsManager.on('change', onSettingsChange);
+    const handleCompositionStart = () => {
+        this.isComposing = true;
+    };
+    const handleCompositionEnd = () => {
+        this.isComposing = false;
+    };
     this.events.on('shutdown', () => {
         settingsManager.off('change', onSettingsChange);
+        socket.off('botDebugData', handleBotDebugData);
         socket.off('buildingDamaged', this.handleBuildingDamage);
-        socket.off('economyBurst');
-        socket.off('serverTickHealth');
+        socket.off('economyBurst', handleEconomyBurst);
+        window.removeEventListener('toggle-debug-view', handleToggleDebugView);
+        window.removeEventListener('game-menu-mode', handleGameMenuMode);
+        window.removeEventListener('ag:skin-loadout-changed', handleSkinLoadoutChanged);
+        window.removeEventListener('enable-spectator-mode', handleEnableSpectatorMode);
+        window.removeEventListener('toggle-oil-scanner', handleToggleOilScanner);
+        window.removeEventListener('compositionstart', handleCompositionStart);
+        window.removeEventListener('compositionend', handleCompositionEnd);
     });
 
     this.input.mouse!.disableContextMenu();
 
     // IME Composition Handlers (Chinese Input Optimization)
-    window.addEventListener('compositionstart', () => {
-        this.isComposing = true;
-    });
-    window.addEventListener('compositionend', () => {
-        this.isComposing = false;
-    });
+    window.addEventListener('compositionstart', handleCompositionStart);
+    window.addEventListener('compositionend', handleCompositionEnd);
 
     this.input.keyboard!.on('keydown', (event: KeyboardEvent) => {
         // Ignore game inputs if typing in an input field OR using IME (Chinese/Japanese/etc) OR Spectating
@@ -2605,9 +2639,10 @@ export class MainScene extends Phaser.Scene {
         }
     });
 
-    socket.on('connect', () => {
+    const handleSocketConnect = () => {
       console.log('Connected to server');
-    });
+    };
+    socket.on('connect', handleSocketConnect);
 
     // Cleanup when starting a new game (Fixes Ghost Units)
     const handleGameStartCleanup = () => {
@@ -2644,11 +2679,12 @@ export class MainScene extends Phaser.Scene {
     };
 
     socket.on('gameStarted', handleGameStartCleanup);
-    socket.on('joinedRoom', () => {
+    const handleJoinedRoom = () => {
         // Only clear if joining a non-lobby room or if we want to reset state
         // Usually safe to clear when switching rooms
         // handleGameStartCleanup(); // DISABLED: Causing resets on reconnect/sync
-    });
+    };
+    socket.on('joinedRoom', handleJoinedRoom);
 
     const handleServerTickHealth = (data: ServerTickHealth) => {
         this.lastServerTickHealthAt = Date.now();
@@ -2656,7 +2692,7 @@ export class MainScene extends Phaser.Scene {
     };
     socket.on('serverTickHealth', handleServerTickHealth);
 
-    socket.on('playersData', (players: Player[]) => {
+    const handlePlayersData = (players: Player[]) => {
       this.players.clear();
       players.forEach(p => this.players.set(p.id, p));
       if (this.placementMode) {
@@ -2664,9 +2700,10 @@ export class MainScene extends Phaser.Scene {
           const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
           this.updatePlacementPreview(worldPoint.x, worldPoint.y);
       }
-    });
+    };
+    socket.on('playersData', handlePlayersData);
 
-    socket.on('mapData', (mapData: GameMap) => {
+    const handleMapData = (mapData: GameMap) => {
             const mapStateSignature = this.getMapStateSignature(mapData);
             const mapVersion = mapData.version;
             if (
@@ -2756,9 +2793,10 @@ export class MainScene extends Phaser.Scene {
                     console.log('[SpawnSanity] HQ confirmed.');
                 }
             }, 5000);
-        });
+        };
+    socket.on('mapData', handleMapData);
 
-    socket.on('unitsData', (units: Unit[]) => {
+    const handleUnitsData = (units: Unit[]) => {
       this.lastUnitsSnapshotAt = Date.now();
       // Audio Logic: Compare old units vs new units
       if (!this.isMenuMode) {
@@ -2809,15 +2847,17 @@ export class MainScene extends Phaser.Scene {
       });
 
       this.renderUnits(units);
-    });
+    };
+    socket.on('unitsData', handleUnitsData);
 
-    socket.on('projectile', (data: { attackerId?: string, x1: number, y1: number, x2: number, y2: number, type: string, speed: number, radius?: number }) => {
+    const handleProjectile = (data: { attackerId?: string, x1: number, y1: number, x2: number, y2: number, type: string, speed: number, radius?: number }) => {
         this.lastProjectileBurstAt = Date.now();
         this.lastProjectileBurstSize = 1;
         this.handleProjectileEvent(data);
-    });
+    };
+    socket.on('projectile', handleProjectile);
 
-    socket.on('projectilesBatch', (projectiles: { attackerId?: string, x1: number, y1: number, x2: number, y2: number, type: string, speed: number, radius?: number }[]) => {
+    const handleProjectilesBatch = (projectiles: { attackerId?: string, x1: number, y1: number, x2: number, y2: number, type: string, speed: number, radius?: number }[]) => {
         this.lastProjectileBurstAt = Date.now();
         this.lastProjectileBurstSize = projectiles.length;
         const lightweightFx = this.useLightweightCombatFx();
@@ -2833,9 +2873,10 @@ export class MainScene extends Phaser.Scene {
         for (let index = 0; index < projectiles.length; index += stride) {
             this.handleProjectileEvent(projectiles[index]);
         }
-    });
+    };
+    socket.on('projectilesBatch', handleProjectilesBatch);
 
-    socket.on('laserBeam', (data: { attackerId: string, targetId: string, x1: number, y1: number, x2: number, y2: number, duration: number, color: number }) => {
+    const handleLaserBeam = (data: { attackerId: string, targetId: string, x1: number, y1: number, x2: number, y2: number, duration: number, color: number }) => {
         const initialAngle = Math.atan2(data.y2 - data.y1, data.x2 - data.x1);
         const initialOrigin = this.getProjectileOrigin(data.attackerId, data.x1, data.y1, initialAngle);
         this.registerAttackFacing(data.attackerId, initialOrigin.x, initialOrigin.y, data.x2, data.y2, data.duration);
@@ -3063,9 +3104,10 @@ export class MainScene extends Phaser.Scene {
                 });
             }
         });
-    });
+    };
+    socket.on('laserBeam', handleLaserBeam);
 
-    socket.on('abilityEffect', (data: { type: string, unitId: string, oilSpotIds: string[], duration: number, range?: number }) => {
+    const handleAbilityEffect = (data: { type: string, unitId: string, oilSpotIds: string[], duration: number, range?: number }) => {
         if (data.type === 'reveal_oil') {
             // Update revealed set
             data.oilSpotIds.forEach(id => this.revealedOilSpots.add(id));
@@ -3143,10 +3185,25 @@ export class MainScene extends Phaser.Scene {
                  });
             }
         }
+    };
+    socket.on('abilityEffect', handleAbilityEffect);
+
+    this.events.on('shutdown', () => {
+        socket.off('connect', handleSocketConnect);
+        socket.off('gameStarted', handleGameStartCleanup);
+        socket.off('joinedRoom', handleJoinedRoom);
+        socket.off('serverTickHealth', handleServerTickHealth);
+        socket.off('playersData', handlePlayersData);
+        socket.off('mapData', handleMapData);
+        socket.off('unitsData', handleUnitsData);
+        socket.off('projectile', handleProjectile);
+        socket.off('projectilesBatch', handleProjectilesBatch);
+        socket.off('laserBeam', handleLaserBeam);
+        socket.off('abilityEffect', handleAbilityEffect);
     });
 
     // Placement Event
-    window.addEventListener('enter-placement-mode', (e: any) => {
+    const handleEnterPlacementMode = (e: any) => {
         this.clearPlacementMode();
         this.placementMode = true;
         this.placementType = e.detail.type;
@@ -3171,10 +3228,11 @@ export class MainScene extends Phaser.Scene {
         const pointer = this.input.activePointer;
         const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
         this.updatePlacementPreview(worldPoint.x, worldPoint.y);
-    });
+    };
+    window.addEventListener('enter-placement-mode', handleEnterPlacementMode);
 
     // Ferry Events
-    window.addEventListener('load-nearby', (e: any) => {
+    const handleLoadNearby = (e: any) => {
         const ferryId = e.detail.ferryId;
         const ferry = this.currentUnits.find(u => u.id === ferryId);
         if (ferry) {
@@ -3189,9 +3247,10 @@ export class MainScene extends Phaser.Scene {
                  socket.emit('load', { ferryId, unitIds });
              }
         }
-    });
+    };
+    window.addEventListener('load-nearby', handleLoadNearby);
 
-    window.addEventListener('enter-unload-mode', (e: any) => {
+    const handleEnterUnloadMode = (e: any) => {
         const ferryId = e.detail.ferryId;
         this.targetSelectionMode = true;
         this.targetSelectionCallback = (x, y) => {
@@ -3199,9 +3258,10 @@ export class MainScene extends Phaser.Scene {
         };
         // Visual cursor change?
         this.input.setDefaultCursor('crosshair');
-    });
+    };
+    window.addEventListener('enter-unload-mode', handleEnterUnloadMode);
 
-    window.addEventListener('request-deselect', (e: any) => {
+    const handleRequestDeselect = (e: any) => {
         const { type, id } = e.detail;
         if (type === 'unit') {
             if (this.selectedUnitIds.has(id)) {
@@ -3228,6 +3288,14 @@ export class MainScene extends Phaser.Scene {
                 }));
             }
         }
+    };
+    window.addEventListener('request-deselect', handleRequestDeselect);
+
+    this.events.on('shutdown', () => {
+        window.removeEventListener('enter-placement-mode', handleEnterPlacementMode);
+        window.removeEventListener('load-nearby', handleLoadNearby);
+        window.removeEventListener('enter-unload-mode', handleEnterUnloadMode);
+        window.removeEventListener('request-deselect', handleRequestDeselect);
     });
 
     this.input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
